@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestNormalizeDeviceLoginPurpose(t *testing.T) {
@@ -78,5 +80,60 @@ func TestValidateDeviceLoginDecisionTerminalStates(t *testing.T) {
 		if err := validateDeviceLoginDecision(record); !errors.Is(err, tt.want) {
 			t.Fatalf("status %q error = %v, want %v", tt.status, err, tt.want)
 		}
+	}
+}
+
+func TestDeviceLoginPollRecordsLocalSessionProvenance(t *testing.T) {
+	// Given
+	ctx, pool := newPluginProviderDBTest(t)
+	userID := insertPluginProviderTestUser(t, ctx, pool, "device-session-provider")
+	sessions := NewSessionRepository(pool)
+	service := NewDeviceLoginService(
+		pool,
+		NewUserRepository(pool),
+		NewJWTService("device-session-provider-test", time.Minute, time.Hour),
+		sessions,
+		nil,
+		nil,
+	)
+	deviceCode := uuid.NewString()
+	browserCode := uuid.NewString()
+	record := deviceLoginRecord{
+		ID:              uuid.NewString(),
+		DeviceCodeHash:  hashDeviceLoginSecret(deviceCode),
+		BrowserCodeHash: hashDeviceLoginSecret(browserCode),
+		UserCodeHash:    hashDeviceLoginSecret(uuid.NewString()),
+		MatchCode:       "match-code",
+		DeviceName:      "Device session provider test",
+		IPAddress:       "127.0.0.1",
+		Status:          DeviceLoginStatusPending,
+		ClientPurpose:   DeviceLoginPurposeLogin,
+		ExpiresAt:       time.Now().Add(time.Minute),
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+	if err := service.create(ctx, record); err != nil {
+		t.Fatalf("create device login request: %v", err)
+	}
+	if err := service.Approve(ctx, DeviceLoginLookupInput{BrowserCode: browserCode}, userID); err != nil {
+		t.Fatalf("approve device login: %v", err)
+	}
+
+	// When
+	result, err := service.Poll(ctx, deviceCode)
+
+	// Then
+	if err != nil {
+		t.Fatalf("Poll() error = %v", err)
+	}
+	if result.TokenPair == nil {
+		t.Fatal("Poll() returned no token pair")
+	}
+	var providerKey *string
+	if err := pool.QueryRow(ctx, `SELECT provider_key FROM auth_sessions WHERE id = (SELECT auth_session_id FROM device_login_requests WHERE id = $1)`, record.ID).Scan(&providerKey); err != nil {
+		t.Fatalf("load created auth session provenance: %v", err)
+	}
+	if providerKey == nil || *providerKey != "local" {
+		t.Fatalf("device login session provider key = %v, want local", providerKey)
 	}
 }

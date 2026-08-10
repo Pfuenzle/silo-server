@@ -46,11 +46,21 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
       {
         id: "general",
         label: "General",
-        description: "Authentication, token lifetimes, and server logging.",
-        keywords: ["access token", "refresh token", "expiry", "log level", "quiet subsystems"],
+        description: "Authentication, token lifetimes, credential fallback, and server logging.",
+        keywords: [
+          "access token",
+          "refresh token",
+          "expiry",
+          "credential provider",
+          "ldap",
+          "local account",
+          "log level",
+          "quiet subsystems",
+        ],
         settings: settingIndex(
           "Access Token Expiry",
           "Refresh Token Expiry",
+          "Credential provider fallback order",
           "Log Level",
           "Quiet Subsystems",
         ),

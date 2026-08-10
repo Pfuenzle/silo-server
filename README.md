@@ -118,6 +118,8 @@ helper and cutover guide in [docs/continuum-to-silo-docker-migration.md](docs/co
 
 Silo requires only a `DATABASE_URL` when running from source or against external infrastructure. In the default Docker Compose path, the stack wires the database and Redis URLs for you. All other settings — libraries, metadata providers, transcoding, users — are managed through the admin UI after first launch.
 
+For OIDC or LDAP login, follow the [external authentication operator and security guide](docs/external-auth.md). It covers the local break-glass prerequisite, provider setup, restart boundary, authorization mappings, rollback, and recovery.
+
 ### Server Modes
 
 | Mode | Description |

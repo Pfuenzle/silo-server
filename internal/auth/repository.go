@@ -20,6 +20,35 @@ var (
 	ErrDuplicate = errors.New("duplicate user")
 )
 
+type DuplicateUserError struct{ Constraint string }
+
+func (e *DuplicateUserError) Error() string        { return "duplicate user: " + e.Constraint }
+func (e *DuplicateUserError) Is(target error) bool { return target == ErrDuplicate }
+
+func IsDuplicateEmail(err error) bool {
+	var duplicate *DuplicateUserError
+	return errors.As(err, &duplicate) && duplicate.Kind() == DuplicateUserEmail
+}
+
+type DuplicateUserKind string
+
+const (
+	DuplicateUserUnknown  DuplicateUserKind = "unknown"
+	DuplicateUserEmail    DuplicateUserKind = "email"
+	DuplicateUserUsername DuplicateUserKind = "username"
+)
+
+func (e *DuplicateUserError) Kind() DuplicateUserKind {
+	switch e.Constraint {
+	case "users_email_key":
+		return DuplicateUserEmail
+	case "users_username_key":
+		return DuplicateUserUsername
+	default:
+		return DuplicateUserUnknown
+	}
+}
+
 // IsNotFound returns true if the error is a "not found" error.
 func IsNotFound(err error) bool {
 	return errors.Is(err, ErrNotFound)
@@ -220,7 +249,7 @@ func (r *UserRepository) Create(ctx context.Context, input models.CreateUserInpu
 	user, err := scanUser(row)
 	if err != nil {
 		if isDuplicateKeyError(err) {
-			return nil, fmt.Errorf("%w: %s", ErrDuplicate, extractConstraint(err))
+			return nil, &DuplicateUserError{Constraint: extractConstraint(err)}
 		}
 		return nil, fmt.Errorf("creating user: %w", err)
 	}
@@ -378,7 +407,7 @@ func (r *UserRepository) Update(ctx context.Context, id int, input models.Update
 	tag, err := r.pool.Exec(ctx, query, args...)
 	if err != nil {
 		if isDuplicateKeyError(err) {
-			return fmt.Errorf("%w: %s", ErrDuplicate, extractConstraint(err))
+			return &DuplicateUserError{Constraint: extractConstraint(err)}
 		}
 		return fmt.Errorf("updating user: %w", err)
 	}

@@ -4,6 +4,7 @@ import { SettingField } from "./SettingField";
 import { SaveBar } from "./SaveBar";
 import { FieldGroup } from "./FieldGroup";
 import { Skeleton } from "@/components/ui/skeleton";
+import CredentialProviderFallbackSettings from "./CredentialProviderFallbackSettings";
 
 const KEYS = [
   "auth.access_token_expiry",
@@ -59,6 +60,8 @@ export default function GeneralSettings() {
             onChange={(v) => form.setValue("auth.refresh_token_expiry", v)}
           />
         </FieldGroup>
+
+        <CredentialProviderFallbackSettings />
 
         <FieldGroup label="Logging">
           <SettingField

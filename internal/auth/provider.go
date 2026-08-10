@@ -12,8 +12,13 @@ import (
 
 // Sentinel errors for authentication operations.
 var (
-	ErrInvalidCredentials = errors.New("invalid credentials")
-	ErrUserDisabled       = errors.New("user account is disabled")
+	ErrInvalidCredentials  = errors.New("invalid credentials")
+	ErrAccountNotFound     = errors.New("account not found in provider")
+	ErrUserDisabled        = errors.New("user account is disabled")
+	ErrProviderUnavailable = errors.New("auth provider is unavailable")
+	ErrPluginConfigInvalid = errors.New("plugin configuration is invalid")
+	ErrAuditStorageError   = errors.New("audit storage write failed")
+	ErrSessionError        = errors.New("session operation failed")
 )
 
 // Credentials holds the username and password for authentication.
@@ -79,7 +84,7 @@ func (p *LocalProvider) Authenticate(ctx context.Context, creds Credentials) (*m
 	}
 	if err != nil {
 		if IsNotFound(err) {
-			return nil, ErrInvalidCredentials
+			return nil, ErrAccountNotFound
 		}
 		return nil, fmt.Errorf("looking up user: %w", err)
 	}

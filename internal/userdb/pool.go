@@ -2,12 +2,16 @@ package userdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 )
+
+var ErrUserDBDeleting = errors.New("user database cleanup in progress")
 
 const (
 	defaultMaxOpen     = 500
@@ -28,10 +32,11 @@ type PoolConfig struct {
 // Connections are cached and reused for the same userID. Active playback
 // connections can be pinned so they are never evicted.
 type UserDBPool struct {
-	config PoolConfig
-	mu     sync.Mutex
-	dbs    map[int]*poolEntry // userID -> entry
-	pinned map[int]bool       // userID -> true if pinned (active playback)
+	config   PoolConfig
+	mu       sync.Mutex
+	dbs      map[int]*poolEntry // userID -> entry
+	pinned   map[int]bool       // userID -> true if pinned (active playback)
+	deleting map[int]struct{}
 }
 
 type poolEntry struct {
@@ -60,9 +65,10 @@ func NewUserDBPool(config PoolConfig) *UserDBPool {
 		config.IdleTimeout = defaultIdleTimeout
 	}
 	return &UserDBPool{
-		config: config,
-		dbs:    make(map[int]*poolEntry),
-		pinned: make(map[int]bool),
+		config:   config,
+		dbs:      make(map[int]*poolEntry),
+		pinned:   make(map[int]bool),
+		deleting: make(map[int]struct{}),
 	}
 }
 
@@ -77,6 +83,9 @@ func (p *UserDBPool) Get(ctx context.Context, userID int) (*UserDB, error) {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if _, deleting := p.deleting[userID]; deleting {
+		return nil, ErrUserDBDeleting
+	}
 
 	// Return cached entry and refresh its access time.
 	if entry, ok := p.dbs[userID]; ok {
@@ -138,6 +147,56 @@ func (p *UserDBPool) Close() error {
 		delete(p.pinned, uid)
 	}
 	return firstErr
+}
+
+func (p *UserDBPool) Delete(ctx context.Context, userID int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	if p.pinned[userID] {
+		p.mu.Unlock()
+		return fmt.Errorf("userdb pool: user %d is pinned", userID)
+	}
+	path := filepath.Join(p.config.DataDir, fmt.Sprintf("%d.db", userID))
+	if entry, ok := p.dbs[userID]; ok {
+		delete(p.dbs, userID)
+		p.deleting[userID] = struct{}{}
+		p.mu.Unlock()
+		result := make(chan error, 1)
+		go p.closeAndDelete(userID, entry.db, path, result)
+		select {
+		case err := <-result:
+			return err
+		case <-ctx.Done():
+			return fmt.Errorf("close user db %d: %w", userID, ctx.Err())
+		}
+	}
+	p.mu.Unlock()
+	return removeUserDBFiles(path)
+}
+
+func (p *UserDBPool) closeAndDelete(userID int, userDB *UserDB, path string, result chan<- error) {
+	err := userDB.Close()
+	if err == nil {
+		err = removeUserDBFiles(path)
+	} else {
+		err = fmt.Errorf("close db for user %d: %w", userID, err)
+	}
+	p.mu.Lock()
+	delete(p.deleting, userID)
+	p.mu.Unlock()
+	result <- err
+}
+
+func removeUserDBFiles(path string) error {
+	var errs []error
+	for _, candidate := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Remove(candidate); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove user db %s: %w", candidate, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // tierFor returns the eviction tier of a pool entry.

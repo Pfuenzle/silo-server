@@ -42,10 +42,18 @@ func (s stubStoreProvider) Close() error { return nil }
 type stubUserStore struct {
 	userstore.UserStore
 	createProfileFn func(context.Context, userstore.Profile) error
+	listProfilesFn  func(context.Context) ([]userstore.Profile, error)
 }
 
 func (s stubUserStore) CreateProfile(ctx context.Context, p userstore.Profile) error {
 	return s.createProfileFn(ctx, p)
+}
+
+func (s stubUserStore) ListProfiles(ctx context.Context) ([]userstore.Profile, error) {
+	if s.listProfilesFn == nil {
+		return nil, nil
+	}
+	return s.listProfilesFn(ctx)
 }
 
 func TestAccountProvisionerCreateAccount_SkipsProfileByDefault(t *testing.T) {
@@ -207,5 +215,77 @@ func TestAccountProvisionerCreateAccount_DeletesUserWhenProfileCreationFails(t *
 	}
 	if deletedUserID != 9 {
 		t.Fatalf("deletedUserID = %d, want 9", deletedUserID)
+	}
+}
+
+func TestAccountProvisionerCreateAccount_JoinsProfileAndCleanupFailures(t *testing.T) {
+	// Given
+	profileErr := errors.New("profile storage unavailable")
+	cleanupErr := errors.New("delete provisioned user")
+	provisioner := NewAccountProvisioner(
+		stubAccountUsers{
+			createFn: func(context.Context, models.CreateUserInput) (*models.User, error) {
+				return &models.User{ID: 10, Username: "alex"}, nil
+			},
+			deleteFn: func(context.Context, int) error { return cleanupErr },
+		},
+		stubStoreProvider{store: stubUserStore{
+			createProfileFn: func(context.Context, userstore.Profile) error { return profileErr },
+		}},
+	)
+
+	// When
+	_, err := provisioner.CreateAccount(context.Background(), CreateAccountInput{
+		User:           models.CreateUserInput{Username: "alex"},
+		DefaultProfile: DefaultProfileOptions{Enabled: true},
+	})
+
+	// Then
+	if !errors.Is(err, profileErr) {
+		t.Fatalf("CreateAccount() error = %v, want profile cause", err)
+	}
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("CreateAccount() error = %v, want cleanup cause", err)
+	}
+}
+
+func TestAccountProvisionerCreateAccount_CleansUpAfterRequestCancellation(t *testing.T) {
+	// Given
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cleanupRan := false
+	provisioner := NewAccountProvisioner(
+		stubAccountUsers{
+			createFn: func(context.Context, models.CreateUserInput) (*models.User, error) {
+				return &models.User{ID: 11, Username: "alex"}, nil
+			},
+			deleteFn: func(ctx context.Context, _ int) error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				cleanupRan = true
+				return nil
+			},
+		},
+		stubStoreProvider{store: stubUserStore{
+			createProfileFn: func(context.Context, userstore.Profile) error {
+				cancel()
+				return context.Canceled
+			},
+		}},
+	)
+
+	// When
+	_, err := provisioner.CreateAccount(ctx, CreateAccountInput{
+		User:           models.CreateUserInput{Username: "alex"},
+		DefaultProfile: DefaultProfileOptions{Enabled: true},
+	})
+
+	// Then
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CreateAccount() error = %v, want context.Canceled", err)
+	}
+	if !cleanupRan {
+		t.Fatal("CreateAccount() did not run detached cleanup after cancellation")
 	}
 }

@@ -499,12 +499,14 @@ func (s *DeviceLoginService) Poll(ctx context.Context, deviceCode string) (*Devi
 			sessionExpiresAt = remoteExpiry
 		}
 	}
+	providerKey := models.LocalSessionProviderKey()
 	session := models.AuthSession{
-		ID:         sessionID,
-		UserID:     user.ID,
-		DeviceName: record.DeviceName,
-		IPAddress:  record.IPAddress,
-		ExpiresAt:  sessionExpiresAt,
+		ID:          sessionID,
+		UserID:      user.ID,
+		DeviceName:  record.DeviceName,
+		IPAddress:   record.IPAddress,
+		ExpiresAt:   sessionExpiresAt,
+		ProviderKey: &providerKey,
 	}
 	if err := s.sessions.createWithQuerier(ctx, tx, session); err != nil {
 		return nil, err

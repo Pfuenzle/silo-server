@@ -19,6 +19,7 @@ import (
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/metadata"
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/pluginhost"
 	"github.com/Silo-Server/silo-server/internal/plugins"
 	"github.com/Silo-Server/silo-server/internal/uploads"
@@ -97,14 +98,17 @@ type pluginConfigRequest struct {
 	Key          string         `json:"key"`
 	Value        map[string]any `json:"value"`
 	ClearSecrets []string       `json:"clear_secrets,omitempty"`
+	ClearFields  []string       `json:"clear_fields,omitempty"`
 }
 
 type pluginAuthBindingRequest struct {
-	CapabilityID  string `json:"capability_id"`
-	Enabled       bool   `json:"enabled"`
-	DisplayOrder  int    `json:"display_order"`
-	AutoProvision bool   `json:"auto_provision"`
-	DefaultLogin  bool   `json:"default_login"`
+	CapabilityID      string  `json:"capability_id"`
+	Enabled           bool    `json:"enabled"`
+	DisplayOrder      int     `json:"display_order"`
+	AutoProvision     bool    `json:"auto_provision"`
+	DefaultLogin      bool    `json:"default_login"`
+	AuthorizationMode string  `json:"authorization_mode"`
+	TrustedLinkMode   *string `json:"trusted_link_mode,omitempty"`
 }
 
 type pluginTaskBindingRequest struct {
@@ -299,13 +303,15 @@ type pluginConfigValueJSON struct {
 }
 
 type pluginAuthBindingJSON struct {
-	CapabilityID  string    `json:"capability_id"`
-	Enabled       bool      `json:"enabled"`
-	DisplayOrder  int       `json:"display_order"`
-	AutoProvision bool      `json:"auto_provision"`
-	DefaultLogin  bool      `json:"default_login"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	CapabilityID      string    `json:"capability_id"`
+	Enabled           bool      `json:"enabled"`
+	DisplayOrder      int       `json:"display_order"`
+	AutoProvision     bool      `json:"auto_provision"`
+	DefaultLogin      bool      `json:"default_login"`
+	AuthorizationMode string    `json:"authorization_mode"`
+	TrustedLinkMode   string    `json:"trusted_link_mode"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type pluginTaskBindingJSON struct {
@@ -892,14 +898,6 @@ func (h *PluginHandler) HandleUpdateInstallation(w http.ResponseWriter, r *http.
 		return
 	}
 
-	if req.Enabled != nil && !*req.Enabled && currentInstallation.Enabled && h.service != nil {
-		if err := h.service.Stop(id); err != nil && !errors.Is(err, pluginhost.ErrClientNotFound) {
-			slog.ErrorContext(r.Context(), "stopping plugin before disable", "component", "api", "installation_id", id, "error", err)
-			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to disable plugin installation")
-			return
-		}
-	}
-
 	if err := h.installations.Update(r.Context(), id, plugins.UpdateInstallationInput{
 		Enabled:      req.Enabled,
 		UpdatePolicy: req.UpdatePolicy,
@@ -911,6 +909,11 @@ func (h *PluginHandler) HandleUpdateInstallation(w http.ResponseWriter, r *http.
 		slog.ErrorContext(r.Context(), "updating plugin installation", "component", "api", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update plugin installation")
 		return
+	}
+	if req.Enabled != nil && !*req.Enabled && currentInstallation.Enabled && h.service != nil {
+		if err := h.service.Stop(id); err != nil && !errors.Is(err, pluginhost.ErrClientNotFound) {
+			slog.ErrorContext(r.Context(), "stopping disabled plugin", "component", "api", "installation_id", id, "error", err)
+		}
 	}
 
 	// Rebuild the event dispatcher's capability-subscriber index whenever the
@@ -990,8 +993,8 @@ func (h *PluginHandler) HandlePutInstallationConfig(w http.ResponseWriter, r *ht
 		return
 	}
 
-	if err := h.service.SetGlobalConfigWithClears(
-		r.Context(), id, req.Key, req.Value, req.ClearSecrets,
+	if err := h.service.SetGlobalConfigWithFieldClears(
+		r.Context(), id, req.Key, req.Value, req.ClearSecrets, req.ClearFields,
 	); err != nil {
 		var validationErr *plugins.ConfigValidationError
 		switch {
@@ -1033,8 +1036,8 @@ func (h *PluginHandler) HandleTestInstallationConfig(w http.ResponseWriter, r *h
 		return
 	}
 
-	if err := h.service.TestGlobalConfigWithClears(
-		r.Context(), id, req.Key, req.Value, req.ClearSecrets,
+	if err := h.service.TestGlobalConfigWithFieldClears(
+		r.Context(), id, req.Key, req.Value, req.ClearSecrets, req.ClearFields,
 	); err != nil {
 		if errors.Is(err, plugins.ErrInstallationNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "Plugin installation not found")
@@ -1081,17 +1084,48 @@ func (h *PluginHandler) HandlePutAuthBinding(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "bad_request", "capability_id is required")
 		return
 	}
+	if _, err := models.NewPluginSessionProviderKey(id, req.CapabilityID); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid capability ID")
+		return
+	}
+	trustedLinkMode := plugins.AuthBindingTrustedLinkModeDisabled
+	if req.TrustedLinkMode != nil {
+		trustedLinkMode = plugins.AuthBindingTrustedLinkMode(*req.TrustedLinkMode)
+	} else {
+		existing, getErr := h.configs.GetAuthBinding(r.Context(), id, req.CapabilityID)
+		if getErr == nil && existing != nil {
+			trustedLinkMode = existing.TrustedLinkMode
+		}
+	}
+	binding := plugins.AuthBinding{
+		InstallationID:    id,
+		CapabilityID:      req.CapabilityID,
+		Enabled:           req.Enabled,
+		DisplayOrder:      req.DisplayOrder,
+		AutoProvision:     req.AutoProvision,
+		DefaultLogin:      req.DefaultLogin,
+		AuthorizationMode: plugins.AuthBindingAuthorizationMode(req.AuthorizationMode),
+		TrustedLinkMode:   trustedLinkMode,
+	}
+	if !binding.HasSupportedAuthorizationMode() {
+		writeError(w, http.StatusBadRequest, "bad_request", "Unsupported authorization mode")
+		return
+	}
 
-	if err := h.configs.UpsertAuthBinding(r.Context(), plugins.AuthBinding{
-		InstallationID: id,
-		CapabilityID:   req.CapabilityID,
-		Enabled:        req.Enabled,
-		DisplayOrder:   req.DisplayOrder,
-		AutoProvision:  req.AutoProvision,
-		DefaultLogin:   req.DefaultLogin,
-	}); err != nil {
-		slog.ErrorContext(r.Context(), "saving plugin auth binding", "component", "api", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to save auth binding")
+	if err := h.configs.UpsertAuthBinding(r.Context(), apimw.GetUserID(r.Context()), binding); err != nil {
+		switch {
+		case errors.Is(err, plugins.ErrAuthBindingNoActor):
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required for policy change")
+		case errors.Is(err, plugins.ErrAuthBindingTrustedLinkModeInvalid):
+			writeError(w, http.StatusBadRequest, "bad_request", "Unsupported trusted link mode")
+		case errors.Is(err, plugins.ErrAuthBindingDefaultLoginNotEnabled):
+			writeError(w, http.StatusBadRequest, "bad_request", "Default login requires the binding to be enabled")
+		case errors.Is(err, plugins.ErrAuthBindingDefaultLoginConflict):
+			writeError(w, http.StatusConflict, "default_login_conflict", "Another binding already claims default login")
+		default:
+			slog.ErrorContext(r.Context(), "saving plugin auth binding", "component", "api", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to save auth binding")
+		}
 		return
 	}
 
@@ -1196,6 +1230,19 @@ func (h *PluginHandler) HandleDeleteInstallation(w http.ResponseWriter, r *http.
 		}
 		if errors.Is(err, plugins.ErrBuiltinInstallationImmutable) {
 			writeError(w, http.StatusConflict, "builtin_installation", "Built-in host providers cannot be uninstalled")
+			return
+		}
+		var dependencyConflict *plugins.InstallationDependencyConflictError
+		if errors.As(err, &dependencyConflict) {
+			writeJSON(w, http.StatusConflict, struct {
+				Error        string                                       `json:"error"`
+				Message      string                                       `json:"message"`
+				Dependencies *plugins.InstallationDependencyConflictError `json:"dependencies"`
+			}{
+				Error:        "installation_has_dependencies",
+				Message:      "Plugin installation has dependent authentication data",
+				Dependencies: dependencyConflict,
+			})
 			return
 		}
 		slog.ErrorContext(r.Context(), "deleting plugin installation", "component", "api", "error", err)
@@ -1788,13 +1835,15 @@ func authBindingsForInstallation(installationID int, bindings []*plugins.AuthBin
 			continue
 		}
 		response = append(response, pluginAuthBindingJSON{
-			CapabilityID:  binding.CapabilityID,
-			Enabled:       binding.Enabled,
-			DisplayOrder:  binding.DisplayOrder,
-			AutoProvision: binding.AutoProvision,
-			DefaultLogin:  binding.DefaultLogin,
-			CreatedAt:     binding.CreatedAt,
-			UpdatedAt:     binding.UpdatedAt,
+			CapabilityID:      binding.CapabilityID,
+			Enabled:           binding.Enabled,
+			DisplayOrder:      binding.DisplayOrder,
+			AutoProvision:     binding.AutoProvision,
+			DefaultLogin:      binding.DefaultLogin,
+			AuthorizationMode: string(binding.EffectiveAuthorizationMode()),
+			TrustedLinkMode:   string(binding.EffectiveTrustedLinkMode()),
+			CreatedAt:         binding.CreatedAt,
+			UpdatedAt:         binding.UpdatedAt,
 		})
 	}
 	return response

@@ -2,12 +2,8 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,7 +14,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -88,9 +83,11 @@ var ErrMissingInstallID = errors.New("install_id required")
 
 // HandleInit serves POST /api/v1/auth/oauth/{install_id}/init.
 func (h *OAuthHandler) HandleInit(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	installID, err := strconv.Atoi(chi.URLParam(r, "install_id"))
 	if err != nil || installID <= 0 {
-		http.Error(w, "invalid install_id", http.StatusBadRequest)
+		setCorrelationIDHeader(w, r)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
@@ -98,13 +95,17 @@ func (h *OAuthHandler) HandleInit(w http.ResponseWriter, r *http.Request) {
 
 	client, _, err := h.deps.ResolveClient(r.Context(), installID)
 	if err != nil {
-		http.Error(w, "auth plugin unavailable", http.StatusBadGateway)
+		logOAuthFailure(r.Context(), installID, AuthReasonPluginUnavailable, http.StatusBadGateway, start)
+		setCorrelationIDHeader(w, r)
+		http.Error(w, "service unavailable", http.StatusBadGateway)
 		return
 	}
 
 	nonce, err := randomHex(16)
 	if err != nil {
-		http.Error(w, "rand failure", http.StatusInternalServerError)
+		logOAuthFailure(r.Context(), installID, AuthReasonInternalError, http.StatusInternalServerError, start)
+		setCorrelationIDHeader(w, r)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
@@ -119,15 +120,17 @@ func (h *OAuthHandler) HandleInit(w http.ResponseWriter, r *http.Request) {
 	resp, err := client.InitAuthorize(r.Context(), &pluginv1.InitAuthorizeRequest{
 		RedirectUri: redirectURI,
 		State:       state,
-		// Linking is wired in a follow-up — see TODO below.
 	})
 	if err != nil {
-		slog.WarnContext(r.Context(), "oauth init_authorize failed", "component", "auth", "installation_id", installID, "error", err)
-		http.Error(w, "plugin init_authorize failed", http.StatusBadGateway)
+		logOAuthFailure(r.Context(), installID, AuthReasonPluginUnavailable, http.StatusBadGateway, start)
+		setCorrelationIDHeader(w, r)
+		http.Error(w, "service unavailable", http.StatusBadGateway)
 		return
 	}
 	if resp.GetAuthorizeUrl() == "" {
-		http.Error(w, "plugin returned empty authorize_url", http.StatusBadGateway)
+		logOAuthFailure(r.Context(), installID, AuthReasonInternalError, http.StatusBadGateway, start)
+		setCorrelationIDHeader(w, r)
+		http.Error(w, "service unavailable", http.StatusBadGateway)
 		return
 	}
 
@@ -139,57 +142,116 @@ func (h *OAuthHandler) HandleInit(w http.ResponseWriter, r *http.Request) {
 		ProviderState: psBytes,
 		NextURL:       next,
 		ExpiresAt:     now.Add(h.deps.StateTTL),
-		// TODO: when linking flow lands, read user_id from existing session
-		// and set LinkingUserID here.
 	}
 	if err := h.deps.Store.Insert(r.Context(), sess); err != nil {
-		slog.WarnContext(r.Context(), "oauth session insert failed", "component", "auth", "installation_id", installID, "error", err)
-		http.Error(w, "store insert failed", http.StatusInternalServerError)
+		logOAuthFailure(r.Context(), installID, AuthReasonStateStoreUnavailable, http.StatusInternalServerError, start)
+		setCorrelationIDHeader(w, r)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 
+	setOAuthBrowserBinding(w, h.deps.HostBaseURL, installID, nonce, h.deps.StateTTL)
 	http.Redirect(w, r, resp.GetAuthorizeUrl(), http.StatusFound)
 }
 
 // HandleCallback serves GET /api/v1/auth/oauth/{install_id}/callback.
 func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
+	// Single diagnostic boundary: collected at failure sites, emitted once on return.
+	var (
+		diagInstallID int
+		diagReason    AuthFailureReason
+		diagPending   bool
+	)
+	defer func() {
+		if diagPending {
+			logOAuthFailure(r.Context(), diagInstallID, diagReason, StatusForReason(diagReason), start)
+		}
+	}()
+
 	installID, err := strconv.Atoi(chi.URLParam(r, "install_id"))
 	if err != nil || installID <= 0 {
+		setCorrelationIDHeader(w, r)
 		http.Error(w, "invalid install_id", http.StatusBadRequest)
 		return
 	}
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
 	if state == "" || code == "" {
+		setCorrelationIDHeader(w, r)
 		http.Error(w, "missing code or state", http.StatusBadRequest)
 		return
 	}
 
 	payload, err := VerifyState(h.deps.StateSecret, state)
 	if err != nil {
-		http.Redirect(w, r, "/login?error=oauth_failed&reason=state_invalid", http.StatusFound)
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, "")
 		return
 	}
 	if payload.InstallID != strconv.Itoa(installID) {
-		http.Redirect(w, r, "/login?error=oauth_failed&reason=install_mismatch", http.StatusFound)
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, "")
+		return
+	}
+	boundToBrowser := hasOAuthBrowserBinding(r, payload.Nonce)
+	clearOAuthBrowserBinding(w, h.deps.HostBaseURL, installID, payload.Nonce)
+	if !boundToBrowser {
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, "")
+		return
+	}
+	preflight, err := h.deps.Store.Get(r.Context(), state)
+	if err != nil {
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, "")
+		return
+	}
+	if preflight.LinkingUserID != "" && preflight.LinkingUserID != "0" {
+		diagInstallID = installID
+		diagReason = AuthReasonLinkingUnsupported
+		diagPending = true
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, preflight.NextURL)
 		return
 	}
 
 	sess, err := h.deps.Store.GetAndDelete(r.Context(), state)
 	if err != nil {
-		http.Redirect(w, r, "/login?error=oauth_failed&reason=session_expired", http.StatusFound)
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, preflight.NextURL)
 		return
 	}
 
 	client, capabilityID, err := h.deps.ResolveClient(r.Context(), installID)
 	if err != nil {
-		http.Redirect(w, r, "/login?error=oauth_failed&reason=plugin_unavailable", http.StatusFound)
+		diagInstallID = installID
+		diagReason = AuthReasonPluginUnavailable
+		diagPending = true
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, sess.NextURL)
 		return
 	}
 
 	var ps map[string]any
-	_ = json.Unmarshal(sess.ProviderState, &ps)
-	psStruct, _ := structpb.NewStruct(ps)
+	if err := json.Unmarshal(sess.ProviderState, &ps); err != nil {
+		diagInstallID = installID
+		diagReason = AuthReasonInternalError
+		diagPending = true
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, sess.NextURL)
+		return
+	}
+	psStruct, err := structpb.NewStruct(ps)
+	if err != nil {
+		diagInstallID = installID
+		diagReason = AuthReasonInternalError
+		diagPending = true
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, sess.NextURL)
+		return
+	}
 
 	resp, err := client.ExchangeCode(r.Context(), &pluginv1.ExchangeCodeRequest{
 		Code:          code,
@@ -198,12 +260,19 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		ProviderState: psStruct,
 	})
 	if err != nil {
-		slog.WarnContext(r.Context(), "oauth exchange_code failed", "component", "auth", "installation_id", installID, "error", err)
-		http.Redirect(w, r, "/login?error=oauth_failed&reason=exchange_failed", http.StatusFound)
+		diagInstallID = installID
+		diagReason = AuthReasonExchangeFailed
+		diagPending = true
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, sess.NextURL)
 		return
 	}
 	if resp.GetExternalSubject() == "" {
-		http.Redirect(w, r, "/login?error=oauth_failed&reason=empty_subject", http.StatusFound)
+		diagInstallID = installID
+		diagReason = AuthReasonInternalError
+		diagPending = true
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, sess.NextURL)
 		return
 	}
 
@@ -223,105 +292,52 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		IP:             clientIP(r),
 	})
 	if err != nil {
-		slog.WarnContext(r.Context(), "oauth login completion failed", "component", "auth", "installation_id", installID, "error", err)
-		http.Redirect(w, r, "/login?error=oauth_failed&reason=login_failed", http.StatusFound)
+		diagInstallID = installID
+		diagReason = ClassifyOAuthFailure(err, "login_completion")
+		diagPending = true
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, sess.NextURL)
 		return
 	}
 
 	if h.deps.CompletionStore == nil {
-		slog.WarnContext(r.Context(), "oauth completion store is unavailable", "component", "auth", "installation_id", installID)
-		http.Redirect(w, r, "/login?error=oauth_failed&reason=completion_unavailable", http.StatusFound)
+		diagInstallID = installID
+		diagReason = AuthReasonCompletionUnavailable
+		diagPending = true
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, sess.NextURL)
 		return
 	}
 	completionCode, err := randomHex(32)
 	if err != nil {
-		slog.WarnContext(r.Context(), "oauth completion code generation failed", "component", "auth", "installation_id", installID, "error", err)
-		http.Redirect(w, r, "/login?error=oauth_failed&reason=completion_failed", http.StatusFound)
+		diagInstallID = installID
+		diagReason = AuthReasonInternalError
+		diagPending = true
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, sess.NextURL)
 		return
 	}
+	next := normalizeOAuthNext(sess.NextURL)
 	now := time.Now().UTC()
 	if err := h.deps.CompletionStore.InsertCompletion(r.Context(), OAuthCompletion{
 		Code:         completionCode,
 		AccessToken:  pair.AccessToken,
 		RefreshToken: pair.RefreshToken,
 		ExpiresIn:    pair.ExpiresIn,
-		NextURL:      sess.NextURL,
+		NextURL:      next,
 		ExpiresAt:    now.Add(time.Minute),
 	}); err != nil {
-		slog.WarnContext(r.Context(), "oauth completion insert failed", "component", "auth", "installation_id", installID, "error", err)
-		http.Redirect(w, r, "/login?error=oauth_failed&reason=completion_failed", http.StatusFound)
+		diagInstallID = installID
+		diagReason = AuthReasonInternalError
+		diagPending = true
+		setCorrelationIDHeader(w, r)
+		redirectOAuthFailure(w, r, next)
 		return
 	}
 
 	values := url.Values{}
 	values.Set("code", completionCode)
+	values.Set("next", next)
 	completeURL := strings.TrimRight(h.deps.HostBaseURL, "/") + h.deps.FrontendCompletePath + "?" + values.Encode()
-	http.Redirect(w, r, completeURL, http.StatusFound)
-}
-
-type OAuthCompleteRequest struct {
-	Code string `json:"code"`
-}
-
-type OAuthCompleteResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int    `json:"expires_in"`
-	NextURL      string `json:"next"`
-}
-
-func (h *OAuthHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
-	if h.deps.CompletionStore == nil {
-		http.Error(w, "oauth completion unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	var req OAuthCompleteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	code := strings.TrimSpace(req.Code)
-	if code == "" {
-		http.Error(w, "code required", http.StatusBadRequest)
-		return
-	}
-	completion, err := h.deps.CompletionStore.GetAndDeleteCompletion(r.Context(), code)
-	if err != nil {
-		http.Error(w, "invalid or expired completion code", http.StatusUnauthorized)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(OAuthCompleteResponse{
-		AccessToken:  completion.AccessToken,
-		RefreshToken: completion.RefreshToken,
-		ExpiresIn:    completion.ExpiresIn,
-		NextURL:      completion.NextURL,
-	})
-}
-
-func clientIP(r *http.Request) string {
-	if ip := strings.TrimSpace(clientip.FromContext(r.Context())); ip != "" {
-		return ip
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return strings.TrimSpace(host)
-	}
-	return strings.Trim(strings.TrimSpace(r.RemoteAddr), "[]")
-}
-
-func normalizeOAuthNext(next string) string {
-	next = strings.TrimSpace(next)
-	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
-		return "/"
-	}
-	return next
-}
-
-func randomHex(n int) (string, error) {
-	buf := make([]byte, n)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf), nil
+	redirectOAuthCallback(w, r, completeURL)
 }

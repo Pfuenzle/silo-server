@@ -58,6 +58,7 @@ describe("PluginConfigForm secrets", () => {
       "account",
       expect.objectContaining({ region: "us-east" }),
       [],
+      [],
     );
 
     await userEvent.click(screen.getByRole("button", { name: "Clear saved secret" }));
@@ -66,6 +67,7 @@ describe("PluginConfigForm secrets", () => {
       "account",
       expect.objectContaining({ region: "us-east" }),
       ["api_key"],
+      [],
     );
   });
 
@@ -126,8 +128,31 @@ describe("PluginConfigForm secrets", () => {
     await userEvent.click(screen.getByRole("button", { name: "Clear saved secret" }));
     await userEvent.click(screen.getByRole("button", { name: "Check Connection" }));
 
-    expect(onTest).toHaveBeenCalledWith("account", expect.objectContaining({ region: "us-east" }), [
-      "api_key",
-    ]);
+    expect(onTest).toHaveBeenCalledWith(
+      "account",
+      expect.objectContaining({ region: "us-east" }),
+      ["api_key"],
+      [],
+    );
+  });
+
+  it("explicitly clears a saved public field when the form value is emptied", async () => {
+    const onSave = vi.fn();
+    const onTest = vi.fn().mockResolvedValue({ success: true, message: "Connection successful." });
+    render(
+      <PluginConfigForm
+        schema={schema}
+        value={{ region: "us-east" }}
+        onSave={onSave}
+        onTest={onTest}
+      />,
+    );
+
+    await userEvent.clear(screen.getByLabelText("Region"));
+    await userEvent.click(screen.getByRole("button", { name: "Save config" }));
+    expect(onSave).toHaveBeenCalledWith("account", {}, [], ["region"]);
+
+    await userEvent.click(screen.getByRole("button", { name: "Check Connection" }));
+    expect(onTest).toHaveBeenCalledWith("account", {}, [], ["region"]);
   });
 });

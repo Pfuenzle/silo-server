@@ -27,7 +27,7 @@ func IsSessionNotFound(err error) bool {
 }
 
 // sessionColumns is the list of columns returned by all session SELECT queries.
-const sessionColumns = `id, user_id, device_name, COALESCE(host(ip_address), '') AS ip_address, created_at, expires_at, revoked_at, impersonator_user_id, impersonation_started_at`
+const sessionColumns = `id, user_id, COALESCE(device_name, '') AS device_name, COALESCE(host(ip_address), '') AS ip_address, created_at, expires_at, revoked_at, provider_key, impersonator_user_id, impersonation_started_at`
 
 // SessionRepository provides CRUD operations for the auth_sessions table.
 type SessionRepository struct {
@@ -42,6 +42,7 @@ func NewSessionRepository(pool *pgxpool.Pool) *SessionRepository {
 // scanSession scans a single row into a *models.AuthSession.
 func scanSession(row pgx.Row) (*models.AuthSession, error) {
 	var s models.AuthSession
+	var providerKey *string
 	err := row.Scan(
 		&s.ID,
 		&s.UserID,
@@ -50,6 +51,7 @@ func scanSession(row pgx.Row) (*models.AuthSession, error) {
 		&s.CreatedAt,
 		&s.ExpiresAt,
 		&s.RevokedAt,
+		&providerKey,
 		&s.ImpersonatorUserID,
 		&s.ImpersonationStartedAt,
 	)
@@ -59,6 +61,13 @@ func scanSession(row pgx.Row) (*models.AuthSession, error) {
 		}
 		return nil, fmt.Errorf("scanning session: %w", err)
 	}
+	if providerKey != nil {
+		parsed, err := models.ParseSessionProviderKey(*providerKey)
+		if err != nil {
+			return nil, fmt.Errorf("parsing session provider key: %w", err)
+		}
+		s.ProviderKey = &parsed
+	}
 	return &s, nil
 }
 
@@ -67,6 +76,7 @@ func scanSessions(rows pgx.Rows) ([]*models.AuthSession, error) {
 	var sessions []*models.AuthSession
 	for rows.Next() {
 		var s models.AuthSession
+		var providerKey *string
 		err := rows.Scan(
 			&s.ID,
 			&s.UserID,
@@ -75,11 +85,19 @@ func scanSessions(rows pgx.Rows) ([]*models.AuthSession, error) {
 			&s.CreatedAt,
 			&s.ExpiresAt,
 			&s.RevokedAt,
+			&providerKey,
 			&s.ImpersonatorUserID,
 			&s.ImpersonationStartedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scanning session row: %w", err)
+		}
+		if providerKey != nil {
+			parsed, err := models.ParseSessionProviderKey(*providerKey)
+			if err != nil {
+				return nil, fmt.Errorf("parsing session provider key: %w", err)
+			}
+			s.ProviderKey = &parsed
 		}
 		sessions = append(sessions, &s)
 	}
@@ -107,8 +125,8 @@ func (r *SessionRepository) createWithQuerier(
 	}
 
 	query := `INSERT INTO auth_sessions
-		(id, user_id, device_name, ip_address, expires_at, impersonator_user_id, impersonation_started_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`
+		(id, user_id, device_name, ip_address, expires_at, provider_key, impersonator_user_id, impersonation_started_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 
 	// ip_address is a Postgres inet column; an empty string fails the
 	// inet input parser (SQLSTATE 22P02). Pass NULL when the caller
@@ -118,18 +136,60 @@ func (r *SessionRepository) createWithQuerier(
 	if session.IPAddress != "" {
 		ipArg = session.IPAddress
 	}
+	var providerKeyArg any
+	if session.ProviderKey != nil {
+		providerKeyArg = session.ProviderKey.String()
+	}
 
-	_, err := db.Exec(ctx, query,
+	args := []any{
 		session.ID,
 		session.UserID,
 		session.DeviceName,
 		ipArg,
 		session.ExpiresAt,
+		providerKeyArg,
 		session.ImpersonatorUserID,
 		session.ImpersonationStartedAt,
-	)
+	}
+	pluginInstallationID := 0
+	capabilityID := ""
+	pluginSession := false
+	if session.ProviderKey != nil {
+		pluginInstallationID, capabilityID, pluginSession = session.ProviderKey.PluginBinding()
+	}
+	if pluginSession {
+		query = `INSERT INTO auth_sessions
+			(id, user_id, device_name, ip_address, expires_at, provider_key, impersonator_user_id, impersonation_started_at)
+			SELECT $1, $2, $3, $4, $5, $6, $7, $8
+			WHERE EXISTS (
+				SELECT 1 FROM plugin_auth_bindings
+				WHERE plugin_installation_id = $9 AND capability_id = $10 AND enabled
+				FOR KEY SHARE
+			)`
+		args = append(args, pluginInstallationID, capabilityID)
+	}
+	tag, err := db.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("creating session: %w", err)
+	}
+	if pluginSession && tag.RowsAffected() == 0 {
+		return ErrInvalidCredentials
+	}
+	return nil
+}
+
+// RevokeAllByUserAndProvider revokes active sessions from one provider for one user.
+func (r *SessionRepository) RevokeAllByUserAndProvider(ctx context.Context, userID int, providerKey models.SessionProviderKey) error {
+	if _, err := r.pool.Exec(ctx, `UPDATE auth_sessions SET revoked_at = NOW() WHERE user_id = $1 AND provider_key = $2 AND revoked_at IS NULL`, userID, providerKey.String()); err != nil {
+		return fmt.Errorf("revoking sessions for user %d and provider: %w", userID, err)
+	}
+	return nil
+}
+
+// RevokeAllByProvider revokes active sessions from one provider across users.
+func (r *SessionRepository) RevokeAllByProvider(ctx context.Context, providerKey models.SessionProviderKey) error {
+	if _, err := r.pool.Exec(ctx, `UPDATE auth_sessions SET revoked_at = NOW() WHERE provider_key = $1 AND revoked_at IS NULL`, providerKey.String()); err != nil {
+		return fmt.Errorf("revoking sessions for provider: %w", err)
 	}
 	return nil
 }

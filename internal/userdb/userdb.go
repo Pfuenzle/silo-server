@@ -14,6 +14,7 @@ type UserDB struct {
 	DB     *sql.DB
 	Path   string
 	UserID int
+	close  func() error
 	mu     sync.RWMutex
 	dirty  bool // tracks if data changed since last reconciliation
 }
@@ -53,6 +54,9 @@ func NewUserDB(path string, userID int) (*UserDB, error) {
 
 // Close closes the underlying SQLite database connection.
 func (u *UserDB) Close() error {
+	if u.close != nil {
+		return u.close()
+	}
 	return u.DB.Close()
 }
 

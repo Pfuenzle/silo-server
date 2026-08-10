@@ -101,6 +101,26 @@ func (s *Service) TestGlobalConfigWithClears(
 	value map[string]any,
 	clearSecrets []string,
 ) error {
+	return s.TestGlobalConfigWithFieldClears(
+		ctx,
+		installationID,
+		key,
+		value,
+		clearSecrets,
+		nil,
+	)
+}
+
+// TestGlobalConfigWithFieldClears tests the exact prospective configuration,
+// including explicit removals of public fields and saved secrets.
+func (s *Service) TestGlobalConfigWithFieldClears(
+	ctx context.Context,
+	installationID int,
+	key string,
+	value map[string]any,
+	clearSecrets []string,
+	clearFields []string,
+) error {
 	if strings.TrimSpace(key) == "" {
 		return &ConnectionTestError{Message: "Config key is required"}
 	}
@@ -117,9 +137,13 @@ func (s *Service) TestGlobalConfigWithClears(
 		value = map[string]any{}
 	}
 	submitted := value
-	secretFields := GlobalConfigSecretFields(manifest, key)
+	publicFields, secretFields := GlobalConfigFieldSets(manifest, key)
 	secretPaths := GlobalConfigSecretPaths(manifest, key)
 	clearSet, err := validatedSecretClearSet(key, secretFields, clearSecrets)
+	if err != nil {
+		return &ConnectionTestError{Message: err.Error(), Cause: err}
+	}
+	clearFieldSet, err := validatedPublicClearSet(key, publicFields, clearFields)
 	if err != nil {
 		return &ConnectionTestError{Message: err.Error(), Cause: err}
 	}
@@ -134,6 +158,9 @@ func (s *Service) TestGlobalConfigWithClears(
 		return err
 	}
 	for field := range clearSet {
+		delete(value, field)
+	}
+	for field := range clearFieldSet {
 		delete(value, field)
 	}
 	projection := globalConfigValidationProjection(manifest, key, value, submitted)

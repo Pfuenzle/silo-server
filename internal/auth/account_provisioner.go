@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -53,17 +54,47 @@ func (p *AccountProvisioner) CreateAccount(
 	}
 
 	if err := p.createDefaultProfile(ctx, user.ID, input); err != nil {
-		if deleteErr := p.users.Delete(ctx, user.ID); deleteErr != nil {
-			return nil, fmt.Errorf(
-				"create default profile: %w (cleanup user: %v)",
-				err,
-				deleteErr,
-			)
+		deleteErr := p.DeleteAccount(ctx, user.ID)
+		if deleteErr != nil {
+			return nil, errors.Join(fmt.Errorf("create default profile: %w", err), fmt.Errorf("cleanup provisioned user: %w", deleteErr))
 		}
 		return nil, fmt.Errorf("create default profile: %w", err)
 	}
 
 	return user, nil
+}
+
+func (p *AccountProvisioner) DeleteAccount(ctx context.Context, userID int) error {
+	cleanupCtx, cancelCleanup := detachedCleanupContext(ctx)
+	defer cancelCleanup()
+	return p.deleteAccount(cleanupCtx, userID)
+}
+
+func (p *AccountProvisioner) deleteAccount(ctx context.Context, userID int) error {
+	if p.storeProvider != nil {
+		store, err := p.storeProvider.ForUser(ctx, userID)
+		if err != nil {
+			return fmt.Errorf("open user store for cleanup: %w", err)
+		}
+		profiles, err := store.ListProfiles(ctx)
+		if err != nil {
+			return fmt.Errorf("list profiles for cleanup: %w", err)
+		}
+		for _, profile := range profiles {
+			if err := store.DeleteProfile(ctx, profile.ID); err != nil {
+				return fmt.Errorf("delete profile %s for cleanup: %w", profile.ID, err)
+			}
+		}
+		if provider, ok := p.storeProvider.(userstore.ProvisioningCleanupProvider); ok {
+			if err := provider.DeleteUser(ctx, userID); err != nil {
+				return fmt.Errorf("delete provider state for cleanup: %w", err)
+			}
+		}
+	}
+	if err := p.users.Delete(ctx, userID); err != nil {
+		return fmt.Errorf("delete user for cleanup: %w", err)
+	}
+	return nil
 }
 
 func (p *AccountProvisioner) createDefaultProfile(
