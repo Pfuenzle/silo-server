@@ -46,6 +46,7 @@ interface AuthState {
   beginImpersonation: (data: LoginResponse, returnPath: string) => void;
   endImpersonation: () => Promise<void>;
   logout: () => void;
+  resetAuth: () => void;
   selectProfile: (profile: Profile, profileToken?: string) => void;
   verifyProfilePin: (profileId: string, pin: string) => Promise<VerifyPinResponse>;
   clearProfile: () => void;
@@ -527,6 +528,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         beginImpersonation,
         endImpersonation,
         logout,
+        resetAuth: clearAuthState,
         selectProfile,
         verifyProfilePin,
         clearProfile,

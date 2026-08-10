@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
-import { setAccessToken, setRefreshToken } from "@/api/client";
-import { api } from "@/api/client";
+import { api, setAccessToken, setRefreshToken } from "@/api/client";
 import type { RefreshResponse, User } from "@/api/types";
+import { AuthBackground } from "@/components/auth/AuthBackground";
+import { OAuthFailure } from "@/components/auth/OAuthFailure";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/hooks/useAuth";
-import { sanitizeAuthRedirect } from "@/lib/authRedirect";
+import { buildLoginRetryHref, sanitizeAuthRedirect } from "@/lib/authRedirect";
 
 type OAuthCompleteResponse = RefreshResponse & {
   next: string;
@@ -24,28 +26,37 @@ async function completeOAuthCode(code: string): Promise<OAuthCompleteResponse> {
 
 export default function OAuthComplete() {
   const navigate = useNavigate();
-  const { completeLogin } = useAuth();
-  const [error, setError] = useState<string | null>(() =>
-    new URLSearchParams(window.location.search).get("code")
-      ? null
-      : "Sign-in response missing completion code. Please try again.",
-  );
+  const { completeLogin, resetAuth } = useAuth();
+  const [completionRequest] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return {
+      code: params.get("code"),
+      next: sanitizeAuthRedirect(params.get("next")),
+    } as const;
+  });
+  const [retryNext, setRetryNext] = useState(completionRequest.next);
+  const [failed, setFailed] = useState(() => !completionRequest.code);
 
   useEffect(() => {
-    const code = new URLSearchParams(window.location.search).get("code");
+    const code = completionRequest.code;
     if (!code) {
+      resetAuth();
       return;
     }
     window.history.replaceState(null, "", window.location.pathname);
 
     let cancelled = false;
+    let tokensPersisted = false;
+    let loginCompleted = false;
     (async () => {
       try {
         const tokens = await completeOAuthCode(code);
         if (cancelled) return;
         const next = sanitizeAuthRedirect(tokens.next) || "/";
+        setRetryNext(next);
         setAccessToken(tokens.access_token);
         setRefreshToken(tokens.refresh_token);
+        tokensPersisted = true;
         const user = await api<User>("/auth/me");
         if (cancelled) return;
         completeLogin({
@@ -54,33 +65,49 @@ export default function OAuthComplete() {
           expires_in: tokens.expires_in,
           user,
         });
+        loginCompleted = true;
         navigate(next, { replace: true });
-      } catch (err) {
+      } catch {
         if (!cancelled) {
-          setAccessToken(null);
-          setRefreshToken(null);
-          setError(err instanceof Error ? err.message : "Failed to complete sign-in");
+          resetAuth();
+          setFailed(true);
         }
       }
     })();
     return () => {
       cancelled = true;
+      if (tokensPersisted && !loginCompleted) {
+        resetAuth();
+      }
     };
-  }, [completeLogin, navigate]);
+  }, [completeLogin, completionRequest.code, navigate, resetAuth]);
 
-  if (error) {
+  if (failed) {
     return (
-      <div className="auth-shell">
-        <div className="border-destructive/30 bg-destructive/10 text-destructive max-w-md rounded-md border p-4 text-sm">
-          {error}
-        </div>
-      </div>
+      <main className="auth-shell">
+        <AuthBackground />
+        <Card className="auth-card glass panel-border w-full max-w-md border-0">
+          <CardHeader>
+            <CardTitle className="text-3xl font-extrabold tracking-[-0.04em]">Sign in</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <OAuthFailure
+              onRetry={() => navigate(buildLoginRetryHref(retryNext), { replace: true })}
+            />
+          </CardContent>
+        </Card>
+      </main>
     );
   }
 
   return (
-    <div className="auth-shell">
-      <div className="border-primary h-8 w-8 animate-spin rounded-full border-b-2" />
-    </div>
+    <main className="auth-shell">
+      <AuthBackground />
+      <div
+        className="border-primary h-8 w-8 animate-spin rounded-full border-b-2"
+        role="status"
+        aria-label="Completing sign in"
+      />
+    </main>
   );
 }

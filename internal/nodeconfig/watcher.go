@@ -24,6 +24,7 @@ type BootstrapOverrides struct {
 	Mode        string // from MODE env
 	DatabaseURL string // from DATABASE_URL env
 	JFListen    string // from JF_PORT env
+	ABSListen   string
 	RedisURL    string // from REDIS_URL env
 	// NodeURL is this process's own stream_nodes identity (from NODE_URL env),
 	// set only in proxy/transcode mode. It is what lets a node find its own row
@@ -322,6 +323,9 @@ func (w *Watcher) applySettings(ctx context.Context, m map[string]string) error 
 	}
 	if w.bootstrap.JFListen != "" {
 		newCfg.JellyfinCompat.Listen = w.bootstrap.JFListen
+	}
+	if w.bootstrap.ABSListen != "" {
+		newCfg.AudiobookshelfCompat.Listen = w.bootstrap.ABSListen
 	}
 	if w.bootstrap.RedisURL != "" {
 		newCfg.Redis.URL = w.bootstrap.RedisURL

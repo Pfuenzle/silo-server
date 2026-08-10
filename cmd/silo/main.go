@@ -826,6 +826,7 @@ func main() {
 	cfg.Server.Mode = bc.Mode
 	cfg.Database.URL = bc.DatabaseURL
 	cfg.JellyfinCompat.Listen = bc.JFListen
+	cfg.AudiobookshelfCompat.Listen = bc.ABSListen
 	if bc.RedisURL != "" {
 		cfg.Redis.URL = bc.RedisURL
 	}
@@ -959,6 +960,7 @@ func main() {
 			Mode:        cfg.Server.Mode,
 			DatabaseURL: cfg.Database.URL,
 			JFListen:    cfg.JellyfinCompat.Listen,
+			ABSListen:   cfg.AudiobookshelfCompat.Listen,
 			RedisURL:    bc.RedisURL,
 			NodeURL:     nodeURL,
 			NodeName:    nodeName,
@@ -1056,6 +1058,7 @@ func main() {
 		Mode:        bc.Mode,
 		DatabaseURL: bc.DatabaseURL,
 		JFListen:    bc.JFListen,
+		ABSListen:   bc.ABSListen,
 		RedisURL:    bc.RedisURL,
 	})
 	configWatcher.OnLoad(normalizeLoadedConfig)
@@ -2066,6 +2069,13 @@ func main() {
 	if userStoreProvider != nil {
 		deps.UserStoreProvider = userStoreProvider
 	}
+	if deps.DB != nil && userStoreProvider != nil && strings.TrimSpace(cfg.Auth.JWTSecret) != "" {
+		deps.Canonicalizer = auth.NewExternalAccountCanonicalizer(
+			deps.DB,
+			[]byte(cfg.Auth.JWTSecret),
+			time.Now,
+		).WithStoreProvider(userStoreProvider)
+	}
 	if watchProviderService != nil {
 		historyRepo := historyimport.NewRepository(deps.DB, deps.SecretCipher)
 		historyIdentity := watchstate.NewStableIdentityResolver(itemRepo, episodeRepo, catalog.NewProviderIDRepository(deps.DB))
@@ -2818,6 +2828,7 @@ func main() {
 						CapabilityID:   binding.CapabilityID,
 						DisplayName:    displayName,
 						AutoProvision:  binding.AutoProvision,
+						StoreProvider:  userStoreProvider,
 					},
 					sessionRepo,
 					userRepo,

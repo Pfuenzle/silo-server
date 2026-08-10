@@ -2,12 +2,7 @@ package database
 
 import (
 	"context"
-	"os"
 	"testing"
-
-	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/Silo-Server/silo-server/migrations"
 )
 
 // TestMigrateDownToRestoresLegacyDisplayPrefs is the rollback rehearsal.
@@ -18,18 +13,11 @@ import (
 // --migrate-down-to — actually restores them, and that it reaches the Go
 // migrations the standalone goose CLI cannot see.
 func TestMigrateDownToRestoresLegacyDisplayPrefs(t *testing.T) {
-	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("SILO_TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	defer pool.Close()
+	pool := newTrustedLinkMigrationPool(t, ctx)
 
-	if err := RunMigrations(ctx, pool, migrations.FS, "sql"); err != nil {
+	moveFS := migrationFSThrough(t, 20260728132327)
+	if err := RunMigrations(ctx, pool, moveFS, "sql"); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
 
@@ -49,7 +37,7 @@ ON CONFLICT (username) DO UPDATE SET email=EXCLUDED.email RETURNING id`).Scan(&u
 		t.Fatalf("seed legacy row: %v", err)
 	}
 	// Apply the move by re-running it (the migration already ran before the seed).
-	if err := RunMigrations(ctx, pool, migrations.FS, "sql"); err != nil {
+	if err := RunMigrations(ctx, pool, moveFS, "sql"); err != nil {
 		t.Fatalf("re-up: %v", err)
 	}
 
@@ -57,7 +45,7 @@ ON CONFLICT (username) DO UPDATE SET email=EXCLUDED.email RETURNING id`).Scan(&u
 	// DisplayPreferences pair, which is the destructive half. A wider target
 	// would also revert profile_onboarding, an older-binary migration that
 	// happens to sort in between and whose down drops its table.
-	if err := MigrateDownTo(ctx, pool, migrations.FS, "sql", 20260728132326); err != nil {
+	if err := MigrateDownTo(ctx, pool, moveFS, "sql", 20260728132326); err != nil {
 		t.Fatalf("MigrateDownTo: %v", err)
 	}
 

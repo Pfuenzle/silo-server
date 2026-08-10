@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import QRCode from "react-qr-code";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router";
@@ -21,7 +21,8 @@ import {
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
 import { useServerBranding } from "@/hooks/useServerBranding";
 import { AuthBackground } from "@/components/auth/AuthBackground";
-import { sanitizeAuthRedirect } from "@/lib/authRedirect";
+import { OAuthFailure } from "@/components/auth/OAuthFailure";
+import { buildLoginRetryHref, sanitizeAuthRedirect } from "@/lib/authRedirect";
 import { toast } from "sonner";
 
 function detectPlatform() {
@@ -88,10 +89,13 @@ export default function Login() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { serverName, loginSubtitle } = useServerBranding();
+  const firstOAuthProviderRef = useRef<HTMLButtonElement>(null);
+  const usernameRef = useRef<HTMLInputElement>(null);
 
   useDocumentTitle("Sign In");
 
-  const redirectTarget = sanitizeAuthRedirect(searchParams.get("redirect"));
+  const safeNextTarget = sanitizeAuthRedirect(searchParams.get("next"));
+  const redirectTarget = sanitizeAuthRedirect(searchParams.get("redirect")) ?? safeNextTarget;
 
   const credentialProviders = useMemo(
     () => providers.filter((entry) => entry.mode === "credentials"),
@@ -102,14 +106,20 @@ export default function Login() {
     [providers],
   );
 
-  const oauthError =
-    searchParams.get("error") === "oauth_failed" ? searchParams.get("reason") : null;
+  const oauthFailed = searchParams.get("error") === "oauth_failed";
   const nextParam = redirectTarget ? `?next=${encodeURIComponent(redirectTarget)}` : "";
-  const selectedProvider =
-    provider ||
-    credentialProviders.find((entry) => entry.default)?.id ||
-    credentialProviders[0]?.id ||
-    "";
+  useEffect(() => {
+    if (oauthFailed) {
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  }, [oauthFailed]);
+
+  useEffect(() => {
+    if (oauthFailed || loading || setupLoading) {
+      return;
+    }
+    (firstOAuthProviderRef.current ?? usernameRef.current)?.focus();
+  }, [loading, oauthFailed, oauthProviders.length, setupLoading]);
 
   const navigateAfterLogin = useCallback(async () => {
     if (redirectTarget) {
@@ -235,7 +245,7 @@ export default function Login() {
     e.preventDefault();
     setSubmitting(true);
     try {
-      await login(username, password, selectedProvider || undefined);
+      await login(username, password, provider || undefined);
       await navigateAfterLogin();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Login failed");
@@ -275,20 +285,29 @@ export default function Login() {
           <CardDescription className="mt-2 text-sm leading-6">{loginSubtitle}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
-          {oauthError && (
-            <div className="border-destructive/30 bg-destructive/10 text-destructive rounded-md border p-3 text-sm">
-              Sign-in failed: {decodeURIComponent(oauthError)}
-            </div>
+          {oauthFailed && (
+            <OAuthFailure
+              onRetry={() =>
+                navigate(buildLoginRetryHref(safeNextTarget ?? redirectTarget), {
+                  replace: true,
+                })
+              }
+            />
           )}
           {oauthProviders.length > 0 && (
             <div className="space-y-2">
-              {oauthProviders.map((entry) => (
+              {oauthProviders.map((entry, index) => (
                 <form
                   key={entry.id}
                   method="post"
                   action={`/api/v1/auth/oauth/${entry.installation_id}/init${nextParam}`}
                 >
-                  <Button type="submit" variant="outline" className="w-full justify-start gap-3">
+                  <Button
+                    ref={index === 0 ? firstOAuthProviderRef : undefined}
+                    type="submit"
+                    variant="outline"
+                    className="w-full justify-start gap-3"
+                  >
                     {entry.icon_url && <img src={entry.icon_url} alt="" className="h-5 w-5" />}
                     <span>{entry.display_name}</span>
                   </Button>
@@ -305,11 +324,11 @@ export default function Login() {
             <div className="space-y-2">
               <Label htmlFor="username">Username</Label>
               <Input
+                ref={usernameRef}
                 id="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 autoComplete="username"
-                autoFocus
                 required
               />
             </div>
@@ -324,21 +343,41 @@ export default function Login() {
               />
             </div>
             {credentialProviders.length > 1 && (
-              <div className="space-y-2">
-                <Label>Sign in with</Label>
-                <Select value={selectedProvider} onValueChange={setProvider}>
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {credentialProviders.map((entry) => (
-                      <SelectItem key={entry.id} value={entry.id}>
-                        {entry.display_name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              <details className="group border-border/60 rounded-md border px-3 py-2">
+                <summary className="focus-visible:ring-ring focus-visible:ring-offset-background cursor-pointer list-none rounded-sm text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-offset-2">
+                  Use a different sign-in method
+                </summary>
+                <div className="space-y-2 pt-3">
+                  <Label htmlFor="credential-provider">Credential provider</Label>
+                  <Select
+                    value={provider || "automatic"}
+                    onValueChange={(value) => setProvider(value === "automatic" ? "" : value)}
+                  >
+                    <SelectTrigger id="credential-provider" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="automatic">Automatic (server policy)</SelectItem>
+                      {credentialProviders.map((entry) => (
+                        <SelectItem key={entry.id} value={entry.id}>
+                          {entry.display_name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {provider && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="px-0"
+                      onClick={() => setProvider("")}
+                    >
+                      Reset to automatic
+                    </Button>
+                  )}
+                </div>
+              </details>
             )}
             <Button type="submit" className="w-full" disabled={submitting}>
               {submitting ? "Signing in..." : "Sign in"}

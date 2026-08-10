@@ -16,6 +16,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Silo-Server/silo-server/internal/secret"
 )
 
 // OAuthSession is one in-flight OAuth authorization-code exchange.
@@ -41,6 +43,7 @@ type OAuthSession struct {
 // Defined as an interface so handler tests can supply InMemoryOAuthStore.
 type OAuthStore interface {
 	Insert(ctx context.Context, s OAuthSession) error
+	Get(ctx context.Context, state string) (OAuthSession, error)
 	GetAndDelete(ctx context.Context, state string) (OAuthSession, error)
 	DeleteExpired(ctx context.Context, now time.Time) (int, error)
 }
@@ -68,49 +71,81 @@ var ErrOAuthCompletionNotFound = errors.New("oauth_completion not found")
 
 // PGOAuthStore is the Postgres-backed OAuthStore.
 type PGOAuthStore struct {
-	pool          *pgxpool.Pool
-	completionKey [32]byte
+	pool                *pgxpool.Pool
+	completionKey       [32]byte
+	providerStateCipher *secret.Cipher
 }
 
-func NewPGOAuthStore(pool *pgxpool.Pool, completionSecret ...[]byte) *PGOAuthStore {
-	var material []byte
-	if len(completionSecret) > 0 {
-		material = completionSecret[0]
-	}
-	if len(material) == 0 {
-		material = []byte("silo-oauth-completion-default")
-	}
-	key := sha256.Sum256(append([]byte("silo/oauth-completion/v1:"), material...))
-	return &PGOAuthStore{pool: pool, completionKey: key}
+func NewPGOAuthStore(pool *pgxpool.Pool, completionSecret []byte, providerStateCipher *secret.Cipher) *PGOAuthStore {
+	key := sha256.Sum256(append([]byte("silo/oauth-completion/v1:"), completionSecret...))
+	return &PGOAuthStore{pool: pool, completionKey: key, providerStateCipher: providerStateCipher}
 }
 
 func (s *PGOAuthStore) Insert(ctx context.Context, sess OAuthSession) error {
 	if err := validateSession(&sess); err != nil {
 		return err
 	}
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO oauth_session (state, install_id, redirect_uri, linking_user_id, provider_state, next_url, expires_at)
-		VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7)
-	`, sess.State, sess.InstallID, sess.RedirectURI, sess.LinkingUserID, sess.ProviderState, sess.NextURL, sess.ExpiresAt)
+	if s.providerStateCipher == nil {
+		return errors.New("oauth_session provider state cipher is required")
+	}
+	providerStateCiphertext, err := s.providerStateCipher.Encrypt(string(sess.ProviderState), oauthSessionProviderStateAAD(sess))
+	if err != nil {
+		return fmt.Errorf("encrypt oauth_session provider state: %w", err)
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO oauth_session (state, install_id, redirect_uri, linking_user_id, provider_state, provider_state_ciphertext, next_url, expires_at)
+		VALUES ($1, $2, $3, NULLIF($4, ''), '{}'::jsonb, $5, $6, $7)
+	`, sess.State, sess.InstallID, sess.RedirectURI, sess.LinkingUserID, providerStateCiphertext, sess.NextURL, sess.ExpiresAt)
 	if err != nil {
 		return fmt.Errorf("insert oauth_session: %w", err)
 	}
 	return nil
 }
 
-func (s *PGOAuthStore) GetAndDelete(ctx context.Context, state string) (OAuthSession, error) {
+func (s *PGOAuthStore) Get(ctx context.Context, state string) (OAuthSession, error) {
 	row := s.pool.QueryRow(ctx, `
-		DELETE FROM oauth_session WHERE state = $1
-		RETURNING state, install_id, redirect_uri, COALESCE(linking_user_id, ''), provider_state, next_url, created_at, expires_at
+		SELECT state, install_id, redirect_uri, COALESCE(linking_user_id, ''), next_url, created_at, expires_at
+		FROM oauth_session
+		WHERE state = $1 AND expires_at >= now()
 	`, state)
 	var out OAuthSession
-	if err := row.Scan(&out.State, &out.InstallID, &out.RedirectURI, &out.LinkingUserID, &out.ProviderState, &out.NextURL, &out.CreatedAt, &out.ExpiresAt); err != nil {
+	if err := row.Scan(&out.State, &out.InstallID, &out.RedirectURI, &out.LinkingUserID, &out.NextURL, &out.CreatedAt, &out.ExpiresAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return OAuthSession{}, ErrOAuthSessionNotFound
+		}
+		return OAuthSession{}, fmt.Errorf("get oauth_session: %w", err)
+	}
+	return out, nil
+}
+
+func (s *PGOAuthStore) GetAndDelete(ctx context.Context, state string) (OAuthSession, error) {
+	row := s.pool.QueryRow(ctx, `
+		DELETE FROM oauth_session WHERE state = $1 AND expires_at >= now()
+		RETURNING state, install_id, redirect_uri, COALESCE(linking_user_id, ''), provider_state, provider_state_ciphertext, next_url, created_at, expires_at
+	`, state)
+	var out OAuthSession
+	var providerStateCiphertext *string
+	if err := row.Scan(&out.State, &out.InstallID, &out.RedirectURI, &out.LinkingUserID, &out.ProviderState, &providerStateCiphertext, &out.NextURL, &out.CreatedAt, &out.ExpiresAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return OAuthSession{}, ErrOAuthSessionNotFound
 		}
 		return OAuthSession{}, fmt.Errorf("get_and_delete oauth_session: %w", err)
 	}
+	if providerStateCiphertext != nil && *providerStateCiphertext != "" {
+		if s.providerStateCipher == nil {
+			return OAuthSession{}, errors.New("oauth_session provider state cipher is required")
+		}
+		plaintext, err := s.providerStateCipher.Decrypt(*providerStateCiphertext, oauthSessionProviderStateAAD(out))
+		if err != nil {
+			return OAuthSession{}, fmt.Errorf("decrypt oauth_session provider state: %w", err)
+		}
+		out.ProviderState = []byte(plaintext)
+	}
 	return out, nil
+}
+
+func oauthSessionProviderStateAAD(sess OAuthSession) string {
+	return secret.RowAAD("oauth_session", "provider_state_ciphertext", sess.InstallID+":"+sess.State)
 }
 
 func (s *PGOAuthStore) DeleteExpired(ctx context.Context, now time.Time) (int, error) {
@@ -261,6 +296,16 @@ func (s *InMemoryOAuthStore) Insert(_ context.Context, sess OAuthSession) error 
 	}
 	s.rows[sess.State] = sess
 	return nil
+}
+
+func (s *InMemoryOAuthStore) Get(_ context.Context, state string) (OAuthSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.rows[state]
+	if !ok || sess.ExpiresAt.Before(time.Now().UTC()) {
+		return OAuthSession{}, ErrOAuthSessionNotFound
+	}
+	return sess, nil
 }
 
 func (s *InMemoryOAuthStore) GetAndDelete(_ context.Context, state string) (OAuthSession, error) {

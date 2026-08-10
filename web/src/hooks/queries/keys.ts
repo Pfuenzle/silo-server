@@ -375,6 +375,7 @@ export const adminKeys = {
   stats: () => ["admin", "stats"] as const,
   sessions: () => ["admin", "sessions"] as const,
   serverSettings: () => ["admin", "serverSettings"] as const,
+  credentialProviderFallback: () => ["admin", "auth", "credentialProviderFallback"] as const,
   serverStatus: () => ["admin", "serverStatus"] as const,
   dashboardLayout: () => ["admin", "dashboard", "layout"] as const,
   // Dashboard insight endpoints are keyed by their window so a 1h tile and a
@@ -464,6 +465,15 @@ export const adminKeys = {
   pluginCatalog: () => ["admin", "plugins", "catalog"] as const,
   pluginCatalogSettings: () => ["admin", "plugins", "catalogSettings"] as const,
   pluginInstallations: () => ["admin", "plugins", "installations"] as const,
+  pluginAuthGroupMappings: (installationId: number, capabilityId: string) =>
+    [
+      "admin",
+      "plugins",
+      "installations",
+      installationId,
+      "auth-group-mappings",
+      capabilityId,
+    ] as const,
   unmatchedItems: (page?: number, search?: string) =>
     page != null
       ? (["admin", "libraries", "unmatchedItems", page, search ?? ""] as const)

@@ -34,7 +34,6 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -55,6 +54,7 @@ import {
   AccordionTrigger,
 } from "@/components/ui/accordion";
 import { PluginConfigForm } from "@/components/admin/plugins/PluginConfigForm";
+import { AuthProviderControls } from "@/components/admin/plugins/AuthProviderControls";
 import type {
   PluginCatalogEntry,
   PluginCatalogSettings,
@@ -72,7 +72,6 @@ import {
   useDeletePluginRepository,
   useInstallPlugin,
   usePluginUpload,
-  useSavePluginAuthBinding,
   useSavePluginConfig,
   useSavePluginTaskBinding,
   useTestPluginConfig,
@@ -494,7 +493,6 @@ function ConfigureDialog({
 }) {
   const saveConfig = useSavePluginConfig();
   const testConfig = useTestPluginConfig();
-  const saveAuthBinding = useSavePluginAuthBinding();
   const saveTaskBinding = useSavePluginTaskBinding();
   const capabilities = installation.capabilities ?? [];
   const globalConfigs = installation.global_configs ?? [];
@@ -513,7 +511,7 @@ function ConfigureDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Blocks className="h-5 w-5" />
@@ -549,19 +547,25 @@ function ConfigureDialog({
                       }
                       isSaving={saveConfig.isPending}
                       isTesting={testConfig.isPending}
-                      onTest={(key, nextValue, clearSecrets) =>
+                      onTest={(key, nextValue, clearSecrets, clearFields) =>
                         testConfig.mutateAsync({
                           id: installation.id,
-                          body: { key, value: nextValue, clear_secrets: clearSecrets },
+                          body: {
+                            key,
+                            value: nextValue,
+                            clear_secrets: clearSecrets,
+                            clear_fields: clearFields,
+                          },
                         })
                       }
-                      onSave={(key, nextValue, clearSecrets) =>
+                      onSave={(key, nextValue, clearSecrets, clearFields) =>
                         saveConfig.mutate({
                           id: installation.id,
                           body: {
                             key,
                             value: nextValue,
                             clear_secrets: clearSecrets,
+                            clear_fields: clearFields,
                           },
                         })
                       }
@@ -584,39 +588,19 @@ function ConfigureDialog({
               <AccordionContent>
                 <div className="space-y-3">
                   <p className="text-muted-foreground text-xs">
-                    Auth-provider bindings are registered at server startup. Saved changes require a
-                    restart.
+                    Auth-provider bindings are registered at server startup. Restart the server
+                    after saving binding changes.
                   </p>
                   {authCapabilities.map((capability, index) => {
                     const binding = authBindings.find((e) => e.capability_id === capability.id);
                     return (
-                      <div
+                      <AuthProviderControls
                         key={capability.id}
-                        className="flex items-center justify-between rounded-lg border p-3"
-                      >
-                        <div>
-                          <p className="text-sm font-medium">
-                            {capability.display_name || capability.id}
-                          </p>
-                          <p className="text-muted-foreground font-mono text-xs">{capability.id}</p>
-                        </div>
-                        <Switch
-                          checked={binding?.enabled ?? false}
-                          disabled={saveAuthBinding.isPending}
-                          onCheckedChange={(checked) =>
-                            saveAuthBinding.mutate({
-                              id: installation.id,
-                              body: {
-                                capability_id: capability.id,
-                                enabled: checked,
-                                display_order: binding?.display_order ?? index + 1,
-                                auto_provision: binding?.auto_provision ?? true,
-                                default_login: binding?.default_login ?? false,
-                              },
-                            })
-                          }
-                        />
-                      </div>
+                        installation={installation}
+                        capability={capability}
+                        binding={binding}
+                        displayOrder={index + 1}
+                      />
                     );
                   })}
                 </div>
@@ -716,8 +700,6 @@ function ConfigureDialog({
             This plugin has no additional configuration.
           </p>
         )}
-
-        <DialogFooter showCloseButton />
       </DialogContent>
     </Dialog>
   );
@@ -1034,12 +1016,14 @@ export default function AdminPlugins() {
   const queryClient = useQueryClient();
   const checkPluginUpdates = useCheckPluginUpdates();
   const { data: pluginUpdateTask } = useTask(CHECK_PLUGIN_UPDATES_TASK_KEY);
+  const [configuringID, setConfiguringID] = useState<number | null>(null);
   const previousTaskState = useRef<string | null>(null);
 
   const installedIds = useMemo(
     () => new Set(installations.map((installation) => installation.plugin_id)),
     [installations],
   );
+  const configuring = installations.find((installation) => installation.id === configuringID);
   const catalogByPluginID = useMemo(
     () => new Map(catalog.map((entry) => [entry.plugin_id, entry])),
     [catalog],
@@ -1116,17 +1100,6 @@ export default function AdminPlugins() {
     }
     setSearchParams(next, { replace: options.replace ?? true });
   }
-
-  // The configure dialog is URL state: ?configure=<plugin_id>. Provider tiles
-  // on the settings pages deep-link straight into a plugin's credential dialog
-  // this way, and closing the dialog (or browser back) just drops the param.
-  // An id that matches no installation renders nothing.
-  const configuring = useMemo(
-    () =>
-      installations.find((candidate) => candidate.plugin_id === searchParams.get("configure")) ??
-      null,
-    [installations, searchParams],
-  );
 
   useEffect(() => {
     const currentState = pluginUpdateTask?.state ?? null;
@@ -1247,10 +1220,7 @@ export default function AdminPlugins() {
                     key={installation.id}
                     installation={installation}
                     catalogEntry={catalogByPluginID.get(installation.plugin_id)}
-                    onConfigure={(target) =>
-                      // Push (not replace) so browser back closes the dialog.
-                      updatePluginView({ configure: target.plugin_id }, { replace: false })
-                    }
+                    onConfigure={(installation) => setConfiguringID(installation.id)}
                   />
                 ))}
               </div>
@@ -1339,10 +1309,7 @@ export default function AdminPlugins() {
 
       {/* Configure dialog */}
       {configuring && (
-        <ConfigureDialog
-          installation={configuring}
-          onClose={() => updatePluginView({ configure: undefined })}
-        />
+        <ConfigureDialog installation={configuring} onClose={() => setConfiguringID(null)} />
       )}
     </div>
   );

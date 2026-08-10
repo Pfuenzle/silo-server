@@ -95,6 +95,22 @@ func (p *interestTrackingProvider) Close() error {
 	return p.inner.Close()
 }
 
+func (p *interestTrackingProvider) SupportsTransactionalProvisioning() bool {
+	provider, ok := p.inner.(userstore.TransactionalProvisioningProvider)
+	return ok && provider.SupportsTransactionalProvisioning()
+}
+
+func (p *interestTrackingProvider) CanonicalizationStoreState(
+	ctx context.Context,
+	userID int,
+) (userstore.CanonicalizationStoreState, error) {
+	provider, ok := p.inner.(userstore.CanonicalizationStoreStateProvider)
+	if !ok {
+		return userstore.CanonicalizationStoreState{}, fmt.Errorf("wrapped user store does not expose canonicalization state")
+	}
+	return provider.CanonicalizationStoreState(ctx, userID)
+}
+
 type interestTrackingStore struct {
 	userstore.UserStore
 	userID  int

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Silo-Server/silo-server/internal/secret"
 )
 
 func TestInMemoryOAuthStore_InsertAndGetAndDelete(t *testing.T) {
@@ -110,7 +112,11 @@ func TestInMemoryOAuthStore_DuplicateState(t *testing.T) {
 }
 
 func TestPGOAuthStore_EncryptsCompletionTokens(t *testing.T) {
-	st := NewPGOAuthStore(nil, []byte("test-secret"))
+	cipher, err := secret.New([]byte("01234567890123456789012345678901"))
+	if err != nil {
+		t.Fatalf("new cipher: %v", err)
+	}
+	st := NewPGOAuthStore(nil, []byte("test-secret"), cipher)
 	completion := OAuthCompletion{
 		Code:         "completion-code",
 		AccessToken:  "access-token-value",
@@ -135,5 +141,36 @@ func TestPGOAuthStore_EncryptsCompletionTokens(t *testing.T) {
 	}
 	if out.AccessToken != completion.AccessToken || out.RefreshToken != completion.RefreshToken {
 		t.Fatalf("tokens = %q/%q", out.AccessToken, out.RefreshToken)
+	}
+}
+
+func TestOAuthStateCipherRejectsWrongKeyAndAAD(t *testing.T) {
+	// Given
+	firstCipher, err := secret.New([]byte("01234567890123456789012345678901"))
+	if err != nil {
+		t.Fatalf("new first cipher: %v", err)
+	}
+	secondCipher, err := secret.New([]byte("abcdefghijklmnopqrstuvwxyz123456"))
+	if err != nil {
+		t.Fatalf("new second cipher: %v", err)
+	}
+	session := OAuthSession{State: "state-one", InstallID: "42"}
+	ciphertext, err := firstCipher.Encrypt(`{"pkce_verifier":"secret"}`, oauthSessionProviderStateAAD(session))
+	if err != nil {
+		t.Fatalf("encrypt provider state: %v", err)
+	}
+
+	// When
+	_, wrongKeyErr := secondCipher.Decrypt(ciphertext, oauthSessionProviderStateAAD(session))
+	otherSession := session
+	otherSession.State = "state-two"
+	_, wrongAADErr := firstCipher.Decrypt(ciphertext, oauthSessionProviderStateAAD(otherSession))
+
+	// Then
+	if wrongKeyErr == nil {
+		t.Fatal("wrong cipher key decrypted provider state")
+	}
+	if wrongAADErr == nil {
+		t.Fatal("wrong row-bound AAD decrypted provider state")
 	}
 }

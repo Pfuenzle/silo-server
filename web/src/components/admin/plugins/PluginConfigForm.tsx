@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label";
 
 import { adminFormForConfigSchema, humanizeConfigKey } from "./configSchemaAdminForm";
 import { SchemaForm } from "./SchemaForm";
-import { buildSchemaValues } from "./schemaFormUtils";
+import { buildSchemaValues, evaluateShowWhen } from "./schemaFormUtils";
 
 type PluginConfigValue = Record<string, unknown>;
 
@@ -22,11 +22,17 @@ type Props = {
   schema: PluginConfigSchema;
   value?: PluginConfigValue;
   configuredSecrets?: string[];
-  onSave: (key: string, value: PluginConfigValue, clearSecrets: string[]) => void;
+  onSave: (
+    key: string,
+    value: PluginConfigValue,
+    clearSecrets: string[],
+    clearFields: string[],
+  ) => void;
   onTest?: (
     key: string,
     value: PluginConfigValue,
     clearSecrets: string[],
+    clearFields: string[],
   ) => Promise<ConnectionCheckResponse>;
   isSaving?: boolean;
   isTesting?: boolean;
@@ -65,6 +71,19 @@ function valueForField(
     return raw;
   }
   return defaultValueForField(field);
+}
+
+function clearedPublicFields(
+  descriptor: PluginAdminForm,
+  initial: PluginConfigValue | undefined,
+  draft: PluginConfigValue,
+  submitted: PluginConfigValue,
+): string[] {
+  return descriptor.fields
+    .filter((field) => !field.secret && field.control !== "PASSWORD")
+    .filter((field) => evaluateShowWhen(field.show_when, draft, descriptor.fields))
+    .filter((field) => initial?.[field.key] !== undefined && submitted[field.key] === undefined)
+    .map((field) => field.key);
 }
 
 export function PluginConfigForm({
@@ -125,8 +144,14 @@ export function PluginConfigForm({
     }
 
     try {
+      const submitted = buildSchemaValues(descriptor, values);
       setTestResult(
-        await onTest(schema.key, buildSchemaValues(descriptor, values), Array.from(clearSecrets)),
+        await onTest(
+          schema.key,
+          submitted,
+          Array.from(clearSecrets),
+          clearedPublicFields(descriptor, value, values, submitted),
+        ),
       );
     } catch (error) {
       setTestResult({
@@ -134,6 +159,16 @@ export function PluginConfigForm({
         message: error instanceof Error ? error.message : "Connection check failed.",
       });
     }
+  }
+
+  function handleSave() {
+    const submitted = buildSchemaValues(descriptor, values);
+    onSave(
+      schema.key,
+      submitted,
+      Array.from(clearSecrets),
+      clearedPublicFields(descriptor, value, values, submitted),
+    );
   }
 
   if (!supported) {
@@ -207,14 +242,7 @@ export function PluginConfigForm({
             disabled={isSaving}
           />
         ) : null}
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={isSaving || isTesting}
-          onClick={() =>
-            onSave(schema.key, buildSchemaValues(descriptor, values), Array.from(clearSecrets))
-          }
-        >
+        <Button size="sm" variant="outline" disabled={isSaving || isTesting} onClick={handleSave}>
           {schema.admin_form?.submit_label || "Save config"}
         </Button>
       </div>

@@ -78,6 +78,8 @@ type serverSettingsAtomicUpdater interface {
 	) error
 }
 
+const settingsEventPublishTimeout = time.Second
+
 func updateServerSettingsAtomically(
 	ctx context.Context,
 	store ServerSettingsStore,
@@ -87,6 +89,24 @@ func updateServerSettingsAtomically(
 		return updater.UpdateAtomic(ctx, update)
 	}
 	return errors.New("settings store does not support atomic updates")
+}
+
+func (h *AdminHandler) publishSettingsChanged(ctx context.Context, keys []string) {
+	if h.EventBus == nil || len(keys) == 0 {
+		return
+	}
+
+	publishCtx, cancel := context.WithTimeout(ctx, settingsEventPublishTimeout)
+	defer cancel()
+	for _, key := range keys {
+		if publishCtx.Err() != nil {
+			return
+		}
+		if err := h.EventBus.Publish(publishCtx, cache.ChannelAdmin,
+			cache.Event{Type: cache.EventSettingsChanged, Payload: key}); err != nil {
+			slog.WarnContext(ctx, "admin: failed to publish setting update", "component", "api", "setting_key", key, "error", err)
+		}
+	}
 }
 
 type DiagnosticsEnablementStore interface {
@@ -2717,6 +2737,7 @@ func (h *AdminHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.Reque
 
 	responseValues := make(map[string]string, len(normalized))
 	restartKeys := make([]string, 0, len(normalized))
+	changedKeys := make([]string, 0, len(normalized))
 	for _, key := range keys {
 		if !sensitiveSettingKeys[key] {
 			responseValues[key] = after[key]
@@ -2724,16 +2745,13 @@ func (h *AdminHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.Reque
 		if !effectiveChanges[key] {
 			continue
 		}
-		if h.EventBus != nil {
-			_ = h.EventBus.Publish(r.Context(), cache.ChannelAdmin,
-				cache.Event{Type: cache.EventSettingsChanged, Payload: key})
-		}
 		if h.OnServerSettingUpdated != nil {
 			h.OnServerSettingUpdated(r.Context(), key, after[key])
 		}
 		if config.RestartRequired(key) {
 			restartKeys = append(restartKeys, key)
 		}
+		changedKeys = append(changedKeys, key)
 	}
 	// Per-key reasons ("setting:<key>") so the admin UI can scope a pending
 	// restart to the subsystem the key belongs to instead of warning on every
@@ -2741,6 +2759,7 @@ func (h *AdminHandler) HandleUpdateSettings(w http.ResponseWriter, r *http.Reque
 	for _, restartKey := range restartKeys {
 		h.markServerRestartRequired("setting:" + restartKey)
 	}
+	h.publishSettingsChanged(r.Context(), changedKeys)
 	writeJSON(w, http.StatusOK, updateSettingsResponse{
 		Values:              responseValues,
 		RestartRequired:     len(restartKeys) > 0,
@@ -3083,10 +3102,6 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if effectiveChanged {
-		if h.EventBus != nil {
-			_ = h.EventBus.Publish(r.Context(), cache.ChannelAdmin,
-				cache.Event{Type: cache.EventSettingsChanged, Payload: key})
-		}
 		if h.OnServerSettingUpdated != nil {
 			h.OnServerSettingUpdated(r.Context(), key, after[key])
 		}
@@ -3094,6 +3109,9 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 	restartRequired := effectiveChanged && config.RestartRequired(key)
 	if restartRequired {
 		h.markServerRestartRequired("setting:" + key)
+	}
+	if effectiveChanged {
+		h.publishSettingsChanged(r.Context(), []string{key})
 	}
 	if sensitiveSettingKeys[key] {
 		writeJSON(w, http.StatusOK, adminSettingResponse{Key: key, RestartRequired: restartRequired})

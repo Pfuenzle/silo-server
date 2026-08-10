@@ -2,19 +2,20 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/pluginhost"
 	"github.com/Silo-Server/silo-server/internal/plugins"
+	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
 type pluginAuthClient interface {
@@ -29,16 +30,19 @@ type PluginProviderConfig struct {
 	InstallationID int
 	CapabilityID   string
 	DisplayName    string
+	AuthMode       string
 	AutoProvision  bool
+	StoreProvider  userstore.UserStoreProvider
 }
 
 type PluginProvider struct {
-	config       PluginProviderConfig
-	client       pluginAuthClientFactory
-	sessions     *SessionRepository
-	users        *UserRepository
-	identityPool *pgxpool.Pool
-	accounts     *AccountProvisioner
+	config     PluginProviderConfig
+	client     pluginAuthClientFactory
+	sessions   *SessionRepository
+	users      *UserRepository
+	identities *PluginIdentityRepository
+	accounts   *AccountProvisioner
+	pool       *pgxpool.Pool
 }
 
 func NewPluginProviderWithClientFactory(
@@ -49,12 +53,13 @@ func NewPluginProviderWithClientFactory(
 	clientFactory pluginAuthClientFactory,
 ) *PluginProvider {
 	return &PluginProvider{
-		config:       config,
-		client:       clientFactory,
-		sessions:     sessions,
-		users:        users,
-		identityPool: pool,
-		accounts:     NewAccountProvisioner(users, nil),
+		config:     config,
+		client:     clientFactory,
+		sessions:   sessions,
+		users:      users,
+		identities: NewPluginIdentityRepository(pool),
+		accounts:   NewAccountProvisioner(users, config.StoreProvider),
+		pool:       pool,
 	}
 }
 
@@ -73,8 +78,29 @@ func NewPluginProvider(
 }
 
 func (p *PluginProvider) Authenticate(ctx context.Context, creds Credentials) (*models.User, error) {
+	return p.authenticate(ctx, creds, nil)
+}
+
+// AuthenticateAndComplete authenticates credentials and durably completes the
+// resulting login. Plugin binding state, external authorization, revocation,
+// and session creation share one transaction when authorization is enabled.
+func (p *PluginProvider) AuthenticateAndComplete(ctx context.Context, creds Credentials, session models.AuthSession) (*models.User, error) {
+	if session.ID == "" || session.ExpiresAt.IsZero() {
+		return nil, ErrInvalidCredentials
+	}
+	return p.authenticate(ctx, creds, &session)
+}
+
+func (p *PluginProvider) authenticate(ctx context.Context, creds Credentials, session *models.AuthSession) (*models.User, error) {
+	if !p.bindingEnabled(ctx) {
+		return nil, ErrInvalidCredentials
+	}
 	client, err := p.client(ctx)
 	if err != nil {
+		slog.ErrorContext(ctx, "plugin auth client unavailable", "component", "auth", "installation_id", p.config.InstallationID, "capability_id", p.config.CapabilityID, "error", err)
+		if status.Code(err) == codes.Unauthenticated {
+			return nil, ErrInvalidCredentials
+		}
 		if errors.Is(err, ErrInvalidCredentials) || errors.Is(err, ErrUserDisabled) {
 			return nil, err
 		}
@@ -89,71 +115,71 @@ func (p *PluginProvider) Authenticate(ctx context.Context, creds Credentials) (*
 		Password: creds.Password,
 	})
 	if err != nil {
+		slog.ErrorContext(ctx, "plugin auth RPC failed", "component", "auth", "installation_id", p.config.InstallationID, "capability_id", p.config.CapabilityID, "error", err)
+		if status.Code(err) == codes.NotFound {
+			return nil, ErrAccountNotFound
+		}
+		if status.Code(err) == codes.Unauthenticated {
+			return nil, ErrInvalidCredentials
+		}
 		if errors.Is(err, ErrInvalidCredentials) || errors.Is(err, ErrUserDisabled) {
 			return nil, err
 		}
 		return nil, fmt.Errorf("plugin auth authenticate: %w", err)
 	}
-	if response.GetExternalSubject() == "" {
+	if response.GetStatus() == pluginv1.AuthStatus_AUTH_STATUS_ACCOUNT_NOT_FOUND {
+		return nil, ErrAccountNotFound
+	}
+	if strings.TrimSpace(response.GetExternalSubject()) == "" {
 		return nil, ErrInvalidCredentials
 	}
 
-	user, err := p.lookupIdentity(ctx, response.GetExternalSubject())
-	if err == nil && user != nil {
-		if !user.Enabled {
-			return nil, ErrUserDisabled
-		}
-		return user, nil
-	}
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return nil, err
-	}
-	if !p.config.AutoProvision {
-		return nil, ErrInvalidCredentials
-	}
-
-	user, err = p.autoProvisionUser(ctx, creds, response)
-	if err != nil {
-		return nil, err
-	}
-	if err := p.upsertIdentity(ctx, response.GetExternalSubject(), user.ID); err != nil {
-		return nil, err
-	}
-	return user, nil
+	return p.completeExternalLogin(ctx, creds, response, session)
 }
 
 // CompleteOAuth runs the post-RPC half of plugin authentication for an
 // OAuth flow: validate the AuthenticateResponse, look up an existing
 // plugin_auth_identities row, auto-provision a new user if needed, and
-// upsert the identity. The handler calls plugin ExchangeCode itself and
+// claim immutable identity ownership. The handler calls plugin ExchangeCode itself and
 // passes the response in here.
 func (p *PluginProvider) CompleteOAuth(ctx context.Context, response *pluginv1.AuthenticateResponse) (*models.User, error) {
-	if response.GetExternalSubject() == "" {
+	return p.completeOAuth(ctx, response, nil)
+}
+
+// CompleteOAuthAndComplete finishes an OAuth login inside the same durable
+// transaction that reconciles external authorization and creates its session.
+func (p *PluginProvider) CompleteOAuthAndComplete(ctx context.Context, response *pluginv1.AuthenticateResponse, session models.AuthSession) (*models.User, error) {
+	if session.ID == "" || session.ExpiresAt.IsZero() {
+		return nil, ErrInvalidCredentials
+	}
+	return p.completeOAuth(ctx, response, &session)
+}
+
+func (p *PluginProvider) completeOAuth(ctx context.Context, response *pluginv1.AuthenticateResponse, session *models.AuthSession) (*models.User, error) {
+	if !p.bindingEnabled(ctx) {
+		return nil, ErrInvalidCredentials
+	}
+	if strings.TrimSpace(response.GetExternalSubject()) == "" {
 		return nil, ErrInvalidCredentials
 	}
 
-	user, err := p.lookupIdentity(ctx, response.GetExternalSubject())
-	if err == nil && user != nil {
-		if !user.Enabled {
-			return nil, ErrUserDisabled
-		}
-		return user, nil
-	}
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return nil, err
-	}
-	if !p.config.AutoProvision {
-		return nil, ErrInvalidCredentials
-	}
+	return p.completeExternalLogin(ctx, Credentials{}, response, session)
+}
 
-	user, err = p.autoProvisionUser(ctx, Credentials{}, response)
-	if err != nil {
-		return nil, err
+func (p *PluginProvider) setAuthMode(mode string) {
+	p.config.AuthMode = mode
+}
+
+func (p *PluginProvider) bindingEnabled(ctx context.Context) bool {
+	if p == nil || p.pool == nil {
+		return false
 	}
-	if err := p.upsertIdentity(ctx, response.GetExternalSubject(), user.ID); err != nil {
-		return nil, err
+	if strings.TrimSpace(p.config.CapabilityID) == "" {
+		return true
 	}
-	return user, nil
+	var enabled bool
+	err := p.pool.QueryRow(ctx, `SELECT enabled FROM plugin_auth_bindings WHERE plugin_installation_id = $1 AND capability_id = $2`, p.config.InstallationID, p.config.CapabilityID).Scan(&enabled)
+	return err == nil && enabled
 }
 
 // InstallationID exposes the plugin install this provider is bound to —
@@ -188,20 +214,12 @@ func (p *PluginProvider) ValidateSession(ctx context.Context, sessionID string) 
 }
 
 func (p *PluginProvider) lookupIdentity(ctx context.Context, externalSubject string) (*models.User, error) {
-	var userID int
-	err := p.identityPool.QueryRow(ctx, `
-		SELECT user_id
-		FROM plugin_auth_identities
-		WHERE plugin_installation_id = $1 AND external_subject = $2
-	`,
-		p.config.InstallationID,
-		externalSubject,
-	).Scan(&userID)
+	userID, err := p.identities.Lookup(ctx, PluginIdentityKey{
+		InstallationID:  p.config.InstallationID,
+		ExternalSubject: externalSubject,
+	})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrNotFound
-		}
-		return nil, fmt.Errorf("lookup plugin auth identity: %w", err)
+		return nil, err
 	}
 	user, err := p.users.GetByID(ctx, userID)
 	if err != nil {
@@ -210,95 +228,9 @@ func (p *PluginProvider) lookupIdentity(ctx context.Context, externalSubject str
 	return user, nil
 }
 
-func (p *PluginProvider) upsertIdentity(ctx context.Context, externalSubject string, userID int) error {
-	_, err := p.identityPool.Exec(ctx, `
-		INSERT INTO plugin_auth_identities (plugin_installation_id, external_subject, user_id)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (plugin_installation_id, external_subject) DO UPDATE SET
-			user_id = EXCLUDED.user_id,
-			updated_at = NOW()
-	`,
-		p.config.InstallationID,
-		externalSubject,
-		userID,
-	)
-	if err != nil {
-		return fmt.Errorf("upsert plugin auth identity: %w", err)
-	}
-	return nil
-}
-
-func (p *PluginProvider) autoProvisionUser(
-	ctx context.Context,
-	creds Credentials,
-	response *pluginv1.AuthenticateResponse,
-) (*models.User, error) {
-	usernameBase := strings.TrimSpace(response.GetDisplayName())
-	if usernameBase == "" {
-		usernameBase = strings.TrimSpace(creds.Username)
-	}
-	if usernameBase == "" {
-		usernameBase = response.GetExternalSubject()
-	}
-	usernameBase = sanitizeUsername(usernameBase)
-	if usernameBase == "" {
-		usernameBase = fmt.Sprintf("plugin_%d", p.config.InstallationID)
-	}
-
-	email := strings.TrimSpace(response.GetEmail())
-	if email == "" {
-		email = fmt.Sprintf("%s@plugin-%d.local", usernameBase, p.config.InstallationID)
-	}
-
-	localPasswordLoginEnabled := false
-	password, err := randomPluginOnlyPassword()
-	if err != nil {
-		return nil, fmt.Errorf("generate plugin-only password: %w", err)
-	}
-
-	username := usernameBase
-	for i := 0; i < 10; i++ {
-		user, err := p.accounts.CreateAccount(ctx, CreateAccountInput{
-			User: models.CreateUserInput{
-				Email:                     email,
-				Username:                  username,
-				Password:                  password,
-				LocalPasswordLoginEnabled: &localPasswordLoginEnabled,
-				Role:                      "user",
-			},
-		})
-		if err == nil {
-			return user, nil
-		}
-		if !IsDuplicate(err) {
-			return nil, fmt.Errorf("auto-provision plugin user: %w", err)
-		}
-		username = fmt.Sprintf("%s_%d", usernameBase, i+2)
-	}
-	return nil, fmt.Errorf("auto-provision plugin user: exhausted username attempts")
-}
-
-func randomPluginOnlyPassword() (string, error) {
-	buf := make([]byte, 24)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return "plugin-only-" + hex.EncodeToString(buf), nil
-}
-
-func sanitizeUsername(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	value = strings.ReplaceAll(value, " ", "_")
-	var b strings.Builder
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '_' || r == '-' || r == '.':
-			b.WriteRune(r)
-		}
-	}
-	return strings.Trim(b.String(), "_.-")
+func (p *PluginProvider) claimIdentity(ctx context.Context, externalSubject string, userID int) error {
+	return p.identities.Claim(ctx, PluginIdentityKey{
+		InstallationID:  p.config.InstallationID,
+		ExternalSubject: externalSubject,
+	}, userID)
 }

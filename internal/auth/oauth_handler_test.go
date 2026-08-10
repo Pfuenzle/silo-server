@@ -73,6 +73,17 @@ func withInstallID(r *http.Request, id string) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rc))
 }
 
+func addOAuthResponseCookies(t *testing.T, response *httptest.ResponseRecorder, request *http.Request) {
+	t.Helper()
+	cookies := response.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("OAuth init response did not set a browser-binding cookie")
+	}
+	for _, cookie := range cookies {
+		request.AddCookie(cookie)
+	}
+}
+
 func TestOAuthInit_Redirects302WithAuthorizeURL(t *testing.T) {
 	authorizeURL := "https://billing.example/oauth/authorize.php?client_id=x"
 	pState, _ := structpb.NewStruct(map[string]any{"pkce_verifier": "abc"})
@@ -89,6 +100,17 @@ func TestOAuthInit_Redirects302WithAuthorizeURL(t *testing.T) {
 	}
 	if got := w.Header().Get("Location"); got != authorizeURL {
 		t.Errorf("Location = %q", got)
+	}
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("browser-binding cookies = %d, want 1", len(cookies))
+	}
+	binding := cookies[0]
+	if !binding.HttpOnly || !binding.Secure || binding.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("browser-binding cookie flags = HttpOnly:%t Secure:%t SameSite:%d", binding.HttpOnly, binding.Secure, binding.SameSite)
+	}
+	if binding.Path != "/api/v1/auth/oauth/42/callback" {
+		t.Fatalf("browser-binding cookie path = %q", binding.Path)
 	}
 
 	// Exactly one row inserted; next_url preserved.
@@ -129,6 +151,33 @@ func TestOAuthInit_NormalizesUnsafeNextURL(t *testing.T) {
 		if row.NextURL != "/" {
 			t.Fatalf("NextURL = %q, want /", row.NextURL)
 		}
+	}
+}
+
+func TestNormalizeOAuthNext_PreservesOnlySafeRelativeTargets(t *testing.T) {
+	tests := []struct {
+		name string
+		next string
+		want string
+	}{
+		{name: "relative path", next: "/profiles", want: "/profiles"},
+		{name: "relative path with query and fragment", next: "/library?tab=new#recent", want: "/library?tab=new#recent"},
+		{name: "absolute URL", next: "https://evil.example/steal", want: "/"},
+		{name: "scheme-relative URL", next: "//evil.example/steal", want: "/"},
+		{name: "backslash authority", next: `/\evil.example/steal`, want: "/"},
+		{name: "encoded backslash authority", next: `/%5Cevil.example/steal`, want: "/"},
+		{name: "encoded slash authority", next: `/%2Fevil.example/steal`, want: "/"},
+		{name: "encoded control", next: `/profiles%0ASet-Cookie:attack`, want: "/"},
+		{name: "raw control", next: "/profiles\nattack", want: "/"},
+		{name: "malformed encoding", next: "/profiles%zz", want: "/"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeOAuthNext(tt.next); got != tt.want {
+				t.Fatalf("normalizeOAuthNext(%q) = %q, want %q", tt.next, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -193,6 +242,7 @@ func TestOAuthCallback_HappyPath_DeliversOneTimeCompletionCode(t *testing.T) {
 
 	// Callback with that state.
 	rCb := withInstallID(httptest.NewRequest("GET", "/api/v1/auth/oauth/42/callback?code=auth-code&state="+url.QueryEscape(state), nil), "42")
+	addOAuthResponseCookies(t, wInit, rCb)
 	wCb := httptest.NewRecorder()
 	h.HandleCallback(wCb, rCb)
 
@@ -214,12 +264,36 @@ func TestOAuthCallback_HappyPath_DeliversOneTimeCompletionCode(t *testing.T) {
 	if code == "" {
 		t.Fatalf("completion code missing from redirect: %q", loc)
 	}
+	if got := parsed.Query().Get("next"); got != "/me" {
+		t.Fatalf("completion redirect next = %q, want /me", got)
+	}
+	if parsed.Query().Has("state") {
+		t.Fatalf("completion redirect leaked OAuth state: %q", loc)
+	}
+	if got := wCb.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("callback cache-control = %q, want no-store", got)
+	}
+	if got := wCb.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("callback referrer-policy = %q, want no-referrer", got)
+	}
+	cleared := false
+	for _, cookie := range wCb.Result().Cookies() {
+		if strings.HasPrefix(cookie.Name, oauthBrowserCookiePrefix) && cookie.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("callback did not clear browser-binding cookie")
+	}
 
 	rComplete := httptest.NewRequest("POST", "/api/v1/auth/oauth/complete", strings.NewReader(`{"code":"`+code+`"}`))
 	wComplete := httptest.NewRecorder()
 	h.HandleComplete(wComplete, rComplete)
 	if wComplete.Code != http.StatusOK {
 		t.Fatalf("complete code = %d body=%s", wComplete.Code, wComplete.Body.String())
+	}
+	if got := wComplete.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("complete cache-control = %q, want no-store", got)
 	}
 	var completed OAuthCompleteResponse
 	if err := json.NewDecoder(wComplete.Body).Decode(&completed); err != nil {
@@ -247,26 +321,88 @@ func TestOAuthCallback_HappyPath_DeliversOneTimeCompletionCode(t *testing.T) {
 	}
 }
 
+func TestOAuthCallback_RejectsStateWithoutInitiatingBrowserCookie(t *testing.T) {
+	// Given
+	providerState, err := structpb.NewStruct(map[string]any{"pkce_verifier": "abc"})
+	if err != nil {
+		t.Fatalf("new provider state: %v", err)
+	}
+	client := &fakeOAuthClient{
+		initResp:     &pluginv1.InitAuthorizeResponse{AuthorizeUrl: "https://idp.example/authorize", ProviderState: providerState},
+		exchangeResp: &pluginv1.AuthenticateResponse{ExternalSubject: "attacker"},
+	}
+	handler, _ := newOAuthHandlerForTest(t, client, &fakeCompleter{
+		pair: &TokenPair{AccessToken: "access", RefreshToken: "refresh", ExpiresIn: 900},
+		user: &models.User{ID: 7},
+	})
+	initResponse := httptest.NewRecorder()
+	handler.HandleInit(initResponse, withInstallID(httptest.NewRequest(http.MethodPost, "/init?next=/profiles", nil), "42"))
+	state := client.gotInit.GetState()
+
+	// When
+	callback := withInstallID(httptest.NewRequest(http.MethodGet, "/callback?code=code&state="+url.QueryEscape(state), nil), "42")
+	response := httptest.NewRecorder()
+	handler.HandleCallback(response, callback)
+
+	// Then
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusFound)
+	}
+	location, err := url.Parse(response.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse redirect: %v", err)
+	}
+	if location.Path != "/login" || location.Query().Get("error") != "oauth_failed" {
+		t.Fatalf("redirect = %q, want generic OAuth failure", location)
+	}
+	if location.Query().Has("redirect") {
+		t.Fatalf("unbound browser received trusted redirect: %q", location)
+	}
+	if client.gotExchange != nil {
+		t.Fatal("ExchangeCode called without browser binding")
+	}
+	cleared := false
+	for _, cookie := range response.Result().Cookies() {
+		if strings.HasPrefix(cookie.Name, oauthBrowserCookiePrefix) && cookie.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("rejected callback did not clear browser-binding cookie")
+	}
+}
+
 func TestOAuthCallback_RejectsTamperedState(t *testing.T) {
 	h, _ := newOAuthHandlerForTest(t, &fakeOAuthClient{}, &fakeCompleter{})
-	r := withInstallID(httptest.NewRequest("GET", "/cb?code=x&state=tampered.junk", nil), "42")
+	r := withInstallID(httptest.NewRequest("GET", "/cb?code=x&state=tampered.junk&next=%2Fadmin", nil), "42")
 	w := httptest.NewRecorder()
 	h.HandleCallback(w, r)
 	if w.Code != http.StatusFound {
 		t.Fatalf("code = %d", w.Code)
 	}
-	if got := w.Header().Get("Location"); !strings.Contains(got, "error=oauth_failed") {
-		t.Errorf("Location = %q", got)
+	location := w.Header().Get("Location")
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("parse redirect: %v", err)
+	}
+	if parsed.Query().Get("error") != "oauth_failed" {
+		t.Errorf("Location = %q", location)
+	}
+	if parsed.Query().Has("next") || parsed.Query().Has("redirect") {
+		t.Errorf("untrusted callback next influenced redirect: %q", location)
 	}
 }
 
 func TestOAuthCallback_RejectsMissingCodeOrState(t *testing.T) {
 	h, _ := newOAuthHandlerForTest(t, &fakeOAuthClient{}, &fakeCompleter{})
-	r := withInstallID(httptest.NewRequest("GET", "/cb", nil), "42")
+	r := withInstallID(httptest.NewRequest("GET", "/cb?next=%2Fadmin", nil), "42")
 	w := httptest.NewRecorder()
 	h.HandleCallback(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("code = %d, want 400", w.Code)
+	}
+	if got := w.Header().Get("Location"); got != "" {
+		t.Errorf("missing state accepted caller next: %q", got)
 	}
 }
 
@@ -288,8 +424,13 @@ func TestOAuthCallback_InstallMismatchRedirectsToLoginError(t *testing.T) {
 	if wCb.Code != http.StatusFound {
 		t.Errorf("code = %d", wCb.Code)
 	}
-	if got := wCb.Header().Get("Location"); !strings.Contains(got, "install_mismatch") {
-		t.Errorf("Location = %q", got)
+	location := wCb.Header().Get("Location")
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("parse redirect: %v", err)
+	}
+	if parsed.Query().Get("error") != "oauth_failed" || parsed.Query().Has("reason") || parsed.Query().Has("redirect") {
+		t.Errorf("untrusted install mismatch redirect = %q", location)
 	}
 }
 
@@ -301,20 +442,31 @@ func TestOAuthCallback_ExchangeFailRedirectsToLoginError(t *testing.T) {
 	}
 	h, _ := newOAuthHandlerForTest(t, fc, &fakeCompleter{})
 
-	rInit := withInstallID(httptest.NewRequest("POST", "/init", nil), "42")
-	h.HandleInit(httptest.NewRecorder(), rInit)
+	rInit := withInstallID(httptest.NewRequest("POST", "/init?next=%2Fprofiles", nil), "42")
+	wInit := httptest.NewRecorder()
+	h.HandleInit(wInit, rInit)
 	state := fc.gotInit.GetState()
 
 	rCb := withInstallID(httptest.NewRequest("GET", "/cb?code=c&state="+url.QueryEscape(state), nil), "42")
+	addOAuthResponseCookies(t, wInit, rCb)
 	wCb := httptest.NewRecorder()
 	h.HandleCallback(wCb, rCb)
 	if wCb.Code != http.StatusFound {
 		t.Errorf("code = %d", wCb.Code)
 	}
-	if got := wCb.Header().Get("Location"); !strings.Contains(got, "reason=exchange_failed") {
-		t.Errorf("Location = %q", got)
-	} else if strings.Contains(got, "token endpoint") || strings.Contains(got, "secret context") {
-		t.Errorf("Location leaked internal error: %q", got)
+	location := wCb.Header().Get("Location")
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("parse redirect: %v", err)
+	}
+	if got := parsed.Query().Get("error"); got != "oauth_failed" {
+		t.Errorf("error = %q in %q", got, location)
+	}
+	if got := parsed.Query().Get("redirect"); got != "/profiles" {
+		t.Errorf("redirect = %q in %q", got, location)
+	}
+	if parsed.Query().Has("reason") || strings.Contains(location, "token endpoint") || strings.Contains(location, "secret context") {
+		t.Errorf("Location leaked failure detail: %q", location)
 	}
 }
 
@@ -327,20 +479,28 @@ func TestOAuthCallback_CompleteLoginErrorRedirectsWithGenericReason(t *testing.T
 	fcomp := &fakeCompleter{err: errors.New("insert users failed: private db detail")}
 	h, _ := newOAuthHandlerForTest(t, fc, fcomp)
 
-	rInit := withInstallID(httptest.NewRequest("POST", "/init", nil), "42")
-	h.HandleInit(httptest.NewRecorder(), rInit)
+	rInit := withInstallID(httptest.NewRequest("POST", "/init?next=%2Flibrary%3Ftab%3Dnew", nil), "42")
+	wInit := httptest.NewRecorder()
+	h.HandleInit(wInit, rInit)
 	state := fc.gotInit.GetState()
 
 	rCb := withInstallID(httptest.NewRequest("GET", "/cb?code=c&state="+url.QueryEscape(state), nil), "42")
+	addOAuthResponseCookies(t, wInit, rCb)
 	wCb := httptest.NewRecorder()
 	h.HandleCallback(wCb, rCb)
 	if wCb.Code != http.StatusFound {
 		t.Errorf("code = %d", wCb.Code)
 	}
-	if got := wCb.Header().Get("Location"); !strings.Contains(got, "reason=login_failed") {
-		t.Errorf("Location = %q", got)
-	} else if strings.Contains(got, "private db detail") {
-		t.Errorf("Location leaked internal error: %q", got)
+	location := wCb.Header().Get("Location")
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("parse redirect: %v", err)
+	}
+	if got := parsed.Query().Get("redirect"); got != "/library?tab=new" {
+		t.Errorf("redirect = %q in %q", got, location)
+	}
+	if parsed.Query().Has("reason") || strings.Contains(location, "private db detail") {
+		t.Errorf("Location leaked failure detail: %q", location)
 	}
 }
 

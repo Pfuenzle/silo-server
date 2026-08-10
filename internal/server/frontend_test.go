@@ -41,6 +41,7 @@ func TestFrontendHandlerSetsSecurityHeadersOnSPAHTML(t *testing.T) {
 				"script-src 'self' 'wasm-unsafe-eval'",
 				"object-src 'none'",
 				"base-uri 'self'",
+				"form-action 'self' https:",
 			} {
 				if !strings.Contains(csp, directive) {
 					t.Fatalf("csp missing %q: %q", directive, csp)
@@ -53,6 +54,27 @@ func TestFrontendHandlerSetsSecurityHeadersOnSPAHTML(t *testing.T) {
 				t.Fatalf("x-content-type-options = %q", got)
 			}
 		})
+	}
+}
+
+func TestFrontendHandlerProtectsOAuthCompletionURL(t *testing.T) {
+	// Given
+	handler := newFrontendTestHandler(t)
+	request := httptest.NewRequest(http.MethodGet, "/login/oauth-complete?code=one-time-code&next=%2Fprofiles", nil)
+	response := httptest.NewRecorder()
+
+	// When
+	handler.ServeHTTP(response, request)
+
+	// Then
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("cache-control = %q, want no-store", got)
+	}
+	if got := response.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("referrer-policy = %q, want no-referrer", got)
 	}
 }
 
