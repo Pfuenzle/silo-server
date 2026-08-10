@@ -16,6 +16,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/plugins"
 )
 
@@ -67,6 +69,28 @@ func requestWithIDParamBody(method, target, param string, id int, body io.Reader
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add(param, strconv.Itoa(id))
 	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+}
+
+func requestWithIDParamBodyAdmin(method, target, param string, id int, body io.Reader, actorID int) *http.Request {
+	req := requestWithIDParamBody(method, target, param, id, body)
+	return req.WithContext(apimw.SetClaims(req.Context(), &auth.Claims{UserID: actorID, Role: "admin"}))
+}
+
+func seedBuiltinTestUser(t *testing.T, pool *pgxpool.Pool, suffix string) int {
+	t.Helper()
+	var userID int
+	label := fmt.Sprintf("builtin-test-%s-%d", suffix, time.Now().UnixNano())
+	err := pool.QueryRow(context.Background(), `
+		INSERT INTO users (email, username, password_hash, role, enabled, local_password_login_enabled)
+		VALUES ($1, $2, 'unused', 'admin', true, true)
+		RETURNING id`, label+"@example.invalid", label).Scan(&userID)
+	if err != nil {
+		t.Fatalf("seed test user: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, userID)
+	})
+	return userID
 }
 
 // The manifest-less builtin row must not 500 the user-scoped plugin settings
@@ -166,5 +190,50 @@ func TestBuiltinInstallationMutationsRejected(t *testing.T) {
 				t.Fatalf("status = %d, want 4xx; body=%s", rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestHandleDeleteInstallation_returnsDependencyCountsWithoutIdentityData(t *testing.T) {
+	// Given
+	pool := pluginBuiltinTestPool(t)
+	ctx := context.Background()
+	pluginID := fmt.Sprintf("test.delete.guard-%d", time.Now().UnixNano())
+	var installationID, userID int
+	if err := pool.QueryRow(ctx, `INSERT INTO plugin_installations (plugin_id, version, install_path, enabled, update_policy) VALUES ($1, '1', $2, true, 'manual') RETURNING id`, pluginID, t.TempDir()).Scan(&installationID); err != nil {
+		t.Fatalf("seed installation: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO users (email, username, password_hash, role) VALUES ($1, $2, 'unused', 'user') RETURNING id`, pluginID+"@example.invalid", pluginID).Scan(&userID); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO plugin_auth_identities (plugin_installation_id, external_subject, user_id) VALUES ($1, 'never-return-this-subject', $2)`, installationID, userID); err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, userID) })
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM plugin_installations WHERE id = $1`, installationID)
+	})
+
+	// When
+	rec := httptest.NewRecorder()
+	builtinTestHandler(pool).HandleDeleteInstallation(rec, requestWithIDParam(http.MethodDelete, "/api/v1/plugins/installations/0", "id", installationID))
+
+	// Then
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Error        string `json:"error"`
+		Dependencies struct {
+			Identities int `json:"identities"`
+		} `json:"dependencies"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Error != "installation_has_dependencies" || response.Dependencies.Identities != 1 {
+		t.Fatalf("response = %+v, want dependency conflict with one identity", response)
+	}
+	if strings.Contains(rec.Body.String(), "never-return-this-subject") {
+		t.Fatalf("dependency response exposed identity data: %s", rec.Body.String())
 	}
 }

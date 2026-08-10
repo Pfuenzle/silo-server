@@ -335,8 +335,8 @@
      atmosphere where media artwork is the star.                    */
   [data-theme="midnight-cinema"] {
     --radius: 0.75rem;
-    --font-body: "Outfit", sans-serif;
-    --font-display: "Outfit", sans-serif;
+    --font-body: "Outfit", "Noto Sans JP Variable", "Noto Sans KR Variable", sans-serif;
+    --font-display: "Outfit", "Noto Sans JP Variable", "Noto Sans KR Variable", sans-serif;
 
     /* Surfaces: near-black with subtle cool undertone */
     --background: #141417;
@@ -397,8 +397,8 @@
 
   [data-theme="cinema-light"] {
     --radius: 0.75rem;
-    --font-body: "Outfit", sans-serif;
-    --font-display: "Outfit", sans-serif;
+    --font-body: "Outfit", "Noto Sans JP Variable", "Noto Sans KR Variable", sans-serif;
+    --font-display: "Outfit", "Noto Sans JP Variable", "Noto Sans KR Variable", sans-serif;
 
     /* Surfaces: warm off-white with cool undertone */
     --background: #f4f4f6;
@@ -464,8 +464,8 @@
 
   [data-theme="cobalt-studio"] {
     --radius: 0.75rem;
-    --font-body: "Outfit", sans-serif;
-    --font-display: "Outfit", sans-serif;
+    --font-body: "Outfit", "Noto Sans JP Variable", "Noto Sans KR Variable", sans-serif;
+    --font-display: "Outfit", "Noto Sans JP Variable", "Noto Sans KR Variable", sans-serif;
     --background: #101722;
     --foreground: #f4f8ff;
     --card: #151e2b;
@@ -508,8 +508,8 @@
 
   [data-theme="oxblood-noir"] {
     --radius: 0.75rem;
-    --font-body: "Outfit", sans-serif;
-    --font-display: "Outfit", sans-serif;
+    --font-body: "Outfit", "Noto Sans JP Variable", "Noto Sans KR Variable", sans-serif;
+    --font-display: "Outfit", "Noto Sans JP Variable", "Noto Sans KR Variable", sans-serif;
     --background: #171113;
     --foreground: #f8f2f3;
     --card: #20181b;
@@ -552,8 +552,8 @@
 
   [data-theme="evergreen-studio"] {
     --radius: 0.75rem;
-    --font-body: "Outfit", sans-serif;
-    --font-display: "Outfit", sans-serif;
+    --font-body: "Outfit", "Noto Sans JP Variable", "Noto Sans KR Variable", sans-serif;
+    --font-display: "Outfit", "Noto Sans JP Variable", "Noto Sans KR Variable", sans-serif;
     --background: #101715;
     --foreground: #f2f8f5;
     --card: #16201d;

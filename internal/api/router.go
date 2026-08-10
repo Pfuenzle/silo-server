@@ -171,6 +171,7 @@ type Dependencies struct {
 	OnServerSettingUpdated func(ctx context.Context, key, value string)
 	RequestServerRestart   func(ctx context.Context) error
 	ServerRestartStatus    *handlers.ServerRestartStatusTracker
+	Canonicalizer          handlers.Canonicalizer
 
 	// UserCollectionSync handles per-profile imported collections (TMDB /
 	// Trakt / MDBList) — the user-facing analogue of CollectionService.
@@ -1775,7 +1776,7 @@ func NewRouter(deps Dependencies) chi.Router {
 			var oauthHandler *auth.OAuthHandler
 			if deps.PublicURL != "" && deps.DB != nil && authService != nil && jwtService != nil {
 				stateSecret := auth.DeriveOAuthStateSecret([]byte(deps.Config.Auth.JWTSecret))
-				oauthStore := auth.NewPGOAuthStore(deps.DB, stateSecret)
+				oauthStore := auth.NewPGOAuthStore(deps.DB, stateSecret, deps.SecretCipher)
 				resolveClient := func(ctx context.Context, installationID int) (auth.OAuthClient, string, error) {
 					pp := authService.FindOAuthInstallation(installationID)
 					if pp == nil {
@@ -2830,6 +2831,10 @@ func NewRouter(deps Dependencies) chi.Router {
 							r.Get("/settings", adminHandler.HandleGetSettings)
 							r.Put("/settings", adminHandler.HandleUpdateSettings)
 							r.Put("/settings/{key}", adminHandler.HandleUpdateSetting)
+							if authHandler != nil {
+								r.Get("/auth/credential-provider-fallback", authHandler.HandleGetCredentialProviderFallback)
+								r.Put("/auth/credential-provider-fallback", authHandler.HandlePutCredentialProviderFallback)
+							}
 							if brandingHandler != nil {
 								// Branding image upload/delete (scalar branding
 								// fields use the generic settings PUT above).
@@ -2948,9 +2953,22 @@ func NewRouter(deps Dependencies) chi.Router {
 									r.Post("/installations/{id}/config/test", pluginHandler.HandleTestInstallationConfig)
 									r.Put("/installations/{id}/config", pluginHandler.HandlePutInstallationConfig)
 									r.Put("/installations/{id}/auth-binding", pluginHandler.HandlePutAuthBinding)
+									r.Get("/installations/{id}/auth-group-mappings", pluginHandler.HandleListAuthGroupMappings)
+									r.Put("/installations/{id}/auth-group-mappings", pluginHandler.HandlePutAuthGroupMappings)
+									r.Post("/installations/{id}/auth-group-mappings/preview", pluginHandler.HandlePreviewAuthGroupMappings)
 									r.Put("/installations/{id}/task-bindings/{capability_id}", pluginHandler.HandlePutTaskBinding)
 									r.Delete("/installations/{id}", pluginHandler.HandleDeleteInstallation)
+									if deps.DB != nil {
+										trustedLinkHandler := handlers.NewTrustedLinkHandler(deps.DB, deps.Canonicalizer)
+										r.Get("/installations/{id}/linked-identities/{user_id}", trustedLinkHandler.HandleListLinkedIdentities)
+									}
 								})
+							}
+
+							if deps.DB != nil && deps.Canonicalizer != nil {
+								trustedLinkHandler := handlers.NewTrustedLinkHandler(deps.DB, deps.Canonicalizer)
+								r.Post("/canonicalization/preview", trustedLinkHandler.HandlePreviewCanonicalization)
+								r.Post("/canonicalization/execute", trustedLinkHandler.HandleExecuteCanonicalization)
 							}
 
 							if historyImportHandler != nil {

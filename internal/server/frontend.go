@@ -59,7 +59,7 @@ const frontendContentSecurityPolicy = "default-src 'self'; " +
 	"frame-src 'self' blob: https://www.youtube-nocookie.com; " +
 	"object-src 'none'; " +
 	"base-uri 'self'; " +
-	"form-action 'self'"
+	"form-action 'self' https:"
 
 // FrontendHandler returns an http.Handler that serves the embedded SPA.
 // It serves static files from WebDistFS and falls back to index.html for
@@ -173,6 +173,12 @@ func (h *frontendHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", frontendContentSecurityPolicy)
+	if path == "/login/oauth-complete" {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(shell.body))
+		return
+	}
 	// The HTML shell keeps a stable URL across builds, so it must never be
 	// served stale: every deploy changes which content-hashed /assets/*
 	// bundles it references. no-cache lets browsers and CDNs store it but

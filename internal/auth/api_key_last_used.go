@@ -51,7 +51,7 @@ func (t *APIKeyLastUsedTracker) Touch(id int64) {
 		ctx, cancel := context.WithTimeout(context.Background(), apiKeyLastUsedTimeout)
 		defer cancel()
 		if err := t.updater.UpdateLastUsed(ctx, id); err != nil {
-			slog.DebugContext(ctx, "api key last-used update failed", "component", "auth", "id", id, "error", err)
+			slog.DebugContext(ctx, "api key last-used update failed", "component", "auth")
 		}
 	}()
 }

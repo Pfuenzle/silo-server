@@ -66,6 +66,14 @@ export interface AuthProviderOption {
   installation_id?: number;
 }
 
+export interface CredentialProviderFallbackResponse {
+  readonly provider_ids: readonly string[];
+}
+
+export interface CredentialProviderFallbackRequest {
+  readonly provider_ids: readonly string[];
+}
+
 export interface SetupStatusResponse {
   needs_setup: boolean;
 }
@@ -3546,6 +3554,7 @@ export interface PluginAuthBinding {
   display_order: number;
   auto_provision: boolean;
   default_login: boolean;
+  authorization_mode: "none" | "external_groups_v1";
   created_at: string;
   updated_at: string;
 }
@@ -3670,6 +3679,8 @@ export interface SavePluginConfigRequest {
   value: Record<string, unknown>;
   /** Explicitly clear these manifest-declared secret fields. */
   clear_secrets?: string[];
+  /** Explicitly clear these manifest-declared public fields. */
+  clear_fields?: string[];
 }
 
 export interface SavePluginAuthBindingRequest {
@@ -3678,6 +3689,7 @@ export interface SavePluginAuthBindingRequest {
   display_order: number;
   auto_provision: boolean;
   default_login: boolean;
+  authorization_mode: "none" | "external_groups_v1";
 }
 
 export interface SavePluginTaskBindingRequest {

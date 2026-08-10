@@ -29,6 +29,11 @@ type TokenPair struct {
 	ExpiresIn    int // seconds until access token expires
 }
 
+// ErrOAuthLinkingUnsupported reports that OAuth account linking is not part of
+// the current login contract. Callers must not treat a linking request as a
+// normal sign-in for a different account.
+var ErrOAuthLinkingUnsupported = errors.New("oauth account linking is unsupported")
+
 // SettingsGetter retrieves server settings by key.
 // Implemented by catalog.ServerSettingsRepo.
 type SettingsGetter interface {
@@ -127,10 +132,17 @@ func (s *Service) LoginWithProvider(
 	deviceName string,
 	ip string,
 ) (*TokenPair, *models.User, error) {
-	if providerID == "" {
-		providerID = s.defaultID
+	if providerID != "" {
+		return s.loginWithProvider(ctx, providerID, username, password, deviceName, ip)
 	}
-	return s.loginWithProvider(ctx, providerID, username, password, deviceName, ip)
+	policy, err := s.loadCredentialProviderPolicy(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading credential provider policy: %w", err)
+	}
+	if policy.IsEmpty() {
+		return s.loginWithProvider(ctx, s.defaultID, username, password, deviceName, ip)
+	}
+	return s.loginWithFallback(ctx, policy, username, password, deviceName, ip)
 }
 
 func (s *Service) RegisterProvider(info LoginProviderInfo, provider AuthProvider) {
@@ -142,6 +154,9 @@ func (s *Service) RegisterProvider(info LoginProviderInfo, provider AuthProvider
 	}
 	if info.Mode == "" {
 		info.Mode = "credentials"
+	}
+	if pluginProvider, ok := provider.(*PluginProvider); ok {
+		pluginProvider.setAuthMode(info.Mode)
 	}
 
 	s.providers[info.ID] = provider
@@ -157,9 +172,13 @@ func (s *Service) FindOAuthInstallation(installationID int) *PluginProvider {
 	if installationID <= 0 {
 		return nil
 	}
-	for _, p := range s.providers {
+	for providerID, p := range s.providers {
 		pp, ok := p.(*PluginProvider)
 		if !ok || pp == nil {
+			continue
+		}
+		info := s.metadata[providerID]
+		if info.Mode != "oauth" {
 			continue
 		}
 		if pp.InstallationID() != installationID {
@@ -179,33 +198,32 @@ func (s *Service) FindOAuthInstallation(installationID int) *PluginProvider {
 // looks up or auto-provisions the user, creates a session, and mints
 // access/refresh tokens.
 func (s *Service) CompleteOAuthLogin(ctx context.Context, in OAuthLoginInput) (*TokenPair, *models.User, error) {
+	if in.LinkingUserID != 0 {
+		return nil, nil, ErrOAuthLinkingUnsupported
+	}
 	provider := s.FindOAuthInstallation(in.InstallationID)
 	if provider == nil {
 		return nil, nil, ErrInvalidCredentials
 	}
-	user, err := provider.CompleteOAuth(ctx, in.Response)
-	if err != nil {
-		return nil, nil, err
+	if provider.CapabilityID() != in.CapabilityID {
+		return nil, nil, ErrInvalidCredentials
 	}
-	// Linking flow (sess.LinkingUserID > 0): we already provisioned/identified
-	// `user` via the plugin identity. If the caller asked to link onto a
-	// different existing user, future work will need to:
-	//   - reject if the identity is already linked elsewhere (409)
-	//   - otherwise upsert plugin_auth_identities to point at LinkingUserID
-	// For v1 the OAuth handler always passes 0; the v1 PR doesn't add the
-	// /me/account "Link account" SPA UI. Leaving as a TODO.
-	_ = in.LinkingUserID
-
+	providerKey, err := models.NewPluginSessionProviderKey(in.InstallationID, in.CapabilityID)
+	if err != nil {
+		return nil, nil, ErrInvalidCredentials
+	}
 	sessionID := uuid.New().String()
 	session := models.AuthSession{
-		ID:         sessionID,
-		UserID:     user.ID,
-		DeviceName: in.DeviceName,
-		IPAddress:  in.IP,
-		ExpiresAt:  time.Now().Add(s.jwt.RefreshExpiry()),
+		ID:          sessionID,
+		UserID:      0,
+		DeviceName:  in.DeviceName,
+		IPAddress:   in.IP,
+		ExpiresAt:   time.Now().Add(s.jwt.RefreshExpiry()),
+		ProviderKey: &providerKey,
 	}
-	if err := s.sessions.Create(ctx, session); err != nil {
-		return nil, nil, fmt.Errorf("creating session: %w", err)
+	user, err := provider.CompleteOAuthAndComplete(ctx, in.Response, session)
+	if err != nil {
+		return nil, nil, err
 	}
 	pair, err := s.generateTokenPair(Claims{
 		UserID:    user.ID,
@@ -233,6 +251,14 @@ func (s *Service) ListProviders() []LoginProviderInfo {
 	return providers
 }
 
+func (s *Service) RegisteredProviderMetadata() map[string]LoginProviderInfo {
+	result := make(map[string]LoginProviderInfo, len(s.metadata))
+	for id, info := range s.metadata {
+		result[id] = info
+	}
+	return result
+}
+
 func (s *Service) loginWithProvider(
 	ctx context.Context,
 	providerID string,
@@ -245,26 +271,40 @@ func (s *Service) loginWithProvider(
 	if provider == nil {
 		return nil, nil, ErrInvalidCredentials
 	}
-
-	user, err := provider.Authenticate(ctx, Credentials{
-		Username: username,
-		Password: password,
-	})
+	if s.metadata[providerID].Mode == "oauth" {
+		return nil, nil, ErrInvalidCredentials
+	}
+	providerKey, err := s.providerSessionKey(providerID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, ErrInvalidCredentials
 	}
 
 	// Create a new session with a pre-generated ID to avoid the race condition
 	// of looking up the session after creation.
 	sessionID := uuid.New().String()
 	session := models.AuthSession{
-		ID:         sessionID,
-		UserID:     user.ID,
-		DeviceName: deviceName,
-		IPAddress:  ip,
-		ExpiresAt:  time.Now().Add(s.jwt.RefreshExpiry()),
+		ID:          sessionID,
+		UserID:      0,
+		DeviceName:  deviceName,
+		IPAddress:   ip,
+		ExpiresAt:   time.Now().Add(s.jwt.RefreshExpiry()),
+		ProviderKey: &providerKey,
 	}
 
+	credentials := Credentials{Username: username, Password: password}
+	if pluginProvider, ok := provider.(*PluginProvider); ok {
+		user, completeErr := pluginProvider.AuthenticateAndComplete(ctx, credentials, session)
+		if completeErr != nil {
+			return nil, nil, completeErr
+		}
+		session.UserID = user.ID
+		return s.tokenPairForSession(user, sessionID)
+	}
+	user, err := provider.Authenticate(ctx, credentials)
+	if err != nil {
+		return nil, nil, err
+	}
+	session.UserID = user.ID
 	if err := s.sessions.Create(ctx, session); err != nil {
 		return nil, nil, fmt.Errorf("creating session: %w", err)
 	}
@@ -279,6 +319,25 @@ func (s *Service) loginWithProvider(
 	}
 
 	return pair, user, nil
+}
+
+func (s *Service) tokenPairForSession(user *models.User, sessionID string) (*TokenPair, *models.User, error) {
+	pair, err := s.generateTokenPair(Claims{UserID: user.ID, Role: user.Role, SessionID: sessionID})
+	if err != nil {
+		return nil, nil, err
+	}
+	return pair, user, nil
+}
+
+func (s *Service) providerSessionKey(providerID string) (models.SessionProviderKey, error) {
+	if providerID == "local" {
+		return models.LocalSessionProviderKey(), nil
+	}
+	provider, ok := s.providers[providerID].(*PluginProvider)
+	if !ok || provider == nil {
+		return models.SessionProviderKey{}, ErrInvalidCredentials
+	}
+	return models.NewPluginSessionProviderKey(provider.InstallationID(), provider.CapabilityID())
 }
 
 // NeedsSetup reports whether the system still needs its initial user account.
@@ -436,6 +495,7 @@ func (s *Service) StartImpersonation(ctx context.Context, adminUserID, targetUse
 		DeviceName:             deviceName,
 		IPAddress:              ip,
 		ExpiresAt:              startedAt.Add(s.jwt.RefreshExpiry()),
+		ProviderKey:            sessionProviderKeyPointer(models.LocalSessionProviderKey()),
 		ImpersonatorUserID:     &impersonatorUserID,
 		ImpersonationStartedAt: &startedAt,
 	}
@@ -455,6 +515,10 @@ func (s *Service) StartImpersonation(ctx context.Context, adminUserID, targetUse
 	}
 
 	return pair, admin, target, nil
+}
+
+func sessionProviderKeyPointer(key models.SessionProviderKey) *models.SessionProviderKey {
+	return &key
 }
 
 // EndImpersonation revokes an impersonated session without affecting the original admin session.
@@ -570,6 +634,77 @@ func (s *Service) RevokeSession(ctx context.Context, sessionID string, userID in
 	}
 
 	return s.sessions.Revoke(ctx, sessionID)
+}
+
+func (s *Service) loadCredentialProviderPolicy(ctx context.Context) (CredentialProviderPolicy, error) {
+	if s.settings == nil {
+		return CredentialProviderPolicy{}, nil
+	}
+	raw, err := s.settings.Get(ctx, SettingKeyCredentialProviderFallback)
+	if err != nil {
+		return CredentialProviderPolicy{}, fmt.Errorf("get credential provider policy: %w", err)
+	}
+	return ParseCredentialProviderPolicy(raw, s.metadata)
+}
+
+func (s *Service) loginWithFallback(
+	ctx context.Context,
+	policy CredentialProviderPolicy,
+	username string,
+	password string,
+	deviceName string,
+	ip string,
+) (*TokenPair, *models.User, error) {
+	var lastErr error
+	for _, providerID := range policy.ProviderIDs() {
+		if s.providers[providerID] == nil {
+			continue
+		}
+		if s.metadata[providerID].Mode == "oauth" {
+			continue
+		}
+		pair, user, err := s.loginWithProvider(ctx, providerID, username, password, deviceName, ip)
+		if err == nil {
+			return pair, user, nil
+		}
+		if !errors.Is(err, ErrAccountNotFound) {
+			return nil, nil, err
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, nil, ErrInvalidCredentials
+	}
+	return nil, nil, ErrInvalidCredentials
+}
+
+func (s *Service) CredentialProviderFallbackSetting(ctx context.Context) (string, error) {
+	if s.settings == nil {
+		return "", nil
+	}
+	raw, err := s.settings.Get(ctx, SettingKeyCredentialProviderFallback)
+	if err != nil {
+		return "", fmt.Errorf("get credential provider policy: %w", err)
+	}
+	return raw, nil
+}
+
+func (s *Service) SetCredentialProviderFallbackSetting(ctx context.Context, raw string) error {
+	if s.settings == nil {
+		return fmt.Errorf("settings store not available")
+	}
+	if raw != "" {
+		if _, err := ParseCredentialProviderPolicy(raw, s.metadata); err != nil {
+			return err
+		}
+	}
+	setter, ok := s.settings.(interface {
+		Set(ctx context.Context, key, value string) error
+	})
+	if !ok {
+		return fmt.Errorf("settings store does not support writes")
+	}
+	return setter.Set(ctx, SettingKeyCredentialProviderFallback, raw)
 }
 
 // generateTokenPair creates a new access/refresh token pair for the given

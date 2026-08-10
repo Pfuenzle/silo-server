@@ -23,6 +23,7 @@ type BootstrapOverrides struct {
 	Mode        string // from MODE env
 	DatabaseURL string // from DATABASE_URL env
 	JFListen    string // from JF_PORT env
+	ABSListen   string
 	RedisURL    string // from REDIS_URL env
 }
 
@@ -181,6 +182,9 @@ func (w *Watcher) applySettings(m map[string]string) error {
 	}
 	if w.bootstrap.JFListen != "" {
 		newCfg.JellyfinCompat.Listen = w.bootstrap.JFListen
+	}
+	if w.bootstrap.ABSListen != "" {
+		newCfg.AudiobookshelfCompat.Listen = w.bootstrap.ABSListen
 	}
 	if w.bootstrap.RedisURL != "" {
 		newCfg.Redis.URL = w.bootstrap.RedisURL

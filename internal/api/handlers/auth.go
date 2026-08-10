@@ -154,6 +154,8 @@ type authProviderResponse struct {
 
 // HandleLogin handles POST /auth/login.
 func (h *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
@@ -171,7 +173,18 @@ func (h *AuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	pair, user, err := h.service.LoginWithProvider(r.Context(), req.Provider, req.Username, req.Password, deviceName, ip)
 	if err != nil {
+		reason := auth.ClassifyAuthFailure(err)
+		status := http.StatusInternalServerError
 		if errors.Is(err, auth.ErrInvalidCredentials) {
+			status = http.StatusUnauthorized
+		} else if errors.Is(err, auth.ErrAccountNotFound) {
+			status = http.StatusUnauthorized
+		} else if errors.Is(err, auth.ErrUserDisabled) {
+			status = http.StatusForbidden
+		}
+		auth.LogAuthFailure(auth.NewAuthFailureDiagnostic(r.Context(), reason, status, start, "auth"))
+
+		if errors.Is(err, auth.ErrInvalidCredentials) || errors.Is(err, auth.ErrAccountNotFound) {
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid username or password")
 			return
 		}
@@ -564,6 +577,60 @@ func (h *AuthHandler) loadImpersonator(ctx context.Context, claims *auth.Claims)
 		return nil, nil
 	}
 	return h.service.GetCurrentUser(ctx, &auth.Claims{UserID: *claims.ImpersonatorUserID})
+}
+
+type credentialProviderFallbackResponse struct {
+	ProviderIDs []string `json:"provider_ids"`
+}
+
+type credentialProviderFallbackRequest struct {
+	ProviderIDs []string `json:"provider_ids"`
+}
+
+func (h *AuthHandler) HandleGetCredentialProviderFallback(w http.ResponseWriter, r *http.Request) {
+	raw, err := h.service.CredentialProviderFallbackSetting(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load credential provider policy")
+		return
+	}
+	policy, err := auth.ParseCredentialProviderPolicy(raw, h.service.RegisteredProviderMetadata())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Stored policy is invalid")
+		return
+	}
+	writeJSON(w, http.StatusOK, credentialProviderFallbackResponse{
+		ProviderIDs: policy.ProviderIDs(),
+	})
+}
+
+func (h *AuthHandler) HandlePutCredentialProviderFallback(w http.ResponseWriter, r *http.Request) {
+	var req credentialProviderFallbackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
+		return
+	}
+	raw, err := auth.CredentialProviderPolicyJSON(req.ProviderIDs)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "Invalid provider IDs")
+		return
+	}
+	if err := h.service.SetCredentialProviderFallbackSetting(r.Context(), raw); err != nil {
+		if strings.Contains(err.Error(), "credential provider policy:") {
+			writeError(w, http.StatusBadRequest, "invalid_policy", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to save credential provider policy")
+		return
+	}
+	saved, err := h.service.CredentialProviderFallbackSetting(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to read back policy")
+		return
+	}
+	savedPolicy, _ := auth.ParseCredentialProviderPolicy(saved, h.service.RegisteredProviderMetadata())
+	writeJSON(w, http.StatusOK, credentialProviderFallbackResponse{
+		ProviderIDs: savedPolicy.ProviderIDs(),
+	})
 }
 
 // extractClaims extracts JWT claims from the Authorization header.

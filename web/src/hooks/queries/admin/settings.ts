@@ -5,6 +5,8 @@ import type {
   AdminServerStatus,
   AdminSettingsUpdateResponse,
   AdminSettingsConnectionCheckRequest,
+  CredentialProviderFallbackRequest,
+  CredentialProviderFallbackResponse,
   ConnectionCheckResponse,
   JellyfinCompatSettingsPatch,
   JellyfinCompatStatus,
@@ -89,6 +91,29 @@ export function useAdminServerStatus() {
     queryKey: adminKeys.serverStatus(),
     queryFn: () => api<AdminServerStatus>("/admin/server/status"),
     staleTime: 15_000,
+  });
+}
+
+export function useCredentialProviderFallback() {
+  return useQuery({
+    queryKey: adminKeys.credentialProviderFallback(),
+    queryFn: () =>
+      api<CredentialProviderFallbackResponse>("/admin/auth/credential-provider-fallback"),
+    staleTime: 30_000,
+  });
+}
+
+export function useUpdateCredentialProviderFallback() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (request: CredentialProviderFallbackRequest) =>
+      api<CredentialProviderFallbackResponse>("/admin/auth/credential-provider-fallback", {
+        method: "PUT",
+        body: JSON.stringify(request),
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: adminKeys.credentialProviderFallback() });
+    },
   });
 }
 

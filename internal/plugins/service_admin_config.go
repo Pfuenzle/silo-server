@@ -47,6 +47,26 @@ func (s *Service) SetGlobalConfigWithClears(
 	value map[string]any,
 	clearSecrets []string,
 ) error {
+	return s.SetGlobalConfigWithFieldClears(
+		ctx,
+		installationID,
+		key,
+		value,
+		clearSecrets,
+		nil,
+	)
+}
+
+// SetGlobalConfigWithFieldClears saves one config entry while explicitly
+// removing manifest-declared public fields that an admin cleared in the form.
+func (s *Service) SetGlobalConfigWithFieldClears(
+	ctx context.Context,
+	installationID int,
+	key string,
+	value map[string]any,
+	clearSecrets []string,
+	clearFields []string,
+) error {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return &ConfigValidationError{Message: "config key is required"}
@@ -63,9 +83,13 @@ func (s *Service) SetGlobalConfigWithClears(
 	if value == nil {
 		value = map[string]any{}
 	}
-	secretFields := GlobalConfigSecretFields(manifest, key)
+	publicFields, secretFields := GlobalConfigFieldSets(manifest, key)
 	secretPaths := GlobalConfigSecretPaths(manifest, key)
 	clearSet, err := validatedSecretClearSet(key, secretFields, clearSecrets)
+	if err != nil {
+		return &ConfigValidationError{Message: err.Error(), Cause: err}
+	}
+	clearFieldSet, err := validatedPublicClearSet(key, publicFields, clearFields)
 	if err != nil {
 		return &ConfigValidationError{Message: err.Error(), Cause: err}
 	}
@@ -83,6 +107,9 @@ func (s *Service) SetGlobalConfigWithClears(
 			return err
 		}
 		for field := range clearSet {
+			delete(merged, field)
+		}
+		for field := range clearFieldSet {
 			delete(merged, field)
 		}
 		projection := globalConfigValidationProjection(manifest, key, merged, value)
@@ -133,6 +160,21 @@ func validatedSecretClearSet(
 	for field := range clearSet {
 		if _, ok := allowedSecrets[field]; !ok {
 			return nil, fmt.Errorf("%s is not a secret field in config %s", field, configKey)
+		}
+	}
+	return clearSet, nil
+}
+
+func validatedPublicClearSet(
+	configKey string,
+	publicFields []string,
+	clearFields []string,
+) (map[string]struct{}, error) {
+	clearSet := secretFieldSet(clearFields)
+	allowedFields := secretFieldSet(publicFields)
+	for field := range clearSet {
+		if _, ok := allowedFields[field]; !ok {
+			return nil, fmt.Errorf("%s is not a public field in config %s", field, configKey)
 		}
 	}
 	return clearSet, nil

@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -284,6 +282,12 @@ func (s *InstallationStore) ListByPluginID(ctx context.Context, pluginID string)
 }
 
 func (s *InstallationStore) Update(ctx context.Context, id int, input UpdateInstallationInput) error {
+	if input.Enabled != nil && !*input.Enabled {
+		if err := s.Disable(ctx, id); err != nil {
+			return err
+		}
+		input.Enabled = nil
+	}
 	// Guard at the store, not only the HTTP handler: the reserved builtin row
 	// carries no archive/binary and must never have its version, path, enabled
 	// flag, or capabilities rewritten, or its chain participation breaks.
@@ -412,34 +416,6 @@ func (s *InstallationStore) SaveArchive(
 func (s *InstallationStore) GetArchive(ctx context.Context, installationID int) (*InstallationArchive, error) {
 	query := `SELECT ` + archiveColumns + ` FROM plugin_archives WHERE plugin_installation_id = $1`
 	return scanArchive(s.pool.QueryRow(ctx, query, installationID))
-}
-
-func (s *InstallationStore) Delete(ctx context.Context, id int) error {
-	installation, err := s.GetByID(ctx, id)
-	if err != nil {
-		return err
-	}
-	// Guard at the store, not only the HTTP handler: deleting the reserved
-	// builtin row would cascade through every builtin chain row and RemoveAll
-	// the (sentinel) install dir.
-	if installation.IsBuiltin() {
-		return ErrBuiltinInstallationImmutable
-	}
-
-	tag, err := s.pool.Exec(ctx, `DELETE FROM plugin_installations WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("deleting plugin installation: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrInstallationNotFound
-	}
-
-	installDir := filepath.Dir(installation.InstallPath)
-	if err := os.RemoveAll(installDir); err != nil {
-		return fmt.Errorf("removing plugin installation files: %w", err)
-	}
-
-	return nil
 }
 
 func (s *InstallationStore) replaceCapabilities(
