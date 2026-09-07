@@ -86,6 +86,8 @@ func TestSiloItemToLibraryItemDetail_ExpandedShape(t *testing.T) {
 	}
 }
 
+// TestSiloItemToLibraryItemDetail_FlattensChaptersAcrossFiles verifies that
+// chapters from multiple audio files use contiguous IDs and absolute offsets.
 func TestSiloItemToLibraryItemDetail_FlattensChaptersAcrossFiles(t *testing.T) {
 	// Given an audiobook whose chapters are distributed across two audio files.
 	item := &models.MediaItem{ContentID: "book-multi"}
@@ -112,8 +114,8 @@ func TestSiloItemToLibraryItemDetail_FlattensChaptersAcrossFiles(t *testing.T) {
 	if detail.Media.Chapters[0].Title != "One" || detail.Media.Chapters[0].Start != 0 {
 		t.Fatalf("first chapter = %+v, want title One at 0", detail.Media.Chapters[0])
 	}
-	if detail.Media.Chapters[1].Title != "Two" || detail.Media.Chapters[1].Start != 120 {
-		t.Fatalf("second chapter = %+v, want title Two at 120", detail.Media.Chapters[1])
+	if detail.Media.Chapters[1].Title != "Two" || detail.Media.Chapters[1].Start != 120 || detail.Media.Chapters[1].End != 165 {
+		t.Fatalf("second chapter = %+v, want title Two at 120 ending at 165", detail.Media.Chapters[1])
 	}
 	if detail.Media.Chapters[0].ID != 0 || detail.Media.Chapters[1].ID != 1 {
 		t.Fatalf("chapter ids = (%d, %d), want (0, 1)", detail.Media.Chapters[0].ID, detail.Media.Chapters[1].ID)
