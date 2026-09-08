@@ -319,9 +319,8 @@ func (p syncPayload) timeDelta() float64 {
 // IDOR guard: the session must belong to the calling user (404 otherwise
 // so session existence isn't leaked to other users).
 //
-// Uses UpdateProgressPosition (not UpsertProgress) to avoid overwriting
-// is_finished / progress_pct that the user set explicitly — a sync tick
-// that arrives after the user marks a book finished must not un-finish it.
+// Existing rows use UpdateProgressPosition so is_finished remains preserved;
+// a positive first heartbeat creates the missing progress row.
 func (h *Handler) handleSessionSync(w http.ResponseWriter, r *http.Request) {
 	a, ok := absAuthFrom(r)
 	if !ok {
