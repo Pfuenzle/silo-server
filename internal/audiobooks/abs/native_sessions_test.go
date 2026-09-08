@@ -42,6 +42,26 @@ func (s *recordingPlaybackSessionSyncer) SyncNow(context.Context) error {
 	return nil
 }
 
+type sessionSyncProgressStore struct {
+	fakeProgressStore
+	created *ProgressRow
+	updated bool
+}
+
+func (s *sessionSyncProgressStore) GetProgress(context.Context, string, string, string) (*ProgressRow, error) {
+	return nil, nil
+}
+
+func (s *sessionSyncProgressStore) UpsertProgress(_ context.Context, row ProgressRow) error {
+	s.created = &row
+	return nil
+}
+
+func (s *sessionSyncProgressStore) UpdateProgressPosition(context.Context, string, string, string, float64) error {
+	s.updated = true
+	return nil
+}
+
 func TestHandlePlayStartCreatesNativePlaybackSession(t *testing.T) {
 	now := time.Now()
 	media := &playStartMediaStore{
@@ -184,6 +204,67 @@ func TestHandleSessionSyncUpdatesNativePlaybackSession(t *testing.T) {
 	}
 	if syncer.calls == 0 {
 		t.Fatalf("native session syncer was not called")
+	}
+}
+
+// TestHandleSessionSyncCreatesProgressRow verifies that an ABS heartbeat can
+// create the progress row needed by Continue Listening when no explicit
+// progress report arrived first.
+func TestHandleSessionSyncCreatesProgressRow(t *testing.T) {
+	media := &playStartMediaStore{
+		item: &models.MediaItem{
+			ContentID: "book-1",
+			Type:      "audiobook",
+			Title:     "Book",
+			Runtime:   3600,
+			UpdatedAt: time.Now(),
+		},
+	}
+	absSessions := &fakePlaybackSessionStore{}
+	nativeSessions := playback.NewSessionManager(0, 0)
+	native, err := nativeSessions.StartSessionWithFilesContext(context.Background(), 1, "profile-1", 42, 42, playback.PlayDirect, false)
+	if err != nil {
+		t.Fatalf("start native session: %v", err)
+	}
+	if err := absSessions.InsertPlaybackSession(context.Background(), ABSPlaybackSession{
+		ID:        native.ID,
+		UserID:    "1",
+		ProfileID: "profile-1",
+		ContentID: "book-1",
+	}); err != nil {
+		t.Fatalf("insert ABS session: %v", err)
+	}
+	progress := &sessionSyncProgressStore{}
+	h := New(Dependencies{
+		MediaStore:           media,
+		ProgressStore:        progress,
+		PlaybackSessionStore: absSessions,
+		NativeSessions:       nativeSessions,
+	})
+
+	rec := dispatchABSWithParams(
+		http.MethodPatch,
+		"/api/session/"+native.ID,
+		map[string]string{"sid": native.ID},
+		[]byte(`{"currentTime":55.25,"timeListening":10}`),
+		"1",
+		"profile-1",
+		h.handleSessionSync,
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if progress.created == nil {
+		t.Fatal("heartbeat did not create progress row")
+	}
+	if progress.created.ContentID != "book-1" || progress.created.CurrentSeconds != 55.25 {
+		t.Fatalf("created progress = %+v, want book-1 at 55.25", *progress.created)
+	}
+	if progress.created.DurationSeconds != 3600 {
+		t.Errorf("created duration = %v, want 3600", progress.created.DurationSeconds)
+	}
+	if progress.updated {
+		t.Error("heartbeat used update path despite missing progress row")
 	}
 }
 

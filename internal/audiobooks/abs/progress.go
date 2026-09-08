@@ -366,14 +366,26 @@ func (h *Handler) handleSessionSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update position in user_watch_progress. Must NOT be a full upsert —
-	// see comment in handleSetItemProgress re: not overwriting is_finished.
 	if h.deps.ProgressStore != nil {
-		if err := h.deps.ProgressStore.UpdateProgressPosition(
-			r.Context(), a.UserID, a.ProfileID, sess.ContentID, p.CurrentTime,
-		); err != nil {
+		var syncErr error
+		existing, getErr := h.deps.ProgressStore.GetProgress(r.Context(), a.UserID, a.ProfileID, sess.ContentID)
+		if getErr == nil && existing == nil && p.CurrentTime > 0 {
+			syncErr = h.deps.ProgressStore.UpsertProgress(r.Context(), ProgressRow{
+				UserID:          a.UserID,
+				ProfileID:       a.ProfileID,
+				ContentID:       sess.ContentID,
+				CurrentSeconds:  p.CurrentTime,
+				DurationSeconds: float64(item.Runtime),
+				UpdatedAt:       time.Now(),
+			})
+		} else {
+			syncErr = h.deps.ProgressStore.UpdateProgressPosition(
+				r.Context(), a.UserID, a.ProfileID, sess.ContentID, p.CurrentTime,
+			)
+		}
+		if syncErr != nil {
 			slog.WarnContext(r.Context(), "abs session sync: update progress position failed", "component", "audiobooks",
-				"session_id", sid, "content_id", sess.ContentID, "error", err)
+				"session_id", sid, "content_id", sess.ContentID, "error", syncErr)
 		}
 	}
 	h.updateNativePlaybackProgress(r.Context(), sid, p.CurrentTime)
