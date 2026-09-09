@@ -1747,6 +1747,15 @@ func TestSearchAudiobooksReturnsProviderResults(t *testing.T) {
 	}
 }
 
+func TestAudiobookTitlesMatchNormalizesProviderEditionLabels(t *testing.T) {
+	if !AudiobookTitlesMatch("Das Tal - 002 - Die Katastrophe", "Das Tal, Season 2, Die Katastrophe") {
+		t.Fatal("edition labels should match the same audiobook title")
+	}
+	if AudiobookTitlesMatch("Das Tal - 002 - Die Katastrophe", "Das Tal der Furcht") {
+		t.Fatal("different audiobook titles should not match")
+	}
+}
+
 func TestCreateAudiobookRequestPersistsProviderIdentityWithoutFulfillment(t *testing.T) {
 	store := newFakeStore()
 	service := newTestService(store)

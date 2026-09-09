@@ -2609,7 +2609,7 @@ func main() {
 						return nil, searchErr
 					}
 					for _, item := range items {
-						localTitles = append(localTitles, strings.ToLower(strings.Join(strings.Fields(item.Title), " ")))
+						localTitles = append(localTitles, item.Title)
 						out = append(out, mediarequests.AudiobookSearchResult{Provider: "silo", ProviderItemID: item.ContentID, Title: item.Title, Year: item.Year, Overview: item.Overview})
 					}
 				}
@@ -2633,10 +2633,9 @@ func main() {
 				if providerItemID == "" || result.Name == "" {
 					continue
 				}
-				normalizedTitle := strings.ToLower(strings.Join(strings.Fields(result.Name), " "))
 				available := false
 				for _, localTitle := range localTitles {
-					if strings.Contains(normalizedTitle, localTitle) || strings.Contains(localTitle, normalizedTitle) {
+					if mediarequests.AudiobookTitlesMatch(result.Name, localTitle) {
 						available = true
 						break
 					}
