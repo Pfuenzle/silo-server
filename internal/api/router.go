@@ -755,6 +755,47 @@ func NewRouter(deps Dependencies) chi.Router {
 			tmdb.NewClient(tmdbAPIKey, 40),
 			mediarequests.NewCatalogPresence(itemRepo, providerIDRepo),
 		)
+		if metadataSearcher, ok := deps.MetadataService.(interface {
+			SearchAudiobookProviders(context.Context, string) ([]metadata.SearchResult, error)
+		}); ok && viewerResolver != nil && itemRepo != nil {
+			requestSvc.SetAudiobookSearcher(mediarequests.AudiobookSearchFunc(func(ctx context.Context, viewer mediarequests.Viewer, query string) ([]mediarequests.AudiobookSearchResult, error) {
+				scope, err := viewerResolver.Resolve(ctx, access.ResolveInput{UserID: viewer.UserID, ProfileID: viewer.ProfileID, SkipPINVerification: true})
+				if err != nil {
+					return nil, err
+				}
+				filter := catalog.AccessFilter{UserID: viewer.UserID, ProfileID: viewer.ProfileID, MaxContentRating: scope.MaxContentRating, AllowedLibraryIDs: scope.AllowedLibraryIDs, DisabledLibraryIDs: scope.DisabledLibraryIDs}
+				items, _, err := itemRepo.Search(ctx, query, []string{"audiobook"}, 20, 0, filter)
+				if err != nil {
+					return nil, err
+				}
+				out := make([]mediarequests.AudiobookSearchResult, 0, len(items)+8)
+				for _, item := range items {
+					out = append(out, mediarequests.AudiobookSearchResult{Provider: "silo", ProviderItemID: item.ContentID, Title: item.Title, Year: item.Year, Overview: item.Overview})
+				}
+				results, err := metadataSearcher.SearchAudiobookProviders(ctx, query)
+				if err != nil {
+					return nil, err
+				}
+				for _, result := range results {
+					provider := result.Provider
+					if provider == "" {
+						provider = "audiobook-metadata"
+					}
+					providerItemID := result.ProviderIDs[provider]
+					if providerItemID == "" {
+						for _, id := range result.ProviderIDs {
+							providerItemID = id
+							break
+						}
+					}
+					if providerItemID == "" || result.Name == "" {
+						continue
+					}
+					out = append(out, mediarequests.AudiobookSearchResult{Provider: provider, ProviderItemID: providerItemID, Title: result.Name, Year: result.Year, Overview: result.Overview, ImageURL: result.ImageURL})
+				}
+				return out, nil
+			}))
+		}
 		AttachRequestRouter(requestSvc, deps.PluginService)
 		requestSvc.SetGroupPolicyProvider(accessGroupStore)
 		if userRepo != nil {
