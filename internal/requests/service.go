@@ -465,40 +465,7 @@ func (s *Service) Search(ctx context.Context, viewer Viewer, query string, media
 		return nil, fmt.Errorf("%w: query is required", ErrInvalidInput)
 	}
 	if mediaType == MediaTypeAudiobook {
-		if s.audiobookSearch == nil {
-			return nil, fmt.Errorf("audiobook request search is not configured")
-		}
-		if page != 1 {
-			return &MediaPage{Page: page, TotalPages: 1, Results: []MediaResult{}}, nil
-		}
-		results, err := s.audiobookSearch.SearchAudiobooks(ctx, viewer, query)
-		if err != nil {
-			return nil, err
-		}
-		pageResults := make([]MediaResult, 0, len(results))
-		for _, result := range results {
-			provider := result.Provider
-			if provider == "" {
-				provider = "audiobook-metadata"
-			}
-			available := provider == "silo"
-			availability := AvailabilityMissing
-			if available {
-				availability = AvailabilityAvailable
-			}
-			pageResults = append(pageResults, MediaResult{
-				MediaType:      MediaTypeAudiobook,
-				Provider:       provider,
-				ProviderItemID: result.ProviderItemID,
-				Title:          result.Title,
-				Year:           result.Year,
-				Overview:       result.Overview,
-				PosterPath:     result.ImageURL,
-				Availability:   availability,
-				Request:        RequestState{Requestable: !available},
-			})
-		}
-		return &MediaPage{Page: 1, TotalPages: 1, TotalResults: len(pageResults), Results: pageResults}, nil
+		return s.searchAudiobookResults(ctx, viewer, query, page)
 	}
 	if s.tmdb == nil {
 		return nil, fmt.Errorf("request service is not configured")
@@ -507,7 +474,66 @@ func (s *Service) Search(ctx context.Context, viewer Viewer, query string, media
 	if err != nil {
 		return nil, err
 	}
-	return s.enrichPage(ctx, viewer, raw)
+	pageResult, err := s.enrichPage(ctx, viewer, raw)
+	if err != nil {
+		return nil, err
+	}
+	if mediaType == MediaTypeAll && page == 1 && s.audiobookSearch != nil {
+		if audiobooks, searchErr := s.searchAudiobookResults(ctx, viewer, query, 1); searchErr == nil {
+			pageResult.Results = append(pageResult.Results, audiobooks.Results...)
+			pageResult.TotalResults += audiobooks.TotalResults
+		}
+	}
+	return pageResult, nil
+}
+
+func (s *Service) searchAudiobookResults(ctx context.Context, viewer Viewer, query string, page int) (*MediaPage, error) {
+	if s.audiobookSearch == nil {
+		return nil, fmt.Errorf("audiobook request search is not configured")
+	}
+	if page != 1 {
+		return &MediaPage{Page: page, TotalPages: 1, Results: []MediaResult{}}, nil
+	}
+	results, err := s.audiobookSearch.SearchAudiobooks(ctx, viewer, query)
+	if err != nil {
+		return nil, err
+	}
+	pageResults := make([]MediaResult, 0, len(results))
+	for _, result := range results {
+		provider := result.Provider
+		if provider == "" {
+			provider = "audiobook-metadata"
+		}
+		available := provider == "silo"
+		requestState := RequestState{Requestable: !available}
+		if available {
+			requestState.Reason = "already_available"
+		} else if providerStore, ok := s.store.(ProviderItemRequestStore); ok {
+			if active, lookupErr := providerStore.ListActiveByProviderItem(ctx, provider, result.ProviderItemID); lookupErr == nil && active != nil {
+				requestState.Requestable = false
+				requestState.Status = active.Status
+				requestState.RequestID = active.ID
+			} else if lookupErr != nil {
+				slog.WarnContext(ctx, "requests: audiobook request state lookup failed", "provider", provider, "provider_item_id", result.ProviderItemID, "error", lookupErr)
+			}
+		}
+		availability := AvailabilityMissing
+		if available {
+			availability = AvailabilityAvailable
+		}
+		pageResults = append(pageResults, MediaResult{
+			MediaType:      MediaTypeAudiobook,
+			Provider:       provider,
+			ProviderItemID: result.ProviderItemID,
+			Title:          result.Title,
+			Year:           result.Year,
+			Overview:       result.Overview,
+			PosterPath:     result.ImageURL,
+			Availability:   availability,
+			Request:        requestState,
+		})
+	}
+	return &MediaPage{Page: 1, TotalPages: 1, TotalResults: len(pageResults), Results: pageResults}, nil
 }
 
 func (s *Service) Discover(ctx context.Context, viewer Viewer, section string, page int) (*DiscoverySection, error) {
