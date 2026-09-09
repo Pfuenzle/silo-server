@@ -31,22 +31,21 @@ const DIALOG_LIMIT = 4;
 const GRID_LIMIT = 20;
 const INTERACTIVE_SEARCH_GC_TIME_MS = 30_000;
 
-const REQUEST_COPY: Record<string, { request: string; searching: string; empty: string }> = {
-  de: { request: "Zur Anfrage hinzufügen", searching: "Suche…", empty: "Nichts gefunden" },
-  en: { request: "Request to Add", searching: "Searching…", empty: "Nothing found" },
-  es: { request: "Solicitar", searching: "Buscando…", empty: "No se encontró nada" },
-  fr: { request: "Ajouter une demande", searching: "Recherche…", empty: "Aucun résultat" },
-  it: { request: "Richiedi aggiunta", searching: "Ricerca…", empty: "Nessun risultato" },
-  ja: { request: "追加をリクエスト", searching: "検索中…", empty: "見つかりません" },
-  ko: { request: "추가 요청", searching: "검색 중…", empty: "결과 없음" },
-  nl: { request: "Aanvraag indienen", searching: "Zoeken…", empty: "Niets gevonden" },
-  pl: { request: "Poproś o dodanie", searching: "Wyszukiwanie…", empty: "Nic nie znaleziono" },
-  pt: { request: "Solicitar adição", searching: "Pesquisando…", empty: "Nada encontrado" },
-  ru: { request: "Запросить добавление", searching: "Поиск…", empty: "Ничего не найдено" },
-  zh: { request: "请求添加", searching: "搜索中…", empty: "未找到结果" },
+const REQUEST_COPY: Record<string, { searching: string; empty: string }> = {
+  de: { searching: "Suche…", empty: "Nichts gefunden" },
+  en: { searching: "Searching…", empty: "Nothing found" },
+  es: { searching: "Buscando…", empty: "No se encontró nada" },
+  fr: { searching: "Recherche…", empty: "Aucun résultat" },
+  it: { searching: "Ricerca…", empty: "Nessun risultato" },
+  ja: { searching: "検索中…", empty: "見つかりません" },
+  ko: { searching: "검색 중…", empty: "결과 없음" },
+  nl: { searching: "Zoeken…", empty: "Niets gevonden" },
+  pl: { searching: "Wyszukiwanie…", empty: "Nic nie znaleziono" },
+  pt: { searching: "Pesquisando…", empty: "Nada encontrado" },
+  ru: { searching: "Поиск…", empty: "Ничего не найдено" },
+  zh: { searching: "搜索中…", empty: "未找到结果" },
 };
 const DEFAULT_REQUEST_COPY = {
-  request: "Request to Add",
   searching: "Searching…",
   empty: "Nothing found",
 };
@@ -98,7 +97,10 @@ export function RequestToAddSection({
     return (
       <section className="border-t border-white/5 pt-3">
         <div className="text-muted-foreground flex items-center gap-2 px-3 pb-2 text-[10px] font-medium tracking-[0.1em] uppercase">
-          <span>{copy.request}</span>
+          <span>Discover · Outside your library</span>
+        </div>
+        <div className="text-foreground px-3 pb-2 text-sm font-semibold">
+          Request to Add
         </div>
         <div role="status" className="text-muted-foreground flex items-center gap-2 px-3 py-4 text-sm">
           {searching ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
@@ -126,16 +128,19 @@ export function RequestToAddSection({
 }
 
 function HeaderCopy({ count }: { count: number }) {
-  const copy = requestCopy();
   return (
-    <div className="text-muted-foreground flex items-center gap-2 px-3 pt-2 pb-1 text-[10px] font-medium tracking-[0.1em] uppercase">
-      <span>{copy.request}</span>
-      <span className="bg-muted text-muted-foreground rounded-full px-1.5 text-[10px]">
-        {count}
-      </span>
-    </div>
+    <>
+      <div className="text-muted-foreground flex items-center gap-2 px-3 pt-2 pb-1 text-[10px] font-medium tracking-[0.1em] uppercase">
+        <span>Discover · Outside your library</span>
+      </div>
+      <div className="text-foreground px-3 pb-1 text-sm font-semibold">
+        Request to Add
+        <span className="bg-muted text-muted-foreground rounded-full px-1.5 text-[10px]">
+          {count}
+        </span>
+      </div>
+    </>
   );
-
 }
 
 function DialogVariant({
