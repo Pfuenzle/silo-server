@@ -152,15 +152,19 @@ export function GlobalSearch({
   const debouncedQuery = useDebounce(query.trim(), DEBOUNCE_MS);
   const tmdbDebouncedQuery = useDebounce(query.trim(), TMDB_DEBOUNCE_MS);
   const canRequest = useCanRequest();
-  const tmdbQuery = useRequestSearch("all", tmdbDebouncedQuery, 1, {
+  const { scope: searchScope } = useSearchMediaScope();
+  const requestSearchType = searchScope === "audiobook" ? "audiobook" : "all";
+  const tmdbQuery = useRequestSearch(requestSearchType, tmdbDebouncedQuery, 1, {
     enabled: canRequest.discoveryEnabled,
     requireProfile: true,
     staleTime: 5 * 60 * 1000,
     gcTime: INTERACTIVE_SEARCH_GC_TIME_MS,
     retry: false,
   });
-  const tmdbMissingCount =
-    tmdbQuery.data?.results?.filter((result) => result.availability !== "available").length ?? 0;
+  const requestResults = (tmdbQuery.data?.results ?? []).filter(
+    (result) => searchScope !== "video" || result.media_type !== "audiobook",
+  );
+  const tmdbMissingCount = requestResults.filter((result) => result.availability !== "available").length;
   // Cap at DIALOG_LIMIT (4) — RequestToAddSection slices results to that many rows.
   const tmdbVisibleCount = Math.min(tmdbMissingCount, 4);
   const tmdbStillLoading =
@@ -173,7 +177,6 @@ export function GlobalSearch({
 
   // Preview results follow the user's preferred search scope (Media vs
   // Audiobooks vs All); the full results page applies the same default.
-  const { scope: searchScope } = useSearchMediaScope();
   const searchState = useMemo(
     () =>
       createCatalogSearchState("query", {
@@ -373,6 +376,8 @@ export function GlobalSearch({
                 <RequestToAddSection
                   variant="dialog"
                   query={tmdbDebouncedQuery}
+                  mediaType={requestSearchType}
+                  allowAudiobooks={searchScope !== "video"}
                   libraryHadHits={items.length > 0}
                   libraryResultsKnown={!previewQuery.isFetching && !previewQuery.isError}
                 />

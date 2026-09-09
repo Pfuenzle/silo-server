@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { Link } from "react-router";
-import { Film, Sparkles, Tv } from "lucide-react";
+import { BookOpen, Film, Sparkles, Tv } from "lucide-react";
 import { useCanRequest } from "@/hooks/useCanRequest";
 import { useCreateMediaRequest, useRequestSearch } from "@/hooks/queries/useRequests";
-import type { RequestMediaResult } from "@/api/types";
+import type { RequestMediaResult, RequestSearchMediaType } from "@/api/types";
 import {
   formatRequestReason,
   formatRequestStatus,
@@ -13,8 +13,8 @@ import {
 import { cn } from "@/lib/utils";
 import RequestPosterCard from "./RequestPosterCard";
 
-function cardKey(item: Pick<RequestMediaResult, "media_type" | "tmdb_id">): string {
-  return `${item.media_type}-${item.tmdb_id}`;
+function cardKey(item: Pick<RequestMediaResult, "media_type" | "tmdb_id" | "provider_item_id">): string {
+  return `${item.media_type}-${item.provider_item_id ?? item.tmdb_id}`;
 }
 
 function nonRequestableLabel(item: RequestMediaResult): string {
@@ -41,6 +41,8 @@ export type RequestToAddSectionProps = {
    * Loading and failed searches must not be presented as confirmed absences.
    */
   libraryResultsKnown?: boolean;
+  mediaType?: RequestSearchMediaType;
+  allowAudiobooks?: boolean;
 };
 
 export function RequestToAddSection({
@@ -48,9 +50,11 @@ export function RequestToAddSection({
   query,
   libraryHadHits,
   libraryResultsKnown = true,
+  mediaType = "all",
+  allowAudiobooks = true,
 }: RequestToAddSectionProps) {
   const { discoveryEnabled } = useCanRequest();
-  const search = useRequestSearch("all", query, 1, {
+  const search = useRequestSearch(mediaType, query, 1, {
     enabled: discoveryEnabled,
     requireProfile: true,
     staleTime: 5 * 60 * 1000,
@@ -61,7 +65,9 @@ export function RequestToAddSection({
   if (!discoveryEnabled) return null;
   if (search.isError && !search.data) return null;
 
-  const filtered = (search.data?.results ?? []).filter((item) => item.availability !== "available");
+  const filtered = (search.data?.results ?? []).filter(
+    (item) => item.availability !== "available" && (allowAudiobooks || item.media_type !== "audiobook"),
+  );
   if (filtered.length === 0) return null;
 
   const limit = variant === "dialog" ? DIALOG_LIMIT : GRID_LIMIT;
@@ -134,7 +140,7 @@ function DialogVariant({
       />
       <ul className="px-1 py-1">
         {items.map((item) => (
-          <li key={`${item.media_type}-${item.tmdb_id}`}>
+          <li key={cardKey(item)}>
             <DialogRow item={item} />
           </li>
         ))}
@@ -144,14 +150,14 @@ function DialogVariant({
 }
 
 function DialogRow({ item }: { item: RequestMediaResult }) {
-  const poster = tmdbImageURL(item.poster_path);
-  const Icon = item.media_type === "series" ? Tv : Film;
+  const poster = item.media_type === "audiobook" ? (item.poster_path ?? null) : tmdbImageURL(item.poster_path);
+  const Icon = item.media_type === "series" ? Tv : item.media_type === "audiobook" ? BookOpen : Film;
   const requestable = item.request.requestable;
   const unavailableLabel = requestable ? null : nonRequestableLabel(item);
 
   return (
     <Link
-      to={`/requests/${item.media_type}/${item.tmdb_id}`}
+      to={item.media_type === "audiobook" ? "/requests" : `/requests/${item.media_type}/${item.tmdb_id}`}
       className="hover:bg-muted/80 flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors"
     >
       <div
@@ -172,7 +178,7 @@ function DialogRow({ item }: { item: RequestMediaResult }) {
         <div className="truncate text-sm font-medium">{item.title}</div>
         <div className="text-muted-foreground text-xs">
           {item.year ? `${item.year} · ` : ""}
-          {item.media_type === "series" ? "Series" : "Movie"}
+          {item.media_type === "series" ? "Series" : item.media_type === "audiobook" ? "Audiobook" : "Movie"}
         </div>
       </div>
       {requestable ? (
