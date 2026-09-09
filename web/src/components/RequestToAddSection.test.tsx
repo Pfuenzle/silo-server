@@ -148,8 +148,8 @@ describe("RequestToAddSection (dialog variant)", () => {
     const markup = render(
       <RequestToAddSection variant="dialog" query="dune" libraryHadHits={false} />,
     );
-    expect(markup).toContain("Not in your library, but you can request");
-    expect(markup).not.toContain("Request to Add");
+    expect(markup).toContain("Request to Add");
+    expect(markup).toContain("Dune: Prophecy");
   });
 
   it("does not claim media is absent while the local lookup is unresolved or failed", () => {
@@ -166,8 +166,8 @@ describe("RequestToAddSection (dialog variant)", () => {
         libraryResultsKnown={false}
       />,
     );
-    expect(markup).toContain("Discovery matches:");
-    expect(markup).not.toContain("Not in your library");
+    expect(markup).toContain("Request to Add");
+    expect(markup).toContain("Dune: Prophecy");
   });
 
   it("filters out results already available in the library", () => {
@@ -190,10 +190,11 @@ describe("RequestToAddSection (dialog variant)", () => {
     expect(markup).not.toContain("/requests/movie/2");
   });
 
-  it("renders nothing when TMDB returned an error", () => {
+  it("renders an empty state when TMDB returned an error", () => {
     mocks.useRequestSearch.mockReturnValue({ data: undefined, isLoading: false, isError: true });
     const markup = render(<RequestToAddSection variant="dialog" query="dune" libraryHadHits />);
-    expect(markup).toBe("");
+    expect(markup).toContain("Request to Add");
+    expect(markup).toContain("Nothing found");
   });
 
   it("keeps rendering cached TMDB results when a refetch errors", () => {
@@ -206,14 +207,22 @@ describe("RequestToAddSection (dialog variant)", () => {
     expect(markup).toContain("Dune: Prophecy");
   });
 
-  it("renders nothing when all TMDB results are already in the library", () => {
+  it("renders an empty state when all TMDB results are already in the library", () => {
     mocks.useRequestSearch.mockReturnValue({
       data: { page: 1, total_pages: 1, total_results: 1, results: [availableResult()] },
       isLoading: false,
       isError: false,
     });
     const markup = render(<RequestToAddSection variant="dialog" query="dune" libraryHadHits />);
-    expect(markup).toBe("");
+    expect(markup).toContain("Request to Add");
+    expect(markup).toContain("Nothing found");
+  });
+
+  it("renders a loading state before request discovery results arrive", () => {
+    mocks.useRequestSearch.mockReturnValue({ data: undefined, isLoading: true, isFetching: true, isError: false });
+    const markup = render(<RequestToAddSection variant="dialog" query="dune" libraryHadHits />);
+    expect(markup).toContain("Request to Add");
+    expect(markup).toContain("Searching");
   });
 
   it("limits the dialog variant to at most 4 rows", () => {

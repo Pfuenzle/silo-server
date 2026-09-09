@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router";
-import { BookOpen, Film, Sparkles, Tv } from "lucide-react";
+import { BookOpen, Film, Loader2, Sparkles, Tv } from "lucide-react";
 import { useCanRequest } from "@/hooks/useCanRequest";
 import { useCreateMediaRequest, useRequestSearch } from "@/hooks/queries/useRequests";
 import type { RequestMediaResult, RequestSearchMediaType } from "@/api/types";
@@ -31,6 +31,31 @@ const DIALOG_LIMIT = 4;
 const GRID_LIMIT = 20;
 const INTERACTIVE_SEARCH_GC_TIME_MS = 30_000;
 
+const REQUEST_COPY: Record<string, { request: string; searching: string; empty: string }> = {
+  de: { request: "Zur Anfrage hinzufügen", searching: "Suche…", empty: "Nichts gefunden" },
+  en: { request: "Request to Add", searching: "Searching…", empty: "Nothing found" },
+  es: { request: "Solicitar", searching: "Buscando…", empty: "No se encontró nada" },
+  fr: { request: "Ajouter une demande", searching: "Recherche…", empty: "Aucun résultat" },
+  it: { request: "Richiedi aggiunta", searching: "Ricerca…", empty: "Nessun risultato" },
+  ja: { request: "追加をリクエスト", searching: "検索中…", empty: "見つかりません" },
+  ko: { request: "추가 요청", searching: "검색 중…", empty: "결과 없음" },
+  nl: { request: "Aanvraag indienen", searching: "Zoeken…", empty: "Niets gevonden" },
+  pl: { request: "Poproś o dodanie", searching: "Wyszukiwanie…", empty: "Nic nie znaleziono" },
+  pt: { request: "Solicitar adição", searching: "Pesquisando…", empty: "Nada encontrado" },
+  ru: { request: "Запросить добавление", searching: "Поиск…", empty: "Ничего не найдено" },
+  zh: { request: "请求添加", searching: "搜索中…", empty: "未找到结果" },
+};
+const DEFAULT_REQUEST_COPY = {
+  request: "Request to Add",
+  searching: "Searching…",
+  empty: "Nothing found",
+};
+
+function requestCopy() {
+  const language = typeof navigator === "undefined" ? "en" : navigator.language.slice(0, 2);
+  return REQUEST_COPY[language] ?? DEFAULT_REQUEST_COPY;
+}
+
 export type RequestToAddSectionProps = {
   variant: "dialog" | "grid";
   query: string;
@@ -48,8 +73,6 @@ export type RequestToAddSectionProps = {
 export function RequestToAddSection({
   variant,
   query,
-  libraryHadHits,
-  libraryResultsKnown = true,
   mediaType = "all",
   allowAudiobooks = true,
 }: RequestToAddSectionProps) {
@@ -63,12 +86,27 @@ export function RequestToAddSection({
   });
 
   if (!discoveryEnabled) return null;
-  if (search.isError && !search.data) return null;
 
   const filtered = (search.data?.results ?? []).filter(
     (item) => item.availability !== "available" && (allowAudiobooks || item.media_type !== "audiobook"),
   );
-  if (filtered.length === 0) return null;
+  const copy = requestCopy();
+  const searching = search.isLoading || search.isFetching;
+  const empty = !searching && (search.isError || filtered.length === 0);
+
+  if (searching || empty) {
+    return (
+      <section className="border-t border-white/5 pt-3">
+        <div className="text-muted-foreground flex items-center gap-2 px-3 pb-2 text-[10px] font-medium tracking-[0.1em] uppercase">
+          <span>{copy.request}</span>
+        </div>
+        <div role="status" className="text-muted-foreground flex items-center gap-2 px-3 py-4 text-sm">
+          {searching ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
+          <span>{searching ? copy.searching : copy.empty}</span>
+        </div>
+      </section>
+    );
+  }
 
   const limit = variant === "dialog" ? DIALOG_LIMIT : GRID_LIMIT;
   const visible = filtered.slice(0, limit);
@@ -77,65 +115,37 @@ export function RequestToAddSection({
     return (
       <DialogVariant
         items={visible}
-        libraryHadHits={libraryHadHits}
-        libraryResultsKnown={libraryResultsKnown}
       />
     );
   }
   return (
     <GridVariant
       items={visible}
-      libraryHadHits={libraryHadHits}
-      libraryResultsKnown={libraryResultsKnown}
     />
   );
 }
 
-function HeaderCopy({
-  libraryHadHits,
-  libraryResultsKnown,
-  count,
-}: {
-  libraryHadHits: boolean;
-  libraryResultsKnown: boolean;
-  count: number;
-}) {
-  if (libraryHadHits) {
-    return (
-      <div className="text-muted-foreground flex items-center gap-2 px-3 pt-2 pb-1 text-[10px] font-medium tracking-[0.1em] uppercase">
-        <span>Request to Add</span>
-        <span className="bg-muted text-muted-foreground rounded-full px-1.5 text-[10px]">
-          {count}
-        </span>
-      </div>
-    );
-  }
-
-  if (!libraryResultsKnown) {
-    return <div className="px-3 pt-3 pb-1 text-[12px] text-amber-300/85">Discovery matches:</div>;
-  }
-
+function HeaderCopy({ count }: { count: number }) {
+  const copy = requestCopy();
   return (
-    <div className="px-3 pt-3 pb-1 text-[12px] text-amber-300/85">
-      Not in your library, but you can request:
+    <div className="text-muted-foreground flex items-center gap-2 px-3 pt-2 pb-1 text-[10px] font-medium tracking-[0.1em] uppercase">
+      <span>{copy.request}</span>
+      <span className="bg-muted text-muted-foreground rounded-full px-1.5 text-[10px]">
+        {count}
+      </span>
     </div>
   );
+
 }
 
 function DialogVariant({
   items,
-  libraryHadHits,
-  libraryResultsKnown,
 }: {
   items: RequestMediaResult[];
-  libraryHadHits: boolean;
-  libraryResultsKnown: boolean;
 }) {
   return (
     <div className="border-t border-white/5 pt-1">
       <HeaderCopy
-        libraryHadHits={libraryHadHits}
-        libraryResultsKnown={libraryResultsKnown}
         count={items.length}
       />
       <ul className="px-1 py-1">
@@ -199,12 +209,8 @@ function DialogRow({ item }: { item: RequestMediaResult }) {
 
 function GridVariant({
   items,
-  libraryHadHits,
-  libraryResultsKnown,
 }: {
   items: RequestMediaResult[];
-  libraryHadHits: boolean;
-  libraryResultsKnown: boolean;
 }) {
   const count = items.length;
   const createRequest = useCreateMediaRequest();
@@ -236,8 +242,7 @@ function GridVariant({
         "relative overflow-hidden rounded-[28px] border border-amber-400/[0.14]",
         "bg-[radial-gradient(120%_60%_at_50%_0%,rgba(245,158,11,0.07)_0%,rgba(245,158,11,0.015)_45%,transparent_75%)]",
         "shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04),0_28px_60px_-44px_rgba(0,0,0,0.7)]",
-        "px-4 pt-7 pb-7 sm:px-7 sm:pt-8",
-        libraryHadHits && "mt-12! sm:mt-16!",
+        "mt-12! px-4 pt-7 pb-7 sm:mt-16! sm:px-7 sm:pt-8",
       )}
     >
       <div
@@ -250,19 +255,11 @@ function GridVariant({
           <div className="flex items-center gap-2 text-amber-200/85">
             <Sparkles className="h-3.5 w-3.5" strokeWidth={2.2} aria-hidden />
             <span className="text-[10px] font-semibold tracking-[0.24em] uppercase">
-              {libraryHadHits
-                ? "Discover · Outside your library"
-                : libraryResultsKnown
-                  ? "Outside your library"
-                  : "Discovery"}
+              Discover · Outside your library
             </span>
           </div>
           <h2 className="font-display text-foreground text-[clamp(1.25rem,1.6vw,1.55rem)] leading-tight font-semibold tracking-tight">
-            {libraryHadHits
-              ? "Request to Add"
-              : libraryResultsKnown
-                ? "Not in your library, but you can request"
-                : "More search matches"}
+            Request to Add
           </h2>
         </div>
         <span className="inline-flex items-center gap-1.5 self-end rounded-full border border-amber-400/15 bg-amber-400/[0.06] px-2.5 py-1 text-[11px] font-medium tracking-wide text-amber-100/75 tabular-nums">
