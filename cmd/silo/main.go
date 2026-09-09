@@ -2617,7 +2617,11 @@ func main() {
 				return nil, err
 			}
 			for _, result := range results {
-				providerItemID := result.ProviderIDs[result.Provider]
+				provider := result.Provider
+				if provider == "" {
+					provider = "audiobook-metadata"
+				}
+				providerItemID := result.ProviderIDs[provider]
 				if providerItemID == "" {
 					for _, id := range result.ProviderIDs {
 						providerItemID = id
@@ -2628,7 +2632,7 @@ func main() {
 					continue
 				}
 				out = append(out, mediarequests.AudiobookSearchResult{
-					Provider:       "audiobook-metadata",
+					Provider:       provider,
 					ProviderItemID: providerItemID,
 					Title:          result.Name,
 					OriginalTitle:  result.OriginalTitle,

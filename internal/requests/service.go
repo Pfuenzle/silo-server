@@ -1722,6 +1722,9 @@ func (s *Service) submitApprovedRequest(ctx context.Context, req Request, actor 
 	if req.Outcome != OutcomeActive || req.Status != StatusApproved {
 		return &req, nil
 	}
+	if req.MediaType == MediaTypeAudiobook {
+		return &req, nil
+	}
 	if s.router == nil {
 		return s.markSubmissionFailed(ctx, req.ID, actor, fmt.Errorf("no fulfillment backend configured"))
 	}

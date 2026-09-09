@@ -346,7 +346,10 @@ function RequestQueueRow({
   const canDecline = request.status !== "completed" && request.outcome === "active";
   const canRetry = request.outcome === "failed";
   const requesterLabel = requesterUsername ?? `User ${request.requested_by_user_id}`;
-  const requestDetailHref = `/requests/${request.media_type}/${request.tmdb_id}`;
+  const requestDetailHref =
+    request.media_type === "audiobook"
+      ? "/requests"
+      : `/requests/${request.media_type}/${request.tmdb_id}`;
 
   return (
     <TableRow>
