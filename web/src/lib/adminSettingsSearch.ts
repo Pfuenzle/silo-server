@@ -28,6 +28,7 @@ export interface AdminSettingsSearchItem extends SettingsSearchItem {
   id: string;
   label: string;
   description: string;
+  groups?: readonly string[];
   keywords?: readonly string[];
   settings?: readonly { label: string; description?: string; keywords?: readonly string[] }[];
   icon: LucideIcon;
@@ -525,3 +526,30 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
 ];
 
 export const ADMIN_SETTINGS_NAV = ADMIN_SETTINGS_GROUPS.flatMap((group) => group.items);
+
+const ADMIN_SETTINGS_PAGE_IDS = new Set(ADMIN_SETTINGS_NAV.map((item) => item.id));
+
+export const LEGACY_ADMIN_SETTINGS_PAGE_ALIASES: Readonly<Record<string, string>> = {
+  branding: "appearance",
+  theming: "appearance",
+  overlays: "appearance",
+  "rate-limiting": "security",
+  scanner: "library",
+  search: "library",
+  intro: "library",
+  subtitles: "providers",
+  integrations: "providers",
+  "watch-providers": "watch-sync",
+  email: "notifications",
+  jellyfin: "compatibility",
+  "compatibility-proxies": "compatibility",
+  database: "infrastructure",
+  storage: "infrastructure",
+  "log-retention": "infrastructure",
+};
+
+export function resolveAdminSettingsPageID(value: string | null): string | null {
+  if (!value) return null;
+  if (ADMIN_SETTINGS_PAGE_IDS.has(value)) return value;
+  return LEGACY_ADMIN_SETTINGS_PAGE_ALIASES[value] ?? null;
+}

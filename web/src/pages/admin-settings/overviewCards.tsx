@@ -33,7 +33,7 @@ const TILE_ICONS: Record<string, LucideIcon> = {
 const CARD_METADATA = Object.fromEntries(
   ADMIN_SETTINGS_NAV.map((item) => [
     item.id,
-    { description: item.description, groups: item.groups, icon: item.icon, label: item.label },
+     { description: item.description, groups: item.groups ?? [], icon: item.icon, label: item.label },
   ]),
 ) as Record<
   AdminSettingsPageID,

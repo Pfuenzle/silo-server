@@ -127,7 +127,6 @@ export default function GeneralSettings() {
         onSave={form.save}
         onDiscard={form.discard}
         isSaving={form.isSaving}
-        restartRequired={form.restartRequired}
       />
     </div>
   );
