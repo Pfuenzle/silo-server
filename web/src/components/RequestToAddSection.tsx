@@ -31,28 +31,13 @@ const DIALOG_LIMIT = 4;
 const GRID_LIMIT = 20;
 const INTERACTIVE_SEARCH_GC_TIME_MS = 30_000;
 
-const REQUEST_COPY: Record<string, { searching: string; empty: string }> = {
-  de: { searching: "Suche…", empty: "Nichts gefunden" },
-  en: { searching: "Searching…", empty: "Nothing found" },
-  es: { searching: "Buscando…", empty: "No se encontró nada" },
-  fr: { searching: "Recherche…", empty: "Aucun résultat" },
-  it: { searching: "Ricerca…", empty: "Nessun risultato" },
-  ja: { searching: "検索中…", empty: "見つかりません" },
-  ko: { searching: "검색 중…", empty: "결과 없음" },
-  nl: { searching: "Zoeken…", empty: "Niets gevonden" },
-  pl: { searching: "Wyszukiwanie…", empty: "Nic nie znaleziono" },
-  pt: { searching: "Pesquisando…", empty: "Nada encontrado" },
-  ru: { searching: "Поиск…", empty: "Ничего не найдено" },
-  zh: { searching: "搜索中…", empty: "未找到结果" },
-};
 const DEFAULT_REQUEST_COPY = {
   searching: "Searching…",
   empty: "Nothing found",
 };
 
 function requestCopy() {
-  const language = typeof navigator === "undefined" ? "en" : navigator.language.slice(0, 2);
-  return REQUEST_COPY[language] ?? DEFAULT_REQUEST_COPY;
+  return DEFAULT_REQUEST_COPY;
 }
 
 export type RequestToAddSectionProps = {
