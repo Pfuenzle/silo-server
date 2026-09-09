@@ -2599,6 +2599,7 @@ func main() {
 		)
 		requestReconcileSvc.SetAudiobookSearcher(mediarequests.AudiobookSearchFunc(func(ctx context.Context, viewer mediarequests.Viewer, query string) ([]mediarequests.AudiobookSearchResult, error) {
 			out := make([]mediarequests.AudiobookSearchResult, 0, 24)
+			localTitles := make([]string, 0, 20)
 			if requestScopeResolver != nil {
 				scope, err := requestScopeResolver.Resolve(ctx, access.ResolveInput{UserID: viewer.UserID, ProfileID: viewer.ProfileID, SkipPINVerification: true})
 				if err == nil {
@@ -2608,6 +2609,7 @@ func main() {
 						return nil, searchErr
 					}
 					for _, item := range items {
+						localTitles = append(localTitles, strings.ToLower(strings.Join(strings.Fields(item.Title), " ")))
 						out = append(out, mediarequests.AudiobookSearchResult{Provider: "silo", ProviderItemID: item.ContentID, Title: item.Title, Year: item.Year, Overview: item.Overview})
 					}
 				}
@@ -2631,9 +2633,18 @@ func main() {
 				if providerItemID == "" || result.Name == "" {
 					continue
 				}
+				normalizedTitle := strings.ToLower(strings.Join(strings.Fields(result.Name), " "))
+				available := false
+				for _, localTitle := range localTitles {
+					if strings.Contains(normalizedTitle, localTitle) || strings.Contains(localTitle, normalizedTitle) {
+						available = true
+						break
+					}
+				}
 				out = append(out, mediarequests.AudiobookSearchResult{
 					Provider:       provider,
 					ProviderItemID: providerItemID,
+					Available:      available,
 					Title:          result.Name,
 					OriginalTitle:  result.OriginalTitle,
 					Year:           result.Year,

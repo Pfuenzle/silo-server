@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/Silo-Server/silo-server/internal/access"
@@ -177,6 +178,16 @@ func (r *ItemRepository) buildMixedSearchSQLFromParsed(
 	var mediaTitleConditions, mediaOverviewConditions []string
 	if includeMediaItems {
 		mediaMatch := searchTitleMatchCondition(mediaSearchTitleVector, aliasCandidateArm)
+		if slices.Contains(mediaTypes, "audiobook") {
+			mediaMatch = fmt.Sprintf(`(%s OR EXISTS (
+				SELECT 1
+				FROM item_people ip
+				JOIN people p ON p.id = ip.person_id
+				WHERE ip.content_id = mi.content_id
+				  AND ip.kind IN (7, 8)
+				  AND public.normalize_search_text(p.name) ILIKE '%%' || public.normalize_search_text($1) || '%%'
+			))`, mediaMatch)
+		}
 		if exactShortTitle {
 			mediaMatch = fmt.Sprintf("(mi.title_normalized = $%d OR %s)", exactIdx, aliasCandidateArm)
 		} else if leadingShortTitle {

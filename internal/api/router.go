@@ -769,7 +769,9 @@ func NewRouter(deps Dependencies) chi.Router {
 					return nil, err
 				}
 				out := make([]mediarequests.AudiobookSearchResult, 0, len(items)+8)
+				localTitles := make([]string, 0, len(items))
 				for _, item := range items {
+					localTitles = append(localTitles, strings.ToLower(strings.Join(strings.Fields(item.Title), " ")))
 					out = append(out, mediarequests.AudiobookSearchResult{Provider: "silo", ProviderItemID: item.ContentID, Title: item.Title, Year: item.Year, Overview: item.Overview})
 				}
 				results, err := metadataSearcher.SearchAudiobookProviders(ctx, query)
@@ -791,7 +793,15 @@ func NewRouter(deps Dependencies) chi.Router {
 					if providerItemID == "" || result.Name == "" {
 						continue
 					}
-					out = append(out, mediarequests.AudiobookSearchResult{Provider: provider, ProviderItemID: providerItemID, Title: result.Name, Year: result.Year, Overview: result.Overview, ImageURL: result.ImageURL})
+					normalizedTitle := strings.ToLower(strings.Join(strings.Fields(result.Name), " "))
+					available := false
+					for _, localTitle := range localTitles {
+						if strings.Contains(normalizedTitle, localTitle) || strings.Contains(localTitle, normalizedTitle) {
+							available = true
+							break
+						}
+					}
+					out = append(out, mediarequests.AudiobookSearchResult{Provider: provider, ProviderItemID: providerItemID, Available: available, Title: result.Name, Year: result.Year, Overview: result.Overview, ImageURL: result.ImageURL})
 				}
 				return out, nil
 			}))

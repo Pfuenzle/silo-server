@@ -60,6 +60,7 @@ type RequesterIdentityResolver interface {
 type AudiobookSearchResult struct {
 	Provider       string
 	ProviderItemID string
+	Available      bool
 	Title          string
 	OriginalTitle  string
 	Year           int
@@ -504,7 +505,7 @@ func (s *Service) searchAudiobookResults(ctx context.Context, viewer Viewer, que
 		if provider == "" {
 			provider = "audiobook-metadata"
 		}
-		available := provider == "silo"
+		available := provider == "silo" || result.Available
 		requestState := RequestState{Requestable: !available}
 		if available {
 			requestState.Reason = "already_available"
