@@ -198,6 +198,25 @@ func (r *Repository) ListActiveByTMDB(ctx context.Context, mediaType MediaType, 
 	return out, nil
 }
 
+func (r *Repository) ListActiveByProviderItem(ctx context.Context, provider, providerItemID string) (*Request, error) {
+	if strings.TrimSpace(provider) == "" || strings.TrimSpace(providerItemID) == "" {
+		return nil, nil
+	}
+	req, err := scanRequest(r.pool.QueryRow(ctx, requestSelectSQL()+`
+		WHERE provider = $1
+		  AND provider_item_id = $2
+		  AND outcome = 'active'
+		  AND status <> 'completed'
+	`, provider, providerItemID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get active request by provider item: %w", err)
+	}
+	return req, nil
+}
+
 func (r *Repository) DeleteFailedByTMDB(ctx context.Context, mediaType MediaType, tmdbID int) (int, error) {
 	if tmdbID <= 0 {
 		return 0, nil
@@ -211,6 +230,17 @@ func (r *Repository) DeleteFailedByTMDB(ctx context.Context, mediaType MediaType
 	`, mediaType, tmdbID)
 	if err != nil {
 		return 0, fmt.Errorf("delete failed requests by tmdb: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+func (r *Repository) DeleteFailedByProviderItem(ctx context.Context, provider, providerItemID string) (int, error) {
+	tag, err := r.pool.Exec(ctx, `
+		DELETE FROM media_requests
+		WHERE provider = $1 AND provider_item_id = $2 AND outcome = 'failed'
+	`, provider, providerItemID)
+	if err != nil {
+		return 0, fmt.Errorf("delete failed request by provider item: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
 }
@@ -309,18 +339,27 @@ func (r *Repository) insertRequest(
 	if input.Input.Year != nil {
 		year = *input.Input.Year
 	}
+	provider := strings.TrimSpace(input.Input.Provider)
+	if provider == "" {
+		provider = "tmdb"
+	}
+	var tmdbID any
+	if input.Input.TMDBID > 0 {
+		tmdbID = input.Input.TMDBID
+	}
 	row := exec.QueryRow(ctx, `
 		INSERT INTO media_requests (
-			id, provider, media_type, tmdb_id, tvdb_id, imdb_id, title, year,
+			id, provider, media_type, tmdb_id, provider_item_id, tvdb_id, imdb_id, title, year,
 			overview, poster_path, backdrop_path, status, outcome,
 			requested_by_user_id, requested_by_profile_id, is_anime, created_at, updated_at, approved_at
 		)
 		VALUES (
-			$1, 'tmdb', $2, $3, $4, $5, $6, $7,
-			$8, $9, $10, $11, $12,
-			$13, $14, $15, $16, $16, $17
+			$1, $2, $3, $4, $5, $6, $7, $8, $9,
+			$10, $11, $12, $13, $14,
+			$15, $16, $17, $18, $18, $19
 		)
-		RETURNING `+requestColumns(), input.ID, input.Input.MediaType, input.Input.TMDBID, tvdbID,
+		RETURNING `+requestColumns(), input.ID, provider, input.Input.MediaType, tmdbID,
+		strings.TrimSpace(input.Input.ProviderItemID), tvdbID,
 		strings.TrimSpace(input.Input.IMDbID), strings.TrimSpace(input.Input.Title), year,
 		strings.TrimSpace(input.Input.Overview), strings.TrimSpace(input.Input.PosterPath),
 		strings.TrimSpace(input.Input.BackdropPath), status, outcome,
@@ -756,7 +795,7 @@ func requestSelectSQL() string {
 }
 
 func requestColumns() string {
-	return `id, provider, media_type, tmdb_id, tvdb_id, imdb_id, title, year,
+	return `id, provider, media_type, tmdb_id, provider_item_id, tvdb_id, imdb_id, title, year,
 	        overview, poster_path, backdrop_path, status, outcome,
 	        requested_by_user_id, requested_by_profile_id, is_anime,
 	        last_error, created_at, updated_at, approved_at, completed_at`
@@ -768,13 +807,14 @@ type requestScanner interface {
 
 func scanRequest(row requestScanner) (*Request, error) {
 	var req Request
-	var tvdbID, year sql.NullInt64
+	var tmdbID, tvdbID, year sql.NullInt64
 	var approvedAt, completedAt sql.NullTime
 	if err := row.Scan(
 		&req.ID,
 		&req.Provider,
 		&req.MediaType,
-		&req.TMDBID,
+		&tmdbID,
+		&req.ProviderItemID,
 		&tvdbID,
 		&req.IMDbID,
 		&req.Title,
@@ -798,6 +838,9 @@ func scanRequest(row requestScanner) (*Request, error) {
 	if tvdbID.Valid {
 		v := int(tvdbID.Int64)
 		req.TVDBID = &v
+	}
+	if tmdbID.Valid {
+		req.TMDBID = int(tmdbID.Int64)
 	}
 	if year.Valid {
 		v := int(year.Int64)

@@ -57,6 +57,20 @@ type RequesterIdentityResolver interface {
 	ResolveRequester(ctx context.Context, userID int) (email, username string, err error)
 }
 
+type AudiobookSearchResult struct {
+	Provider       string
+	ProviderItemID string
+	Title          string
+	OriginalTitle  string
+	Year           int
+	Overview       string
+	ImageURL       string
+}
+
+type AudiobookSearcher interface {
+	SearchAudiobooks(ctx context.Context, viewer Viewer, query string) ([]AudiobookSearchResult, error)
+}
+
 type Service struct {
 	store             Store
 	tmdb              TMDBClient
@@ -66,6 +80,7 @@ type Service struct {
 	groupProvider     access.GroupPolicyProvider
 	users             access.UserRepository
 	requesterIdentity RequesterIdentityResolver
+	audiobookSearch   AudiobookSearcher
 	notifier          FulfillmentNotifier
 	lifecycle         LifecycleNotifier
 	Now               func() time.Time
@@ -107,6 +122,10 @@ func (s *Service) SetUserRepository(users access.UserRepository) { s.users = use
 
 func (s *Service) SetRequesterIdentityResolver(r RequesterIdentityResolver) {
 	s.requesterIdentity = r
+}
+
+func (s *Service) SetAudiobookSearcher(searcher AudiobookSearcher) {
+	s.audiobookSearch = searcher
 }
 
 // populateRequesterIdentity fills req.RequesterEmail/Username from the resolver.
@@ -431,7 +450,7 @@ func eligibleRouterConnection(in Integration, mediaType MediaType) bool {
 }
 
 func (s *Service) Search(ctx context.Context, viewer Viewer, query string, mediaType MediaType, page int) (*MediaPage, error) {
-	if s == nil || s.store == nil || s.tmdb == nil {
+	if s == nil || s.store == nil {
 		return nil, fmt.Errorf("request service is not configured")
 	}
 	if err := s.ensureRequestsEnabled(ctx); err != nil {
@@ -444,6 +463,45 @@ func (s *Service) Search(ctx context.Context, viewer Viewer, query string, media
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, fmt.Errorf("%w: query is required", ErrInvalidInput)
+	}
+	if mediaType == MediaTypeAudiobook {
+		if s.audiobookSearch == nil {
+			return nil, fmt.Errorf("audiobook request search is not configured")
+		}
+		if page != 1 {
+			return &MediaPage{Page: page, TotalPages: 1, Results: []MediaResult{}}, nil
+		}
+		results, err := s.audiobookSearch.SearchAudiobooks(ctx, viewer, query)
+		if err != nil {
+			return nil, err
+		}
+		pageResults := make([]MediaResult, 0, len(results))
+		for _, result := range results {
+			provider := result.Provider
+			if provider == "" {
+				provider = "audiobook-metadata"
+			}
+			available := provider == "silo"
+			availability := AvailabilityMissing
+			if available {
+				availability = AvailabilityAvailable
+			}
+			pageResults = append(pageResults, MediaResult{
+				MediaType:      MediaTypeAudiobook,
+				Provider:       provider,
+				ProviderItemID: result.ProviderItemID,
+				Title:          result.Title,
+				Year:           result.Year,
+				Overview:       result.Overview,
+				PosterPath:     result.ImageURL,
+				Availability:   availability,
+				Request:        RequestState{Requestable: !available},
+			})
+		}
+		return &MediaPage{Page: 1, TotalPages: 1, TotalResults: len(pageResults), Results: pageResults}, nil
+	}
+	if s.tmdb == nil {
+		return nil, fmt.Errorf("request service is not configured")
 	}
 	raw, err := s.tmdb.SearchMedia(ctx, string(mediaType), query, page)
 	if err != nil {
@@ -675,32 +733,46 @@ func (s *Service) CreateRequest(ctx context.Context, viewer Viewer, input Create
 	if err != nil {
 		return nil, err
 	}
-	if err := s.ensureCreateAllowedByCeiling(ctx, viewer, normalized); err != nil {
-		return nil, err
-	}
-	s.enrichExternalIDs(ctx, &normalized)
-	isAnime := s.detectRequestAnime(ctx, normalized.MediaType, normalized.TMDBID)
-
-	matches, err := s.lookupPresence(ctx, normalized.MediaType, []PresenceCandidate{createPresenceCandidate(normalized)})
-	if err != nil {
-		return nil, err
-	}
-	if matches[normalized.TMDBID].Available {
-		return nil, ErrAlreadyAvailable
-	}
-
-	active, err := s.store.ListActiveByTMDB(ctx, normalized.MediaType, []int{normalized.TMDBID})
-	if err != nil {
-		return nil, err
-	}
-	if active[normalized.TMDBID] != nil {
-		return nil, ErrAlreadyRequested
-	}
-
-	// Re-requesting media that previously failed (e.g., transient integration
-	// error) should not leave stale failed rows behind in user/admin lists.
-	if _, err := s.store.DeleteFailedByTMDB(ctx, normalized.MediaType, normalized.TMDBID); err != nil {
-		return nil, err
+	isAudiobook := normalized.MediaType == MediaTypeAudiobook
+	isAnime := false
+	if !isAudiobook {
+		if err := s.ensureCreateAllowedByCeiling(ctx, viewer, normalized); err != nil {
+			return nil, err
+		}
+		s.enrichExternalIDs(ctx, &normalized)
+		isAnime = s.detectRequestAnime(ctx, normalized.MediaType, normalized.TMDBID)
+		matches, err := s.lookupPresence(ctx, normalized.MediaType, []PresenceCandidate{createPresenceCandidate(normalized)})
+		if err != nil {
+			return nil, err
+		}
+		if matches[normalized.TMDBID].Available {
+			return nil, ErrAlreadyAvailable
+		}
+		active, err := s.store.ListActiveByTMDB(ctx, normalized.MediaType, []int{normalized.TMDBID})
+		if err != nil {
+			return nil, err
+		}
+		if active[normalized.TMDBID] != nil {
+			return nil, ErrAlreadyRequested
+		}
+		if _, err := s.store.DeleteFailedByTMDB(ctx, normalized.MediaType, normalized.TMDBID); err != nil {
+			return nil, err
+		}
+	} else {
+		providerStore, ok := s.store.(ProviderItemRequestStore)
+		if !ok {
+			return nil, fmt.Errorf("audiobook request persistence is not configured")
+		}
+		active, err := providerStore.ListActiveByProviderItem(ctx, normalized.Provider, normalized.ProviderItemID)
+		if err != nil {
+			return nil, err
+		}
+		if active != nil {
+			return nil, ErrAlreadyRequested
+		}
+		if _, err := providerStore.DeleteFailedByProviderItem(ctx, normalized.Provider, normalized.ProviderItemID); err != nil {
+			return nil, err
+		}
 	}
 
 	policy, err := s.EffectivePolicy(ctx, viewer.UserID)
@@ -716,7 +788,7 @@ func (s *Service) CreateRequest(ctx context.Context, viewer Viewer, input Create
 		return nil, err
 	}
 	status := StatusPending
-	if policy.AutoApprove {
+	if !isAudiobook && policy.AutoApprove {
 		configured, err := s.integrationConfigured(ctx, normalized.MediaType)
 		if err == nil && configured {
 			status = StatusApproved
@@ -2127,12 +2199,24 @@ func normalizeCreateInput(input CreateRequestInput) (CreateRequestInput, error) 
 		return CreateRequestInput{}, err
 	}
 	input.MediaType = mediaType
+	input.Provider = strings.TrimSpace(input.Provider)
+	input.ProviderItemID = strings.TrimSpace(input.ProviderItemID)
 	input.Title = strings.TrimSpace(input.Title)
 	input.IMDbID = strings.TrimSpace(input.IMDbID)
 	input.Overview = strings.TrimSpace(input.Overview)
 	input.PosterPath = strings.TrimSpace(input.PosterPath)
 	input.BackdropPath = strings.TrimSpace(input.BackdropPath)
-	if input.TMDBID <= 0 {
+	if mediaType == MediaTypeAudiobook {
+		if input.Provider == "" {
+			input.Provider = "audiobook-metadata"
+		}
+		if input.Provider != "audiobook-metadata" {
+			return CreateRequestInput{}, fmt.Errorf("%w: unsupported audiobook provider", ErrInvalidInput)
+		}
+		if input.ProviderItemID == "" {
+			return CreateRequestInput{}, fmt.Errorf("%w: provider_item_id is required", ErrInvalidInput)
+		}
+	} else if input.TMDBID <= 0 {
 		return CreateRequestInput{}, fmt.Errorf("%w: tmdb_id is required", ErrInvalidInput)
 	}
 	if input.Title == "" {
@@ -2179,6 +2263,8 @@ func normalizeMediaType(mediaType MediaType) (MediaType, error) {
 		return MediaTypeMovie, nil
 	case MediaTypeSeries, "tv":
 		return MediaTypeSeries, nil
+	case MediaTypeAudiobook:
+		return MediaTypeAudiobook, nil
 	default:
 		return "", ErrInvalidMediaType
 	}
@@ -2192,6 +2278,8 @@ func normalizeSearchMediaType(mediaType MediaType) (MediaType, error) {
 		return MediaTypeMovie, nil
 	case MediaTypeSeries, "tv":
 		return MediaTypeSeries, nil
+	case MediaTypeAudiobook:
+		return MediaTypeAudiobook, nil
 	default:
 		return "", ErrInvalidMediaType
 	}

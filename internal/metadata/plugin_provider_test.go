@@ -16,6 +16,22 @@ const (
 	capabilityIDSetting         = "capability_id"
 )
 
+func TestPluginProviderForTypesIncludesAudiobook(t *testing.T) {
+	provider, err := NewPluginProviderWithClientFactory(map[string]string{
+		pluginInstallationIDSetting: "1",
+		capabilityIDSetting:         "audiobook-metadata",
+	}, func(context.Context, int, string) (pluginMetadataClient, error) {
+		return &fakePluginMetadataClient{}, nil
+	})
+	if err != nil {
+		t.Fatalf("NewPluginProviderWithClientFactory() error = %v", err)
+	}
+
+	if got := provider.ForTypes(); !reflect.DeepEqual(got, []string{"movie", "series", "audiobook"}) {
+		t.Fatalf("ForTypes() = %v, want movie/series/audiobook", got)
+	}
+}
+
 type fakePluginMetadataClient struct {
 	searchResponse *pluginv1.SearchMetadataResponse
 	response       *pluginv1.GetMetadataResponse

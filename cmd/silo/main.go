@@ -2588,6 +2588,7 @@ func main() {
 		if watchProviderService != nil {
 			taskMgr.Register(tasks.NewSyncWatchProvidersTask(watchProviderService))
 		}
+		var requestScopeResolver scopeResolver
 		requestReconcileSvc := mediarequests.NewService(
 			mediarequests.NewRepository(deps.DB, deps.SecretCipher),
 			nil,
@@ -2596,6 +2597,48 @@ func main() {
 				catalog.NewProviderIDRepository(deps.DB),
 			),
 		)
+		requestReconcileSvc.SetAudiobookSearcher(mediarequests.AudiobookSearchFunc(func(ctx context.Context, viewer mediarequests.Viewer, query string) ([]mediarequests.AudiobookSearchResult, error) {
+			out := make([]mediarequests.AudiobookSearchResult, 0, 24)
+			if requestScopeResolver != nil {
+				scope, err := requestScopeResolver.Resolve(ctx, access.ResolveInput{UserID: viewer.UserID, ProfileID: viewer.ProfileID, SkipPINVerification: true})
+				if err == nil {
+					filter := catalog.AccessFilter{UserID: viewer.UserID, ProfileID: viewer.ProfileID, MaxContentRating: scope.MaxContentRating, AllowedLibraryIDs: scope.AllowedLibraryIDs, DisabledLibraryIDs: scope.DisabledLibraryIDs}
+					items, _, searchErr := itemRepo.Search(ctx, query, []string{"audiobook"}, 20, 0, filter)
+					if searchErr != nil {
+						return nil, searchErr
+					}
+					for _, item := range items {
+						out = append(out, mediarequests.AudiobookSearchResult{Provider: "silo", ProviderItemID: item.ContentID, Title: item.Title, Year: item.Year, Overview: item.Overview})
+					}
+				}
+			}
+			results, err := metadataService.SearchAudiobookProviders(ctx, query)
+			if err != nil {
+				return nil, err
+			}
+			for _, result := range results {
+				providerItemID := result.ProviderIDs[result.Provider]
+				if providerItemID == "" {
+					for _, id := range result.ProviderIDs {
+						providerItemID = id
+						break
+					}
+				}
+				if providerItemID == "" || result.Name == "" {
+					continue
+				}
+				out = append(out, mediarequests.AudiobookSearchResult{
+					Provider:       "audiobook-metadata",
+					ProviderItemID: providerItemID,
+					Title:          result.Name,
+					OriginalTitle:  result.OriginalTitle,
+					Year:           result.Year,
+					Overview:       result.Overview,
+					ImageURL:       result.ImageURL,
+				})
+			}
+			return out, nil
+		}))
 		requestReconcileSvc.SetRequesterIdentityResolver(plugins.RequesterIdentityFromLookup(plugins.NewPgUserIdentityLookup(deps.DB)))
 		api.AttachRequestRouter(requestReconcileSvc, pluginService)
 		requestReconcileSvc.SetGroupPolicyProvider(accessGroupStore)
@@ -2609,6 +2652,7 @@ func main() {
 				// Legacy resolver: proxy/test wiring without a policy system. Production integrated/api modes always take the policy path. Removed with the legacy cleanup phase.
 				reconcileResolver = access.NewResolver(userRepo, userStoreProvider, profileTokens, accessGroupStore)
 			}
+			requestScopeResolver = reconcileResolver
 			requestReconcileSvc.SetEntitlementResolver(scopeEntitlementResolver{resolver: reconcileResolver})
 		}
 		if notificationSystem != nil {

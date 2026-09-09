@@ -4363,6 +4363,28 @@ func (s *MetadataService) SearchProviders(ctx context.Context, query SearchQuery
 	return allResults, nil
 }
 
+// SearchAudiobookProviders searches the configured audiobook provider chain for
+// request surfaces that do not have a specific media folder selected.
+func (s *MetadataService) SearchAudiobookProviders(ctx context.Context, title string) ([]SearchResult, error) {
+	if s == nil || s.dbPool == nil {
+		return nil, fmt.Errorf("metadata service is not configured")
+	}
+	var folderID int
+	err := s.dbPool.QueryRow(ctx, `
+		SELECT id
+		FROM media_folders
+		WHERE type IN ('audiobook', 'audiobooks')
+		ORDER BY id
+		LIMIT 1
+	`).Scan(&folderID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		folderID = 0
+	} else if err != nil {
+		return nil, fmt.Errorf("resolve audiobook provider chain: %w", err)
+	}
+	return s.SearchProviders(ctx, SearchQuery{Title: title, ContentType: "audiobook"}, folderID)
+}
+
 func providerChainContentLevel(contentType string) string {
 	switch normalized := strings.ToLower(strings.TrimSpace(contentType)); normalized {
 	case "movie", "movies":

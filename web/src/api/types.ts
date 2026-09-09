@@ -1835,7 +1835,7 @@ export interface ImportUserCollectionResponse {
 }
 
 // Media Requests
-export type RequestMediaType = "movie" | "series";
+export type RequestMediaType = "movie" | "series" | "audiobook";
 export type RequestSearchMediaType = RequestMediaType | "all";
 export type MediaRequestStatus = "pending" | "approved" | "queued" | "downloading" | "completed";
 export type MediaRequestOutcome = "active" | "declined" | "cancelled" | "failed";
@@ -1852,6 +1852,8 @@ export interface RequestState {
 
 export interface RequestMediaResult {
   media_type: RequestMediaType;
+  provider?: string;
+  provider_item_id?: string;
   tmdb_id: number;
   title: string;
   year?: number;
@@ -1962,7 +1964,9 @@ export interface DiscoverBrowseResponse {
 
 export interface CreateMediaRequestInput {
   media_type: RequestMediaType;
-  tmdb_id: number;
+  provider?: string;
+  provider_item_id?: string;
+  tmdb_id?: number;
   tvdb_id?: number;
   imdb_id?: string;
   title: string;
@@ -1991,6 +1995,7 @@ export interface RequestTarget {
 export interface MediaRequest {
   id: string;
   provider: string;
+  provider_item_id?: string;
   media_type: RequestMediaType;
   tmdb_id: number;
   tvdb_id?: number;

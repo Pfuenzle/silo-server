@@ -1,5 +1,5 @@
 import { Link } from "react-router";
-import { Check, Film, Library, Loader2, Plus, Tv } from "lucide-react";
+import { BookOpen, Check, Film, Library, Loader2, Plus, Tv } from "lucide-react";
 import type { MediaRequest, RequestMediaResult } from "@/api/types";
 import { cn } from "@/lib/utils";
 import { formatRequestReason, formatRequestStatus, tmdbImageURL } from "@/lib/mediaRequests";
@@ -51,7 +51,7 @@ function DiscoverCard({
   onRequest?: () => void;
   fluid?: boolean;
 }) {
-  const poster = tmdbImageURL(item.poster_path);
+  const poster = item.media_type === "audiobook" ? (item.poster_path ?? null) : tmdbImageURL(item.poster_path);
   const requestable = item.request.requestable;
   const statusLabel = item.request.status ? formatRequestStatus(item.request.status) : null;
   const reasonLabel =
@@ -74,7 +74,7 @@ function DiscoverCard({
       )}
     >
       <Link
-        to={`/requests/${item.media_type}/${item.tmdb_id}`}
+        to={item.media_type === "audiobook" ? "/requests" : `/requests/${item.media_type}/${item.tmdb_id}`}
         className="block focus:outline-none focus-visible:outline-none"
       >
         <PosterFrame
@@ -141,7 +141,10 @@ function DiscoverCard({
 }
 
 function MineCard({ request, fluid }: { request: MediaRequest; fluid?: boolean }) {
-  const poster = tmdbImageURL(request.poster_path);
+  const poster =
+    request.media_type === "audiobook"
+      ? (request.poster_path ?? null)
+      : tmdbImageURL(request.poster_path);
   const isCompleted = request.status === "completed";
   const isFailed =
     request.outcome === "failed" ||
@@ -159,7 +162,11 @@ function MineCard({ request, fluid }: { request: MediaRequest; fluid?: boolean }
       )}
     >
       <Link
-        to={`/requests/${request.media_type}/${request.tmdb_id}`}
+        to={
+          request.media_type === "audiobook"
+            ? "/requests"
+            : `/requests/${request.media_type}/${request.tmdb_id}`
+        }
         className="block focus:outline-none focus-visible:outline-none"
       >
         <PosterFrame
@@ -225,7 +232,7 @@ function PosterFrame({
 }: {
   poster: string | null;
   title: string;
-  mediaType: "movie" | "series";
+  mediaType: "movie" | "series" | "audiobook";
   dim?: boolean;
   children?: React.ReactNode;
 }) {
@@ -257,11 +264,11 @@ function PosterFallback({
   dim,
 }: {
   title: string;
-  mediaType: "movie" | "series";
+  mediaType: "movie" | "series" | "audiobook";
   dim?: boolean;
 }) {
   const hue = stringHue(title);
-  const Icon = mediaType === "series" ? Tv : Film;
+  const Icon = mediaType === "series" ? Tv : mediaType === "audiobook" ? BookOpen : Film;
   return (
     <div
       className={cn(
@@ -286,7 +293,7 @@ function PosterFallback({
       <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/15 to-transparent" />
       <div className="relative space-y-1.5">
         <span className="text-[9px] font-semibold tracking-[0.22em] text-white/45 uppercase">
-          {mediaType === "series" ? "Series" : "Motion picture"}
+          {mediaType === "series" ? "Series" : mediaType === "audiobook" ? "Audiobook" : "Motion picture"}
         </span>
         <h4 className="font-display line-clamp-4 text-[15px] leading-tight font-bold tracking-tight text-balance text-white/90">
           {title}
@@ -313,9 +320,9 @@ function CardMeta({
   title: string;
   year?: number;
   rating?: number;
-  mediaType?: "movie" | "series";
+  mediaType?: "movie" | "series" | "audiobook";
 }) {
-  const Icon = mediaType === "series" ? Tv : Film;
+  const Icon = mediaType === "series" ? Tv : mediaType === "audiobook" ? BookOpen : Film;
   const hasMeta = mediaType || year !== undefined || rating !== undefined;
   return (
     <div className="mt-2.5 min-w-0 px-0.5">

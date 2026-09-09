@@ -1715,6 +1715,62 @@ func testViewer(userID int) Viewer {
 	return Viewer{UserID: userID, ProfileID: "profile-1"}
 }
 
+type audiobookSearchFunc func(context.Context, Viewer, string) ([]AudiobookSearchResult, error)
+
+func (f audiobookSearchFunc) SearchAudiobooks(ctx context.Context, viewer Viewer, query string) ([]AudiobookSearchResult, error) {
+	return f(ctx, viewer, query)
+}
+
+func TestSearchAudiobooksReturnsProviderResults(t *testing.T) {
+	store := newFakeStore()
+	service := NewService(store, nil, nil)
+	service.SetAudiobookSearcher(audiobookSearchFunc(func(_ context.Context, _ Viewer, query string) ([]AudiobookSearchResult, error) {
+		if query != "Das Tal" {
+			t.Fatalf("query = %q, want Das Tal", query)
+		}
+		return []AudiobookSearchResult{{ProviderItemID: "aud-42", Title: "Das Tal", Year: 2024}}, nil
+	}))
+
+	page, err := service.Search(context.Background(), testViewer(1), "Das Tal", MediaTypeAudiobook, 1)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(page.Results) != 1 {
+		t.Fatalf("results = %d, want 1", len(page.Results))
+	}
+	result := page.Results[0]
+	if result.MediaType != MediaTypeAudiobook || result.Provider != "audiobook-metadata" || result.ProviderItemID != "aud-42" {
+		t.Fatalf("result identity = %+v", result)
+	}
+	if !result.Request.Requestable {
+		t.Fatal("audiobook result should be requestable")
+	}
+}
+
+func TestCreateAudiobookRequestPersistsProviderIdentityWithoutFulfillment(t *testing.T) {
+	store := newFakeStore()
+	service := newTestService(store)
+
+	request, err := service.CreateRequest(context.Background(), testViewer(1), CreateRequestInput{
+		MediaType:      MediaTypeAudiobook,
+		Provider:       "audiobook-metadata",
+		ProviderItemID: "aud-42",
+		Title:          "Das Tal",
+		Year:           intPtr(2024),
+	})
+	if err != nil {
+		t.Fatalf("CreateRequest() error = %v", err)
+	}
+	if request.Provider != "audiobook-metadata" || request.ProviderItemID != "aud-42" || request.TMDBID != 0 {
+		t.Fatalf("request identity = %+v", request)
+	}
+	if request.Status != StatusPending || len(request.Targets) != 0 {
+		t.Fatalf("request lifecycle = status:%s targets:%d, want pending without targets", request.Status, len(request.Targets))
+	}
+}
+
+func intPtr(value int) *int { return &value }
+
 type fakeStore struct {
 	mu            sync.Mutex
 	settings      Settings
@@ -1815,6 +1871,30 @@ func (f *fakeStore) ListActiveByTMDB(_ context.Context, mediaType MediaType, ids
 	return out, nil
 }
 
+func (f *fakeStore) ListActiveByProviderItem(_ context.Context, provider, providerItemID string) (*Request, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, req := range f.requests {
+		if req.Provider == provider && req.ProviderItemID == providerItemID && req.Outcome == OutcomeActive && req.Status != StatusCompleted {
+			return req, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeStore) DeleteFailedByProviderItem(_ context.Context, provider, providerItemID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	deleted := 0
+	for id, req := range f.requests {
+		if req.Provider == provider && req.ProviderItemID == providerItemID && req.Outcome == OutcomeFailed {
+			delete(f.requests, id)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
 func (f *fakeStore) DeleteFailedByTMDB(_ context.Context, mediaType MediaType, tmdbID int) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1847,9 +1927,14 @@ func (f *fakeStore) CreateRequest(_ context.Context, input CreateRequestRecord) 
 		}
 	}
 	f.created = append(f.created, input)
+	provider := input.Input.Provider
+	if provider == "" {
+		provider = "tmdb"
+	}
 	req := &Request{
 		ID:                   input.ID,
-		Provider:             "tmdb",
+		Provider:             provider,
+		ProviderItemID:       input.Input.ProviderItemID,
 		MediaType:            input.Input.MediaType,
 		TMDBID:               input.Input.TMDBID,
 		TVDBID:               input.Input.TVDBID,

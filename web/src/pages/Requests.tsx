@@ -141,7 +141,11 @@ export default function Requests() {
   const mine = useMyMediaRequests({ limit: 100 });
   const createRequest = useCreateMediaRequest();
   const pendingRequestKey = createRequest.variables
-    ? mediaRequestKey(createRequest.variables.media_type, createRequest.variables.tmdb_id)
+    ? mediaRequestKey(
+        createRequest.variables.media_type,
+        createRequest.variables.tmdb_id,
+        createRequest.variables.provider_item_id,
+      )
     : undefined;
 
   const hasSubmittedSearch = searchQuery.length > 1;
@@ -493,7 +497,8 @@ function SearchBar({
         <SelectContent>
           <SelectItem value="all">All</SelectItem>
           <SelectItem value="movie">Movies</SelectItem>
-          <SelectItem value="series">Series</SelectItem>
+           <SelectItem value="series">Series</SelectItem>
+           <SelectItem value="audiobook">Audiobooks</SelectItem>
         </SelectContent>
       </Select>
       <div className="relative">
@@ -501,7 +506,9 @@ function SearchBar({
         <Input
           value={searchInput}
           onChange={(event) => onSearchInputChange(event.target.value)}
-          placeholder="Search TMDB by title…"
+          placeholder={
+            mediaType === "audiobook" ? "Search audiobook metadata…" : "Search TMDB by title…"
+          }
           className="border-border/60 bg-background/40 h-10 rounded-xl pr-10 pl-10 text-sm"
         />
         {(searchInput || isSearching) && (
@@ -552,7 +559,9 @@ function DiscoverySectionRow({
             variant="discover"
             item={item}
             isSubmitting={
-              isSubmitting && pendingRequestKey === mediaRequestKey(item.media_type, item.tmdb_id)
+              isSubmitting &&
+              pendingRequestKey ===
+                mediaRequestKey(item.media_type, item.tmdb_id, item.provider_item_id)
             }
             onRequest={() => onRequest(item)}
           />
@@ -608,8 +617,21 @@ function SearchResultsView({
   onRequest: (item: RequestMediaResult) => void;
 }) {
   const typeLabel =
-    mediaType === "series" ? "series" : mediaType === "movie" ? "movies" : "movies and series";
-  const filterLabel = mediaType === "series" ? "Series" : mediaType === "movie" ? "Movies" : "All";
+    mediaType === "series"
+      ? "series"
+      : mediaType === "movie"
+        ? "movies"
+        : mediaType === "audiobook"
+          ? "audiobooks"
+          : "movies and series";
+  const filterLabel =
+    mediaType === "series"
+      ? "Series"
+      : mediaType === "movie"
+        ? "Movies"
+        : mediaType === "audiobook"
+          ? "Audiobooks"
+          : "All";
   const shown = results.length;
   const showCount = !isLoading && !isError && shown > 0;
 
@@ -667,9 +689,9 @@ function SearchResultsView({
         <EmptyPanel
           title="Nothing found"
           detail={
-            mediaType === "all"
-              ? `No movies or series matched "${query}". Try a different spelling.`
-              : `No ${typeLabel} matched "${query}". Try a different spelling or switch to ${mediaType === "series" ? "Movies" : "Series"}.`
+              mediaType === "all"
+                ? `No movies or series matched "${query}". Try a different spelling.`
+                : `No ${typeLabel} matched "${query}". Try a different spelling.`
           }
         />
       ) : (
@@ -677,12 +699,13 @@ function SearchResultsView({
           <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-7 xl:grid-cols-8">
             {results.map((item) => (
               <RequestPosterCard
-                key={`${item.media_type}-${item.tmdb_id}`}
+                key={mediaRequestKey(item.media_type, item.tmdb_id, item.provider_item_id)}
                 variant="discover"
                 item={item}
                 isSubmitting={
                   isSubmitting &&
-                  pendingRequestKey === mediaRequestKey(item.media_type, item.tmdb_id)
+                  pendingRequestKey ===
+                  mediaRequestKey(item.media_type, item.tmdb_id, item.provider_item_id)
                 }
                 onRequest={() => onRequest(item)}
                 fluid
@@ -842,7 +865,7 @@ function normalizeRequestTab(value: string | null): RequestTab {
 }
 
 function normalizeRequestMediaType(value: string | null): RequestSearchMediaType {
-  if (value === "movie" || value === "series") return value;
+  if (value === "movie" || value === "series" || value === "audiobook") return value;
   return "all";
 }
 
@@ -852,8 +875,12 @@ function normalizeSearchPage(value: string | null): number {
   return parsed;
 }
 
-function mediaRequestKey(mediaType: RequestMediaResult["media_type"], tmdbID: number): string {
-  return `${mediaType}-${tmdbID}`;
+function mediaRequestKey(
+  mediaType: RequestMediaResult["media_type"],
+  tmdbID?: number,
+  providerItemID?: string,
+): string {
+  return `${mediaType}-${providerItemID ?? tmdbID ?? ""}`;
 }
 
 function isIssueOutcome(outcome: MediaRequestOutcome): boolean {

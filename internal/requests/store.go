@@ -42,6 +42,14 @@ type Store interface {
 	DeleteIntegration(ctx context.Context, id string) error
 }
 
+// ProviderItemRequestStore is the optional persistence surface for non-TMDB
+// request identities such as audiobook metadata-provider results. Keeping it
+// separate preserves existing Store fakes and integrations until they opt in.
+type ProviderItemRequestStore interface {
+	ListActiveByProviderItem(ctx context.Context, provider, providerItemID string) (*Request, error)
+	DeleteFailedByProviderItem(ctx context.Context, provider, providerItemID string) (int, error)
+}
+
 type CreateRequestRecord struct {
 	ID        string
 	Input     CreateRequestInput

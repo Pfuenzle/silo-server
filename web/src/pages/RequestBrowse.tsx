@@ -47,7 +47,11 @@ export default function RequestBrowse({ kind }: RequestBrowseProps) {
   const browse = useRequestBrowse({ kind, slug, mediaType, sort, page });
   const createRequest = useCreateMediaRequest();
   const pendingRequestKey = createRequest.variables
-    ? mediaRequestKey(createRequest.variables.media_type, createRequest.variables.tmdb_id)
+    ? mediaRequestKey(
+        createRequest.variables.media_type,
+        createRequest.variables.tmdb_id,
+        createRequest.variables.provider_item_id,
+      )
     : undefined;
 
   const title = browse.data?.display_name ?? humanizeSlug(slug);
@@ -242,8 +246,8 @@ function normalizeMediaType(value: string | null): RequestMediaType | undefined 
   return value === "movie" || value === "series" ? value : undefined;
 }
 
-function mediaRequestKey(mediaType: RequestMediaType, tmdbID: number): string {
-  return `${mediaType}-${tmdbID}`;
+function mediaRequestKey(mediaType: RequestMediaType, tmdbID?: number, providerItemID?: string): string {
+  return `${mediaType}-${providerItemID ?? tmdbID ?? ""}`;
 }
 
 function humanizeSlug(slug: string) {
