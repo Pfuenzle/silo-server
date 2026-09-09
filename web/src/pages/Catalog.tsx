@@ -229,15 +229,18 @@ function CatalogResults({
   // Add a short TMDB debounce on top of SearchBar's input debounce so the
   // TMDB plugin isn't hit at the same cadence as the local library query.
   const tmdbDebouncedQ = useDebounce(state.q ?? "", REQUEST_SEARCH_DEBOUNCE_MS);
-  const tmdbQuery = useRequestSearch("all", tmdbDebouncedQ, 1, {
+  const requestSearchType = mediaScope === "audiobook" ? "audiobook" : "all";
+  const tmdbQuery = useRequestSearch(requestSearchType, tmdbDebouncedQ, 1, {
     enabled: canRequest.discoveryEnabled && isQuerySource,
     requireProfile: true,
     staleTime: 5 * 60 * 1000,
     gcTime: INTERACTIVE_SEARCH_GC_TIME_MS,
     retry: false,
   });
-  const tmdbMissingCount =
-    tmdbQuery.data?.results?.filter((result) => result.availability !== "available").length ?? 0;
+  const requestResults = (tmdbQuery.data?.results ?? []).filter(
+    (result) => mediaScope !== "video" || result.media_type !== "audiobook",
+  );
+  const tmdbMissingCount = requestResults.filter((result) => result.availability !== "available").length;
   const libraryResultsKnown =
     !catalogQuery.isLoading && !catalogQuery.isPlaceholderData && !catalogQuery.isError;
   const libraryHasResults = libraryResultsKnown && (catalogQuery.data?.totalItems ?? 0) > 0;
@@ -465,6 +468,8 @@ function CatalogResults({
         <RequestToAddSection
           variant="grid"
           query={tmdbDebouncedQ}
+          mediaType={requestSearchType}
+          allowAudiobooks={mediaScope !== "video"}
           libraryHadHits={libraryHasResults}
           libraryResultsKnown={libraryResultsKnown}
         />
