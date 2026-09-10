@@ -77,6 +77,29 @@ Open <http://localhost:8090> and complete onboarding. The Compose stack wires
 the PostgreSQL and Redis connections; everything else (libraries, users,
 providers, storage, search, playback) is configured in the admin interface.
 
+### Optional Listenarr audiobook requests
+
+Listenarr is an external request-router integration, not a Silo runtime dependency or a
+Compose default. Install the request-router plugin from **Admin > Plugins**, then create a
+Listenarr connection under **Admin > Requests > Integrations**. Enter the URL for the
+Listenarr instance reachable from the Silo server, select the installed `request_router.v1`
+capability, and store the API key in the encrypted secret field. Do not add the API key to
+`.env`, source control, or support reports.
+
+For a deployment where Listenarr is reachable at the operator's configured URL, the path
+mapping follows the source path reported by Listenarr:
+
+```text
+Listenarr: /provider/media/audiobooks
+Silo:      /mnt/media/audiobooks
+```
+
+The Silo path must be the in-container path used by the audiobook library. Set the mapping in
+the integration configuration; do not hard-code this address or mapping into the application.
+After approval, the request page shows queued, downloading, imported, scanning, completed, or
+failed state. Completion is only actionable when Silo has returned an audiobook link; a missing
+library link remains a visible failure instead of being presented as ready.
+
 > [!CAUTION]
 > `SECRET_KEY` is the master key for encrypted server-owned credentials. Keep it
 > secret and back it up separately from database dumps. Losing it makes stored

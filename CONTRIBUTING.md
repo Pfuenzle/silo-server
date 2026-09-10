@@ -62,6 +62,11 @@ migrations, and repository layout, including how to iterate against
 
 ## Validate your change
 
+For the Listenarr audiobook request-router integration, see the operator guide at
+[`docs/wiki/admin/listenarr-audiobooks.md`](docs/wiki/admin/listenarr-audiobooks.md). The
+example address in that guide is deployment-specific documentation only; configure the actual
+URL and path mapping in the admin integration form, and keep API keys out of source and reports.
+
 While iterating, run the focused tests for what you touched:
 
 ```sh

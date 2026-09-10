@@ -72,6 +72,25 @@ testing libraries against real media.
 If a change spans Silo and `silo-plugin-sdk`, use an untracked local `go.work`
 workspace. `go.work` and `go.work.sum` are gitignored developer conveniences: CI
 runs from a clean checkout without them, and release builds set `GOWORK=off`.
+From this directory, create the sibling workspace and run the focused checks with:
+
+```sh
+go work init . ../silo-plugin-sdk
+GOWORK="$PWD/go.work" go test ./internal/requests/... ./internal/plugins/...
+```
+
+Remove the untracked `go.work` and `go.work.sum` after local SDK work. Do not add a
+machine-local `replace` directive to `go.mod`; release builds must consume a tagged
+SDK version with `GOWORK=off`.
+For the local Docker deployment image, use the sibling checkout as the named
+BuildKit context from this directory:
+
+```sh
+docker buildx build --build-context silo_plugin_sdk=../silo-plugin-sdk -f Dockerfile.dev .
+```
+
+`Dockerfile.dev` uses a relative module replacement inside the build stage; the
+published Dockerfile remains release/module-graph based.
 Any SDK package or symbol this repository uses must therefore be pushed and
 tagged in `silo-plugin-sdk` before the change here can merge.
 
