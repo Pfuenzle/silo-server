@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -58,6 +58,54 @@ describe("PluginConfigForm secrets", () => {
 
     expect(screen.getByLabelText("Base URL")).toBeInTheDocument();
     expect(screen.getByLabelText("Api Key")).toHaveAttribute("type", "password");
+  });
+
+  it("edits object-array config fields as JSON and submits parsed values", async () => {
+    const onSave = vi.fn();
+    render(
+      <PluginConfigForm
+        schema={{
+          key: "listenarr",
+          title: "Listenarr",
+          json_schema: JSON.stringify({
+            type: "object",
+            properties: {
+              path_mappings: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    source: { type: "string" },
+                    destination: { type: "string" },
+                  },
+                },
+              },
+            },
+            required: ["path_mappings"],
+          }),
+          required: true,
+        }}
+        value={{ path_mappings: [{ source: "/imports", destination: "/library" }] }}
+        onSave={onSave}
+      />,
+    );
+
+    const field = screen.getByLabelText("Path Mappings");
+    expect(field).toHaveValue(`[
+  {
+    "source": "/imports",
+    "destination": "/library"
+  }
+]`);
+    fireEvent.change(field, { target: { value: '[{"source":"/new","destination":"/library"}]' } });
+    await userEvent.click(screen.getByRole("button", { name: "Save config" }));
+
+    expect(onSave).toHaveBeenLastCalledWith(
+      "listenarr",
+      { path_mappings: [{ source: "/new", destination: "/library" }] },
+      [],
+      [],
+    );
   });
 
   it("shows redacted saved state and only clears through an explicit action", async () => {

@@ -102,6 +102,25 @@ function renderInteractiveLayout(suffix = "") {
 }
 
 describe("AdminSettingsLayout", () => {
+  it("exports only settings pages with registered canonical components", () => {
+    expect(new Set(ADMIN_SETTINGS_NAV.map((item) => item.id))).toEqual(
+      new Set([
+        "general",
+        "appearance",
+        "security",
+        "library",
+        "playback",
+        "downloads",
+        "providers",
+        "watch-sync",
+        "ai",
+        "notifications",
+        "compatibility",
+        "infrastructure",
+      ]),
+    );
+  });
+
   it("lands on the overview at the settings index", () => {
     renderInteractiveLayout();
 
@@ -170,19 +189,21 @@ describe("AdminSettingsLayout", () => {
       const label = ADMIN_SETTINGS_NAV.find((item) => item.id === current)?.label;
       expect(label).toBeDefined();
 
-      const { unmount } = renderInteractiveLayout(`?tab=${legacy}`);
+      const { router, unmount } = renderInteractiveLayout(`?tab=${legacy}`);
       expect(await screen.findByRole("region", { name: `${label} settings` })).toBeInTheDocument();
+      expect(router.state.location.pathname).toBe(`/admin/settings/${current}`);
       unmount();
     }
   });
 
   it("redirects a retired page route to the page that absorbed it", async () => {
     vi.stubGlobal("scrollTo", vi.fn());
-    renderInteractiveLayout("/jellyfin");
+    const { router } = renderInteractiveLayout("/jellyfin");
 
     expect(
       await screen.findByRole("region", { name: "Compatibility settings" }),
     ).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/admin/settings/compatibility");
   });
 
   it("redirects an unknown settings page to the overview", async () => {
@@ -222,6 +243,20 @@ describe("AdminSettingsLayout", () => {
 
     await userEvent.clear(box);
     expect(within(rail).getByRole("link", { name: "General" })).toBeInTheDocument();
+  });
+
+  it("searches legacy labels but links only to the canonical page", async () => {
+    vi.stubGlobal("scrollTo", vi.fn());
+    renderInteractiveLayout("/general");
+
+    const box = screen.getByRole("searchbox", { name: "Search settings" });
+    await userEvent.type(box, "branding");
+
+    const rail = screen.getByRole("navigation", { name: "Settings pages" });
+    expect(within(rail).getByRole("link", { name: "Branding" })).toHaveAttribute(
+      "href",
+      "/admin/settings/appearance",
+    );
   });
 
   it("keeps `ai` pointing at the AI Services page rather than an alias", () => {

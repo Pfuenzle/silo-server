@@ -128,3 +128,75 @@ export function requestInputFromMediaResult(item: RequestMediaResult): CreateMed
 export function formatRequestDate(request: Pick<MediaRequest, "created_at">): string {
   return formatDate(request.created_at, "medium");
 }
+
+export type AudiobookRequestDisplay = {
+  label: string;
+  detail: string | null;
+  href: string | null;
+  isCompleted: boolean;
+  isFailed: boolean;
+};
+
+export function audiobookRequestDisplay(request: MediaRequest): AudiobookRequestDisplay {
+  const href = siloAudiobookHref(request.silo_audiobook_link);
+  const externalStatus = request.external_status?.trim().toLowerCase();
+  const detail = request.external_detail?.trim() || request.last_error?.trim() || null;
+
+  if (request.outcome === "declined" || request.outcome === "cancelled") {
+    return {
+      label: formatRequestOutcome(request.outcome),
+      detail,
+      href: null,
+      isCompleted: false,
+      isFailed: true,
+    };
+  }
+  if (request.outcome === "failed" || externalStatus === "failed") {
+    return {
+      label: "Failed",
+      detail: detail ?? "Listenarr reported a failure. Retry the request or contact an administrator.",
+      href: null,
+      isCompleted: false,
+      isFailed: true,
+    };
+  }
+  if (externalStatus === "completed" && !href) {
+    return {
+      label: "Failed",
+      detail: detail ?? "Silo library link is not available yet. Refresh or retry the request.",
+      href: null,
+      isCompleted: false,
+      isFailed: true,
+    };
+  }
+  switch (externalStatus) {
+    case "queued":
+      return { label: "Queued", detail, href: null, isCompleted: false, isFailed: false };
+    case "downloading":
+      return { label: "Downloading", detail, href: null, isCompleted: false, isFailed: false };
+    case "imported":
+      return { label: "Imported", detail, href: null, isCompleted: false, isFailed: false };
+    case "scanning":
+      return { label: "Scanning", detail, href: null, isCompleted: false, isFailed: false };
+    case "completed":
+      return { label: "Completed", detail, href, isCompleted: true, isFailed: false };
+    default:
+      return {
+        label: formatRequestStatus(request.status),
+        detail,
+        href: null,
+        isCompleted: false,
+        isFailed: false,
+      };
+  }
+}
+
+function siloAudiobookHref(link: string | null | undefined): string | null {
+  const prefix = "/api/v1/items/";
+  if (!link?.startsWith(prefix)) return null;
+  const contentID = link.slice(prefix.length);
+  if (!contentID || contentID.includes("/") || contentID.includes("?") || contentID.includes("#")) {
+    return null;
+  }
+  return `/item/${encodeURIComponent(contentID)}`;
+}

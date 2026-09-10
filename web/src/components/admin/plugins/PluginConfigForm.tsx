@@ -70,6 +70,9 @@ function valueForField(
   if (typeof raw === "string") {
     return raw;
   }
+  if (field.control === "TEXTAREA" && raw !== undefined) {
+    return JSON.stringify(raw, null, 2);
+  }
   return defaultValueForField(field);
 }
 

@@ -2013,9 +2013,13 @@ export interface MediaRequest {
   targets?: RequestTarget[];
   integration_kind?: string;
   external_id?: string;
-  external_status?: string;
+  external_status?: string | null;
+  external_detail?: string | null;
+  external_library_id?: string | null;
+  external_download_id?: string | null;
+  silo_audiobook_link?: string | null;
   library_content_id?: string;
-  last_error?: string;
+  last_error?: string | null;
   created_at: string;
   updated_at: string;
   approved_at?: string;

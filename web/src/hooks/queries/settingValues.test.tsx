@@ -12,10 +12,12 @@ import {
   useClearSettingValue,
   useSetNavigationShortcutPresence,
   useSetSettingValue,
+  useSettingsCapabilities,
 } from "./settingValues";
 
 const apiMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const apiWithProfileRequestContextMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const authMock = vi.hoisted(() => vi.fn());
 vi.mock("@/api/client", async () => {
   const actual = await vi.importActual<typeof import("@/api/client")>("@/api/client");
   return {
@@ -24,6 +26,7 @@ vi.mock("@/api/client", async () => {
     apiWithProfileRequestContext: apiWithProfileRequestContextMock,
   };
 });
+vi.mock("@/hooks/useAuth", () => ({ useOptionalAuth: authMock }));
 
 function wrapper({ children }: { children: ReactNode }) {
   const queryClient = new QueryClient({
@@ -198,6 +201,37 @@ describe("settings capability gates", () => {
     supports_batched_effective: true,
     supports_idempotent_writes: true,
   };
+
+  afterEach(() => {
+    cleanup();
+    apiMock.mockClear();
+    authMock.mockReset();
+  });
+
+  it.each([
+    ["outside AuthProvider", null],
+    ["while auth is loading", { loading: true, user: null }],
+    ["without an authenticated user", { loading: false, user: null }],
+  ])("does not request capabilities %s", (_state, authState) => {
+    authMock.mockReturnValue(authState);
+
+    renderHook(() => useSettingsCapabilities(), { wrapper });
+
+    expect(apiMock).not.toHaveBeenCalled();
+  });
+
+  it("requests capabilities after auth transitions from loading to an authenticated user", async () => {
+    authMock.mockReturnValue({ loading: true, user: null });
+
+    const hook = renderHook(() => useSettingsCapabilities(), { wrapper });
+    expect(apiMock).not.toHaveBeenCalled();
+
+    authMock.mockReturnValue({ loading: false, user: { id: 1 } });
+    hook.rerender();
+    await waitFor(() =>
+      expect(apiMock).toHaveBeenCalledWith("/settings/contract/capabilities"),
+    );
+  });
 
   it("requires a compatible API and the definition's introduced revision", () => {
     expect(settingsCapabilitiesSupportKey(undefined, SETTING_KEYS.NAV_PRIMARY_MENU)).toBe(false);

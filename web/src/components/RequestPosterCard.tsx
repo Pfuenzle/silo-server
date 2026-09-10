@@ -2,7 +2,12 @@ import { Link } from "react-router";
 import { BookOpen, Check, Film, Library, Loader2, Plus, Tv } from "lucide-react";
 import type { MediaRequest, RequestMediaResult } from "@/api/types";
 import { cn } from "@/lib/utils";
-import { formatRequestReason, formatRequestStatus, tmdbImageURL } from "@/lib/mediaRequests";
+import {
+  audiobookRequestDisplay,
+  formatRequestReason,
+  formatRequestStatus,
+  tmdbImageURL,
+} from "@/lib/mediaRequests";
 import ViewTransitionLink from "@/components/ViewTransitionLink";
 
 const POSTER_WIDTH = "w-[148px] sm:w-[164px] lg:w-[184px]";
@@ -145,14 +150,31 @@ function MineCard({ request, fluid }: { request: MediaRequest; fluid?: boolean }
     request.media_type === "audiobook"
       ? (request.poster_path ?? null)
       : tmdbImageURL(request.poster_path);
-  const isCompleted = request.status === "completed";
+  const audiobookDisplay =
+    request.media_type === "audiobook" ? audiobookRequestDisplay(request) : null;
+  const isCompleted = audiobookDisplay
+    ? audiobookDisplay.isCompleted
+    : request.status === "completed";
   const isFailed =
-    request.outcome === "failed" ||
+    audiobookDisplay?.isFailed ||
     request.outcome === "declined" ||
     request.outcome === "cancelled";
+  const detail = audiobookDisplay?.detail ?? request.last_error;
+  const detailIsFailure = audiobookDisplay
+    ? audiobookDisplay.isFailed
+    : Boolean(request.last_error);
+  const cardHref =
+    audiobookDisplay?.href ??
+    (request.media_type === "audiobook"
+      ? "/requests"
+      : `/requests/${request.media_type}/${request.tmdb_id}`);
 
   const kind: RibbonKind = isFailed ? "blocked" : (request.status as RibbonKind);
-  const label = isFailed ? formatOutcome(request.outcome) : formatRequestStatus(request.status);
+  const label = audiobookDisplay
+    ? audiobookDisplay.label
+    : isFailed
+      ? formatOutcome(request.outcome)
+      : formatRequestStatus(request.status);
 
   return (
     <div
@@ -162,11 +184,7 @@ function MineCard({ request, fluid }: { request: MediaRequest; fluid?: boolean }
       )}
     >
       <Link
-        to={
-          request.media_type === "audiobook"
-            ? "/requests"
-            : `/requests/${request.media_type}/${request.tmdb_id}`
-        }
+        to={cardHref}
         className="block focus:outline-none focus-visible:outline-none"
       >
         <PosterFrame
@@ -185,7 +203,7 @@ function MineCard({ request, fluid }: { request: MediaRequest; fluid?: boolean }
             <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center justify-center bg-gradient-to-t from-emerald-950/90 via-emerald-900/40 to-transparent p-3">
               <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-semibold tracking-wide text-emerald-200 ring-1 ring-emerald-400/30">
                 <Check className="h-3 w-3 stroke-[2.5]" />
-                Ready to watch
+                {request.media_type === "audiobook" ? "Ready to listen" : "Ready to watch"}
               </span>
             </div>
           )}
@@ -193,17 +211,38 @@ function MineCard({ request, fluid }: { request: MediaRequest; fluid?: boolean }
 
         <CardMeta title={request.title} year={request.year} mediaType={request.media_type} />
 
-        {request.last_error ? (
+        {detail ? (
           <p
-            className="mt-1 line-clamp-2 text-[11px] leading-tight text-red-300/90"
-            title={request.last_error}
+            className={cn(
+              "mt-1 line-clamp-2 text-[11px] leading-tight",
+              detailIsFailure ? "text-red-300/90" : "text-muted-foreground",
+            )}
+            title={detail}
           >
-            {request.last_error}
+            {detail}
+          </p>
+        ) : null}
+        {request.media_type === "audiobook" &&
+        (request.external_download_id || request.external_library_id) ? (
+          <p
+            className="text-muted-foreground mt-1 truncate text-[11px]"
+            title="Listenarr reference"
+          >
+            Listenarr reference: {request.external_download_id ?? request.external_library_id}
           </p>
         ) : null}
       </Link>
 
-      {request.library_content_id ? (
+      {audiobookDisplay?.href ? (
+        <ViewTransitionLink
+          to={audiobookDisplay.href}
+          aria-label={`Open ${request.title} in library`}
+          className="absolute top-2 left-2 inline-flex max-w-[calc(100%-1rem)] items-center gap-1.5 rounded-full bg-black/70 px-2 py-[3px] text-[10px] leading-none font-semibold tracking-[0.06em] text-white uppercase shadow-sm ring-1 shadow-white/15 backdrop-blur-md transition-colors hover:bg-black/85 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+        >
+          <Library className="h-3 w-3 shrink-0" strokeWidth={2.4} aria-hidden />
+          <span className="truncate">Library</span>
+        </ViewTransitionLink>
+      ) : request.library_content_id ? (
         <LibraryCardLink contentID={request.library_content_id} title={request.title} />
       ) : null}
     </div>
@@ -334,7 +373,13 @@ function CardMeta({
           {mediaType && (
             <>
               <Icon className="h-3 w-3 shrink-0 opacity-60" strokeWidth={2} aria-hidden />
-              <span>{mediaType === "series" ? "Series" : "Movie"}</span>
+              <span>
+                {mediaType === "series"
+                  ? "Series"
+                  : mediaType === "audiobook"
+                    ? "Audiobook"
+                    : "Movie"}
+              </span>
             </>
           )}
           {mediaType && year ? (

@@ -74,7 +74,15 @@ export default function AdminSettingsLayout() {
     [settingsSearch],
   );
   const filteredItems = useMemo(
-    () => filteredGroups.flatMap((group) => group.items),
+    () => {
+      const matchingPageIds = new Set(
+        filteredGroups
+          .flatMap((group) => group.items)
+          .map((item) => resolveAdminSettingsPageID(item.id))
+          .filter((id): id is string => id !== null),
+      );
+      return ADMIN_SETTINGS_NAV.filter((item) => matchingPageIds.has(item.id));
+    },
     [filteredGroups],
   );
   const rawPageId = params["*"]?.replace(/^\/+|\/+$/g, "") || null;

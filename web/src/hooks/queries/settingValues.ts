@@ -15,6 +15,7 @@ import {
   type SettingKey,
 } from "@/lib/settingsContract";
 import { useEventChannel } from "@/components/realtimeEventsContext";
+import { useOptionalAuth } from "@/hooks/useAuth";
 import type { ShortcutTarget } from "@/lib/uiCustomization";
 import { deviceKeys, settingsKeys } from "./keys";
 
@@ -406,9 +407,11 @@ export function settingsCapabilitiesSupportAtomicShortcuts(
 }
 
 export function useSettingsCapabilities() {
+  const auth = useOptionalAuth();
   return useQuery({
     queryKey: [...settingsKeys.all, "capabilities"] as const,
     queryFn: () => api<SettingsCapabilities>("/settings/contract/capabilities"),
+    enabled: auth !== null && !auth.loading && auth.user !== null,
     staleTime: 30 * 60 * 1000,
   });
 }

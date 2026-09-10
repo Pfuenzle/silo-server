@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { AdminSession, Profile, CreateProfileRequest, ProfileListResponse } from "@/api/types";
+import { useOptionalAuth } from "@/hooks/useAuth";
 import { profileKeys } from "./keys";
 import { toast } from "sonner";
 
@@ -36,9 +37,11 @@ export function useHouseholdSessions(enabled = true) {
 }
 
 export function useProfiles() {
+  const auth = useOptionalAuth();
   const query = useQuery({
     queryKey: profileKeys.list(),
     queryFn: () => api<ProfileListResponse>("/profiles"),
+    enabled: auth !== null && !auth.loading && auth.user !== null,
   });
 
   return {
