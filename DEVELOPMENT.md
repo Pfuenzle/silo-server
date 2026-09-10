@@ -29,9 +29,10 @@ and Redis; the deploy-oriented stack in the README is separate.
 # Create the local bootstrap configuration
 cp .env.example .env
 chmod 600 .env
+# Replace the angle-bracket database placeholders with local values first.
 printf '\nSECRET_KEY=%s\nDATABASE_URL=%s\nREDIS_URL=%s\n' \
   "$(openssl rand -base64 48)" \
-  'postgres://silo:silo@localhost:5432/silo?sslmode=disable' \
+  'postgres://<DB_USER>:<DB_PASSWORD>@<DB_HOST>:<DB_PORT>/<DB_NAME>?sslmode=disable' \
   'redis://localhost:6379' >> .env
 
 # Start local PostgreSQL and Redis
@@ -70,7 +71,7 @@ testing libraries against real media.
 ### Working on the plugin SDK at the same time
 
 If a change spans Silo and `silo-plugin-sdk`, use the canonical sibling checkout
-at `/blyatflix/admin/silo/silo-plugin-sdk` with an untracked local `go.work`
+at `../silo-plugin-sdk` with an untracked local `go.work`
 workspace. `go.work` and `go.work.sum` are gitignored developer conveniences: CI
 runs from a clean checkout without them, and release builds set `GOWORK=off`.
 From this directory, create the sibling workspace and run the focused checks with:
@@ -92,12 +93,14 @@ docker buildx build --build-context silo_plugin_sdk=../silo-plugin-sdk -f Docker
 
 `Dockerfile.dev` uses a relative module replacement inside the build stage; the
 published Dockerfile remains release/module-graph based.
-Any SDK package or symbol this repository uses must therefore be pushed and
-tagged in `silo-plugin-sdk` before the change here can merge.
+Any SDK package or symbol this repository uses must therefore be present in a
+released SDK tag before the change here can merge. A local replacement or
+workspace can support development, but it is not a release boundary.
 
-The parent Silo workspace documents the direct-child repository layout in
-`../AGENTS.md`. It is a workspace guide only; each child directory keeps its own
-Git boundary and release process.
+The parent Silo workspace documents the direct-child source-tree layout in
+`../AGENTS.md`. It is a workspace guide only. LDAP, OIDC, and Listenarr are
+standalone non-Git source trees; Git-backed children keep their own Git
+boundaries and release processes.
 
 Plugin authors should start in the `silo-plugin-sdk` repository, usually checked
 out beside this one. It owns the plugin package format, protobuf contracts,

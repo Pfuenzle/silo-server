@@ -65,10 +65,19 @@ check_pattern \
 	"${old_silo_checkout}" \
 	AGENTS.md CLAUDE.md CONTRIBUTING.md DEVELOPMENT.md README.md docs scripts
 
+check_pattern \
+	"credential-bearing PostgreSQL URL in documentation" \
+	'postgresql?://[a-z0-9._-]+:[^@[:space:]]+@' \
+	DEVELOPMENT.md
+
 workspace_root=$(cd "$repo_root/.." && pwd)
 if [[ -f "$workspace_root/HANDOFF.md" ]]; then
 	if grep -n -I -E "$old_silo_checkout" "$workspace_root/HANDOFF.md" >&2; then
 		printf '%s\n' "local path leak check failed: stale pre-consolidation Silo checkout path in ../HANDOFF.md" >&2
+		failed=1
+	fi
+	if grep -n -I -E 'postgresql?://[a-z0-9._-]+:[^@[:space:]]+@' "$workspace_root/AGENTS.md" "$workspace_root/HANDOFF.md" >&2; then
+		printf '%s\n' "local path leak check failed: credential-bearing PostgreSQL URL in ../AGENTS.md or ../HANDOFF.md" >&2
 		failed=1
 	fi
 fi
