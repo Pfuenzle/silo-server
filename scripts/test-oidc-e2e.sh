@@ -3,7 +3,19 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 plugin_bin="${OIDC_PLUGIN_BIN:-$root/../silo-plugin-auth-oidc/dist/linux-amd64/silo-plugin-auth-oidc}"
-chrome="${PLAYWRIGHT_CHROME_EXECUTABLE_PATH:-/blyatflix/.nix-profile/bin/chromium}"
+chrome="${PLAYWRIGHT_CHROME_EXECUTABLE_PATH:-}"
+if [[ -z "$chrome" ]]; then
+  for candidate in chromium chromium-browser google-chrome; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      chrome="$(command -v "$candidate")"
+      break
+    fi
+  done
+fi
+if [[ -z "$chrome" ]]; then
+  printf 'Chromium not found. Set PLAYWRIGHT_CHROME_EXECUTABLE_PATH or run through nix-shell, for example: nix-shell -p chromium playwright-driver --run %q\n' "$0" >&2
+  exit 1
+fi
 cache="$(mktemp -d "${TMPDIR:-/tmp}/silo-oidc-build.XXXXXX")"
 receipt="$cache/production-build-receipt"
 process_registry="$cache/process-groups"
