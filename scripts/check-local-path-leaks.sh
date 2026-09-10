@@ -70,6 +70,56 @@ check_pattern \
 	'postgresql?://[a-z0-9._-]+:[^@[:space:]]+@' \
 	DEVELOPMENT.md
 
+shell_fixture_exception() {
+	local path=$1
+	local content=$2
+
+	if [[ "$path" == scripts/dev-remote-setup.sh && "$content" == 'DATABASE_URL=postgres://silo:silo@localhost:5432/silo?sslmode=disable' ]]; then
+		return 0
+	fi
+	if [[ "$path" == scripts/test-ldap-e2e.sh && "$content" == 'host_database_url="postgres://silo:silo@127.0.0.1:${host_port}/silo?sslmode=disable"' ]]; then
+		return 0
+	fi
+	if [[ "$path" == scripts/test-ldap-e2e.sh && "$content" == 'docker run -d --rm --name "$host_postgres" --network "$host_network" --label "$host_label" -e POSTGRES_USER=silo -e POSTGRES_PASSWORD=silo -e POSTGRES_DB=silo -p 127.0.0.1::5432 pgvector/pgvector:pg17 >/dev/null' ]]; then
+		return 0
+	fi
+	if [[ "$path" == scripts/test-ldap-e2e.sh && "$content" == 'DATABASE_URL="$host_database_url" SECRET_KEY=integration-secret-key-0123456789abcdef "$cache/source/silo" --migrate-only' ]]; then
+		return 0
+	fi
+
+	return 1
+}
+
+check_shell_script_credentials() {
+	local matches
+	if [[ "$cached" -eq 1 ]]; then
+		matches=$(git grep --cached -n -I -E 'postgresql?://[a-z0-9._-]+:[^@[:space:]]+@|POSTGRES_PASSWORD=[^[:space:]]+|SECRET_KEY=[^[:space:]"'"'"']+' -- 'scripts/*.sh' ':(exclude)scripts/check-local-path-leaks.sh' 2>/dev/null) || return 0
+	else
+		matches=$(git grep -n -I -E 'postgresql?://[a-z0-9._-]+:[^@[:space:]]+@|POSTGRES_PASSWORD=[^[:space:]]+|SECRET_KEY=[^[:space:]"'"'"']+' -- 'scripts/*.sh' ':(exclude)scripts/check-local-path-leaks.sh' 2>/dev/null) || return 0
+	fi
+
+	local unexpected=''
+	local record path rest line content
+	while IFS= read -r record; do
+		path=${record%%:*}
+		rest=${record#*:}
+		line=${rest%%:*}
+		content=${rest#*:}
+		content="${content#"${content%%[![:space:]]*}"}"
+		if ! shell_fixture_exception "$path" "$content"; then
+			unexpected+="$path:$line:$content\n"
+		fi
+	done <<< "$matches"
+
+	if [[ -n "$unexpected" ]]; then
+		printf '%s\n' "local path leak check failed: credential-bearing default in tracked shell script" >&2
+		printf '%b\n' "$unexpected" >&2
+		failed=1
+	fi
+}
+
+check_shell_script_credentials
+
 workspace_root=$(cd "$repo_root/.." && pwd)
 if [[ -f "$workspace_root/HANDOFF.md" ]]; then
 	if grep -n -I -E "$old_silo_checkout" "$workspace_root/HANDOFF.md" >&2; then
