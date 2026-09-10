@@ -69,7 +69,8 @@ testing libraries against real media.
 
 ### Working on the plugin SDK at the same time
 
-If a change spans Silo and `silo-plugin-sdk`, use an untracked local `go.work`
+If a change spans Silo and `silo-plugin-sdk`, use the canonical sibling checkout
+at `/blyatflix/admin/silo/silo-plugin-sdk` with an untracked local `go.work`
 workspace. `go.work` and `go.work.sum` are gitignored developer conveniences: CI
 runs from a clean checkout without them, and release builds set `GOWORK=off`.
 From this directory, create the sibling workspace and run the focused checks with:
@@ -93,6 +94,10 @@ docker buildx build --build-context silo_plugin_sdk=../silo-plugin-sdk -f Docker
 published Dockerfile remains release/module-graph based.
 Any SDK package or symbol this repository uses must therefore be pushed and
 tagged in `silo-plugin-sdk` before the change here can merge.
+
+The parent Silo workspace documents the direct-child repository layout in
+`../AGENTS.md`. It is a workspace guide only; each child directory keeps its own
+Git boundary and release process.
 
 Plugin authors should start in the `silo-plugin-sdk` repository, usually checked
 out beside this one. It owns the plugin package format, protobuf contracts,
