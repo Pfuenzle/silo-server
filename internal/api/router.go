@@ -1000,7 +1000,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		}
 	}
 	if deps.WatchProviderService != nil {
-		watchProviderHandler = handlers.NewWatchProviderHandler(deps.WatchProviderService)
+		watchProviderHandler = handlers.NewWatchProviderHandlerWithPublicURL(deps.WatchProviderService, deps.PublicURL)
 	}
 
 	// Build ratings handler if both repo and itemRepo are available.
@@ -2239,6 +2239,10 @@ func NewRouter(deps Dependencies) chi.Router {
 			)
 		}
 
+		if watchProviderHandler != nil {
+			r.Get("/watch-providers/{provider}/auth/callback", watchProviderHandler.HandleAuthorizationCodeCallback)
+		}
+
 		// All remaining routes require auth.
 		if authMiddleware != nil {
 			r.Group(func(r chi.Router) {
@@ -2579,6 +2583,7 @@ func NewRouter(deps Dependencies) chi.Router {
 						r.Get("/{provider}/connection", watchProviderHandler.HandleGetConnection)
 						r.Patch("/{provider}/connection", watchProviderHandler.HandleUpdateConnection)
 						r.Delete("/{provider}/connection", watchProviderHandler.HandleDeleteConnection)
+						r.Post("/{provider}/auth/authorization-code", watchProviderHandler.HandleStartAuthorizationCodeAuth)
 						r.Post("/{provider}/auth/device-code", watchProviderHandler.HandleStartDeviceAuth)
 						r.Post("/{provider}/auth/poll", watchProviderHandler.HandlePollDeviceAuth)
 						r.Post("/{provider}/auth/api-key", watchProviderHandler.HandleConnectAPIKey)
