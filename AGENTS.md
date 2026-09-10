@@ -165,6 +165,10 @@ reach your Silo deployment — URL, SSH target, database, an account to debug wi
 gitignored and is the only place hosts, passwords, and tokens belong. `scripts/silo-dev doctor`
 checks it end to end.
 
+When a development tool is missing, use Nix to provide it for the command instead of installing
+it globally: `nix-shell -p <tool> --run '<command>'`. For multiple tools, list them together, for
+example `nix-shell -p go gcc pkg-config --run 'go test ./...'`.
+
 ## Writing
 
 Before creating or updating an issue or pull request, agents must read and apply
