@@ -17,6 +17,7 @@ export interface WatchProviderSummary {
 export const WatchProviderAuthMethod = {
   DeviceCode: "device_code",
   APIKey: "api_key",
+  AuthorizationCode: "authorization_code",
 } as const;
 export type WatchProviderAuthMethod =
   (typeof WatchProviderAuthMethod)[keyof typeof WatchProviderAuthMethod];
@@ -73,6 +74,10 @@ export interface DeviceAuthSession {
   verification_url: string;
   interval_seconds: number;
   expires_at: string;
+}
+
+export interface AuthorizationCodeAuthStart {
+  authorization_url: string;
 }
 
 export interface WatchProviderSyncRun {
@@ -164,6 +169,12 @@ export function pollWatchProviderDeviceAuth(provider: string, authSessionId: str
   });
 }
 
+export function startWatchProviderAuthorizationCodeAuth(provider: string) {
+  return api<AuthorizationCodeAuthStart>(`/watch-providers/${provider}/auth/authorization-code`, {
+    method: "POST",
+  });
+}
+
 export function connectWatchProviderAPIKey(
   provider: string,
   apiKey: string,
@@ -251,6 +262,17 @@ export function usePollWatchProviderDeviceAuth(provider: string) {
       toast.success("Watch provider connected");
     },
     onError: (err) => toast.error(err instanceof Error ? err.message : "Failed to finish auth"),
+  });
+}
+
+export function useStartWatchProviderAuthorizationCodeAuth(provider: string) {
+  return useMutation({
+    mutationFn: () => startWatchProviderAuthorizationCodeAuth(provider),
+    onSuccess: ({ authorization_url }) => {
+      window.location.assign(authorization_url);
+    },
+    onError: (err) =>
+      toast.error(err instanceof Error ? err.message : "Failed to start provider login"),
   });
 }
 

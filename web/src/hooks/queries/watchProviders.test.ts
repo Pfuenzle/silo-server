@@ -3,6 +3,7 @@ import {
   connectWatchProviderAPIKey,
   fetchWatchProviders,
   pollWatchProviderDeviceAuth,
+  startWatchProviderAuthorizationCodeAuth,
   startWatchProviderDeviceAuth,
   triggerWatchProviderSync,
   updateWatchProviderConnection,
@@ -19,6 +20,9 @@ vi.mock("@/api/client", () => ({
         IntervalSeconds: 5,
         ExpiresAt: "2026-05-04T15:57:08Z",
       };
+    }
+    if (path === "/watch-providers/plugin:4:anilist/auth/authorization-code") {
+      return { authorization_url: "https://anilist.co/oauth/authorize?state=state-1" };
     }
     if (path === "/watch-providers/trakt/sync") {
       return {
@@ -62,6 +66,9 @@ describe("watch provider queries", () => {
     await expect(pollWatchProviderDeviceAuth("trakt", "auth-1")).resolves.toMatchObject({
       path: "/watch-providers/trakt/auth/poll",
       method: "POST",
+    });
+    await expect(startWatchProviderAuthorizationCodeAuth("plugin:4:anilist")).resolves.toEqual({
+      authorization_url: "https://anilist.co/oauth/authorize?state=state-1",
     });
     await expect(
       connectWatchProviderAPIKey("plugin:4:floppy", "token", {
