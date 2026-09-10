@@ -806,6 +806,9 @@ func NewRouter(deps Dependencies) chi.Router {
 			}))
 		}
 		AttachRequestRouter(requestSvc, deps.PluginService)
+		if err := AttachAudiobookImport(requestSvc, deps.LibraryScanQueue, deps.FolderRepo, deps.FileRepo, itemRepo); err != nil {
+			slog.Warn("requests: audiobook import linker unavailable", "error", err)
+		}
 		requestSvc.SetGroupPolicyProvider(accessGroupStore)
 		if userRepo != nil {
 			requestSvc.SetUserRepository(userRepo)

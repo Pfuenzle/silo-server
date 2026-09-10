@@ -9,10 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/protobuf/types/known/structpb"
-
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-server/internal/pluginhost"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 var ErrConnectionTestUnsupported = errors.New("plugin connection test unsupported")
@@ -170,7 +169,8 @@ func (s *Service) TestGlobalConfigWithFieldClears(
 			Cause:   err,
 		}
 	}
-	if _, err := metadataProviderConnectionCheckCapabilityID(manifest); err != nil {
+	if _, err := requestRouterConnectionCheckCapabilityID(manifest); err == nil {
+	} else if _, err := metadataProviderConnectionCheckCapabilityID(manifest); err != nil {
 		return err
 	}
 
@@ -204,6 +204,17 @@ func (s *Service) TestGlobalConfigWithFieldClears(
 		}
 	}()
 
+	if _, err := requestRouterConnectionCheckCapabilityID(manifest); err == nil {
+		capabilityID, capabilityErr := requestRouterConnectionCheckCapabilityID(manifest)
+		if capabilityErr != nil {
+			return capabilityErr
+		}
+		requestRouter, requestErr := client.RequestRouter(capabilityID)
+		if requestErr != nil {
+			return &ConnectionTestError{Message: "Request-router connection check unavailable", Cause: requestErr}
+		}
+		return runRequestRouterConnectionCheck(ctx, requestRouter, manifest, value)
+	}
 	return runPluginConnectionCheck(ctx, client, manifest)
 }
 

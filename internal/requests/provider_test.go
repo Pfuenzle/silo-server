@@ -2,6 +2,7 @@ package requests
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
@@ -11,12 +12,16 @@ type fakeRouterClient struct {
 	lastReq        *pluginv1.FulfillRequest
 	lastCheckReq   *pluginv1.CheckStatusRequest
 	statuses       []*pluginv1.TargetStatus
+	targets        []*pluginv1.FulfillmentTarget
 	optionsByField map[string]*pluginv1.ConfigOptionList
 	validateResp   *pluginv1.ValidateResponse
 }
 
 func (f *fakeRouterClient) Fulfill(_ context.Context, req *pluginv1.FulfillRequest) (*pluginv1.FulfillResponse, error) {
 	f.lastReq = req
+	if f.targets != nil {
+		return &pluginv1.FulfillResponse{Targets: f.targets}, nil
+	}
 	return &pluginv1.FulfillResponse{Targets: []*pluginv1.FulfillmentTarget{
 		{Quality: "1080p", ConnectionId: "c1", ExternalId: "7", Status: "queued"},
 	}}, nil
@@ -42,11 +47,17 @@ func (r fakeRouterResolver) RequestRouterClient(context.Context, int, string) (R
 }
 
 func TestPluginRouterProviderFulfillTranslates(t *testing.T) {
-	fc := &fakeRouterClient{}
+	fc := &fakeRouterClient{targets: []*pluginv1.FulfillmentTarget{{
+		Quality: "1080p", ConnectionId: "c1", ExternalId: "7", Status: "queued",
+		Metadata: &pluginv1.RouterMetadata{
+			ExternalCorrelationId: "external-correlation-7", StatusText: "Queued", ExternalUrl: "https://router.example/downloads/7",
+			LibraryUrl: "/api/v1/items/book-7", ImportedPath: "/mnt/media/audiobooks/Author/Title", ScanLinkState: "pending",
+		},
+	}}}
 	p := NewPluginRouterProvider(fakeRouterResolver{c: fc})
 	year := 2020
 	req := Request{MediaType: MediaTypeMovie, TMDBID: 42, Title: "X", Year: &year}
-	targets, msg, err := p.Fulfill(context.Background(), 1, "arr", req, []Quality{Quality1080p},
+	targets, msg, err := p.Fulfill(context.Background(), 1, "arbitrary.router", req, []Quality{Quality1080p},
 		[]ResolvedRouterConnection{{ID: "c1", BaseURL: "http://r", APIKey: "k", Config: map[string]any{"service_kind": "radarr"}}})
 	if err != nil {
 		t.Fatalf("Fulfill: %v", err)
@@ -61,11 +72,26 @@ func TestPluginRouterProviderFulfillTranslates(t *testing.T) {
 	if gotQ[0].GetId() != "1080p" || gotQ[0].GetIs4K() {
 		t.Fatalf("1080p should be id=1080p is4k=false, got %+v", gotQ[0])
 	}
+	if fc.lastReq.GetRequest().GetRequestId() != req.ID || fc.lastReq.GetRequest().GetFulfillmentKey() != req.FulfillmentKey {
+		t.Fatalf("request identity was not translated: %+v", fc.lastReq.GetRequest())
+	}
+	if got := fc.lastReq.GetConnections()[0].GetConfig().AsMap()["service_kind"]; got != "radarr" {
+		t.Fatalf("connection config was not translated over protobuf: %#v", fc.lastReq.GetConnections()[0].GetConfig().AsMap())
+	}
+	if targets[0].Metadata == nil || targets[0].Metadata.ExternalCorrelationID != "external-correlation-7" ||
+		targets[0].Metadata.StatusText != "Queued" || targets[0].Metadata.ExternalURL != "https://router.example/downloads/7" ||
+		targets[0].Metadata.LibraryURL != "/api/v1/items/book-7" || targets[0].Metadata.ImportedPath != "/mnt/media/audiobooks/Author/Title" ||
+		targets[0].Metadata.ScanLinkState != ScanLinkStatePending {
+		t.Fatalf("target metadata mismapped: %+v", targets[0].Metadata)
+	}
 }
 
 func TestPluginRouterProviderCheckStatusTranslates(t *testing.T) {
 	fc := &fakeRouterClient{statuses: []*pluginv1.TargetStatus{
-		{Quality: "1080p", ConnectionId: "c1", Status: "downloading", ExternalStatus: "grabbed", Message: "in queue"},
+		{Quality: "1080p", ConnectionId: "c1", Status: "downloading", ExternalStatus: "grabbed", Message: "in queue", Metadata: &pluginv1.RouterMetadata{
+			ExternalCorrelationId: "external-correlation-7", StatusText: "Importing", ExternalUrl: "https://router.example/downloads/7",
+			LibraryUrl: "/api/v1/items/book-7", ImportedPath: "/mnt/media/audiobooks/Author/Title", ScanLinkState: "scanning",
+		}},
 		{Quality: "2160p", ConnectionId: "c2", Status: "completed", ExternalStatus: "imported", Message: ""},
 	}}
 	p := NewPluginRouterProvider(fakeRouterResolver{c: fc})
@@ -85,6 +111,12 @@ func TestPluginRouterProviderCheckStatusTranslates(t *testing.T) {
 	if out[0].Quality != Quality1080p || out[0].ConnectionID != "c1" ||
 		out[0].Status != StatusDownloading || out[0].ExternalStatus != "grabbed" || out[0].Message != "in queue" {
 		t.Fatalf("status[0] mismapped: %+v", out[0])
+	}
+	if out[0].Metadata == nil || out[0].Metadata.ExternalCorrelationID != "external-correlation-7" ||
+		out[0].Metadata.StatusText != "Importing" || out[0].Metadata.ExternalURL != "https://router.example/downloads/7" ||
+		out[0].Metadata.LibraryURL != "/api/v1/items/book-7" || out[0].Metadata.ImportedPath != "/mnt/media/audiobooks/Author/Title" ||
+		out[0].Metadata.ScanLinkState != ScanLinkStateScanning {
+		t.Fatalf("status[0] metadata mismapped: %+v", out[0].Metadata)
 	}
 	if out[1].Quality != Quality2160p || out[1].ConnectionID != "c2" || out[1].Status != StatusCompleted || out[1].ExternalStatus != "imported" {
 		t.Fatalf("status[1] mismapped: %+v", out[1])
@@ -135,5 +167,33 @@ func TestPluginRouterProviderValidateTranslates(t *testing.T) {
 		nil)
 	if err != nil || form != "" || fe["is_default"] != "cannot be 4K" {
 		t.Fatalf("unexpected: fe=%v form=%q err=%v", fe, form, err)
+	}
+}
+
+func TestRouterTargetJSONPreservesLegacyShapeWhenMetadataIsAbsent(t *testing.T) {
+	// Given a legacy target with no optional router metadata
+	target := RouterTarget{
+		Quality:      Quality1080p,
+		ConnectionID: "c1",
+		ExternalID:   "7",
+		Status:       StatusQueued,
+	}
+
+	// When the target is serialized for the request API
+	data, err := json.Marshal(target)
+	if err != nil {
+		t.Fatalf("marshal target: %v", err)
+	}
+
+	// Then the legacy fields remain and optional metadata is omitted
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal target: %v", err)
+	}
+	if _, ok := got["metadata"]; ok {
+		t.Fatalf("legacy target unexpectedly contains metadata: %s", data)
+	}
+	if string(got["ExternalID"]) != `"7"` || string(got["Status"]) != `"queued"` {
+		t.Fatalf("legacy target fields changed: %s", data)
 	}
 }

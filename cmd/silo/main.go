@@ -2655,6 +2655,9 @@ func main() {
 		}))
 		requestReconcileSvc.SetRequesterIdentityResolver(plugins.RequesterIdentityFromLookup(plugins.NewPgUserIdentityLookup(deps.DB)))
 		api.AttachRequestRouter(requestReconcileSvc, pluginService)
+		if err := api.AttachAudiobookImport(requestReconcileSvc, deps.LibraryScanQueue, deps.FolderRepo, deps.FileRepo, itemRepo); err != nil {
+			slog.Warn("requests: audiobook import linker unavailable", "error", err)
+		}
 		requestReconcileSvc.SetGroupPolicyProvider(accessGroupStore)
 		if userStoreProvider != nil {
 			userRepo := auth.NewUserRepository(deps.DB)

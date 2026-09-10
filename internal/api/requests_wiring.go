@@ -4,8 +4,13 @@ import (
 	"context"
 	"errors"
 
+	"github.com/Silo-Server/silo-server/internal/autoscan"
+	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/plugins"
 	mediarequests "github.com/Silo-Server/silo-server/internal/requests"
+	"github.com/Silo-Server/silo-server/internal/scanner"
+	"github.com/Silo-Server/silo-server/internal/scanqueue"
+	"github.com/Silo-Server/silo-server/internal/scantrigger"
 )
 
 // PluginRequestRouterAdapter adapts plugins.Service to
@@ -33,4 +38,16 @@ func AttachRequestRouter(svc *mediarequests.Service, pluginService *plugins.Serv
 		return
 	}
 	svc.SetRouterProvider(mediarequests.NewPluginRouterProvider(PluginRequestRouterAdapter{pluginService}))
+}
+
+func AttachAudiobookImport(svc *mediarequests.Service, queue *scanqueue.Service, folders *catalog.FolderRepository, files *scanner.FileRepository, items *catalog.ItemRepository) error {
+	if svc == nil || queue == nil || folders == nil || files == nil || items == nil {
+		return nil
+	}
+	linker := mediarequests.NewAudiobookImportLinker(queue, scantrigger.NewResolver(folders), files, items, nil)
+	linker.SetPathMapperFactory(func(raw map[string]any) (mediarequests.PathMapper, error) {
+		return autoscan.NewPathMapperFromConfig(raw)
+	})
+	svc.SetAudiobookImportLinker(linker)
+	return nil
 }

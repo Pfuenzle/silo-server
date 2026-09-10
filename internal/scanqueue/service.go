@@ -114,25 +114,6 @@ func (s *Service) EnqueueLibraryScan(ctx context.Context, folderID int, trigger 
 	return s.EnqueueScan(ctx, folderID, ModeLibrary, "", trigger)
 }
 
-func (s *Service) EnqueueScan(ctx context.Context, folderID int, mode, path, trigger string) (bool, error) {
-	if s == nil || s.repo == nil {
-		return false, fmt.Errorf("scan queue is not configured")
-	}
-	run, created, err := s.repo.Create(ctx, CreateInput{
-		LibraryID: folderID,
-		Mode:      mode,
-		Path:      path,
-		Trigger:   trigger,
-	})
-	if err != nil {
-		return false, err
-	}
-	if created {
-		s.publish(ctx, "scan.accepted", run)
-	}
-	return created, nil
-}
-
 func (s *Service) EnqueueScans(ctx context.Context, targets []scantrigger.Target) error {
 	_, _, err := s.enqueueScans(ctx, targets, nil)
 	return err

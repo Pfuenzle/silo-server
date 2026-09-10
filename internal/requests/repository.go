@@ -349,16 +349,16 @@ func (r *Repository) insertRequest(
 	}
 	row := exec.QueryRow(ctx, `
 		INSERT INTO media_requests (
-			id, provider, media_type, tmdb_id, provider_item_id, tvdb_id, imdb_id, title, year,
+			id, fulfillment_key, provider, media_type, tmdb_id, provider_item_id, tvdb_id, imdb_id, title, year,
 			overview, poster_path, backdrop_path, status, outcome,
 			requested_by_user_id, requested_by_profile_id, is_anime, created_at, updated_at, approved_at
 		)
 		VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9,
-			$10, $11, $12, $13, $14,
-			$15, $16, $17, $18, $18, $19
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+			$11, $12, $13, $14, $15,
+			$16, $17, $18, $19, $19, $20
 		)
-		RETURNING `+requestColumns(), input.ID, provider, input.Input.MediaType, tmdbID,
+		RETURNING `+requestColumns(), input.ID, input.ID, provider, input.Input.MediaType, tmdbID,
 		strings.TrimSpace(input.Input.ProviderItemID), tvdbID,
 		strings.TrimSpace(input.Input.IMDbID), strings.TrimSpace(input.Input.Title), year,
 		strings.TrimSpace(input.Input.Overview), strings.TrimSpace(input.Input.PosterPath),
@@ -380,6 +380,80 @@ func (r *Repository) GetRequest(ctx context.Context, id string) (*Request, error
 			return nil, ErrNotFound
 		}
 		return nil, err
+	}
+	return req, nil
+}
+
+func (r *Repository) ClaimRequestSubmission(ctx context.Context, id, key string, now time.Time, lease time.Duration) (*Request, bool, error) {
+	if strings.TrimSpace(key) == "" {
+		return nil, false, fmt.Errorf("claim request submission: empty idempotency key")
+	}
+	req, err := scanRequest(r.pool.QueryRow(ctx, `
+		UPDATE media_requests
+		SET fulfillment_key = CASE WHEN fulfillment_key = '' THEN $2 ELSE fulfillment_key END,
+		    submission_state = $3,
+		    submission_started_at = $4,
+		    updated_at = now()
+		WHERE id = $1
+		  AND outcome = 'active'
+		  AND status = 'approved'
+		  AND (fulfillment_key = '' OR fulfillment_key = $2)
+		  AND (
+		      submission_state IN ('', $5)
+		      OR (submission_state = $3 AND submission_started_at < $4 - $6::interval)
+		  )
+		RETURNING `+requestColumns(), id, strings.TrimSpace(key), SubmissionStateInFlight,
+		SubmissionStateFailed, now, lease.String()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("claim request submission: %w", err)
+	}
+	return req, true, nil
+}
+
+func (r *Repository) SetRequestSubmissionState(ctx context.Context, id, state string) (*Request, error) {
+	req, err := scanRequest(r.pool.QueryRow(ctx, `
+		UPDATE media_requests
+		SET submission_state = $2,
+		    submission_started_at = CASE WHEN $2 = $3 THEN submission_started_at ELSE NULL END,
+		    updated_at = now()
+		WHERE id = $1
+		RETURNING `+requestColumns(), id, state, SubmissionStateInFlight))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("set request submission state: %w", err)
+	}
+	return req, nil
+}
+
+func (r *Repository) UpdateRequestLifecycle(ctx context.Context, id string, lifecycle RequestLifecycle) (*Request, error) {
+	req, err := scanRequest(r.pool.QueryRow(ctx, `
+		UPDATE media_requests
+		SET external_library_id = CASE WHEN $2 = '' THEN external_library_id ELSE $2 END,
+		    external_download_id = CASE WHEN $3 = '' THEN external_download_id ELSE $3 END,
+		    external_status = CASE WHEN $4 = '' THEN external_status ELSE $4 END,
+		    external_detail = CASE WHEN $5 = '' THEN external_detail ELSE $5 END,
+		    imported_path = CASE WHEN $6 = '' THEN imported_path ELSE $6 END,
+		    scan_run_id = CASE WHEN $7 = '' THEN scan_run_id ELSE $7 END,
+		    silo_audiobook_id = CASE WHEN $8 = '' THEN silo_audiobook_id ELSE $8 END,
+		    silo_audiobook_link = CASE WHEN $9 = '' THEN silo_audiobook_link ELSE $9 END,
+		    retryable = $10,
+		    updated_at = now()
+		WHERE id = $1
+		RETURNING `+requestColumns(), id, strings.TrimSpace(lifecycle.ExternalLibraryID),
+		strings.TrimSpace(lifecycle.ExternalDownloadID), strings.TrimSpace(lifecycle.ExternalStatus),
+		strings.TrimSpace(lifecycle.ExternalDetail), strings.TrimSpace(lifecycle.ImportedPath),
+		strings.TrimSpace(lifecycle.ScanRunID), strings.TrimSpace(lifecycle.SiloAudiobookID),
+		strings.TrimSpace(lifecycle.SiloAudiobookLink), lifecycle.Retryable))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update request lifecycle: %w", err)
 	}
 	return req, nil
 }
@@ -795,9 +869,11 @@ func requestSelectSQL() string {
 }
 
 func requestColumns() string {
-	return `id, provider, media_type, tmdb_id, provider_item_id, tvdb_id, imdb_id, title, year,
+	return `id, fulfillment_key, submission_state, submission_started_at, provider, media_type, tmdb_id, provider_item_id, tvdb_id, imdb_id, title, year,
 	        overview, poster_path, backdrop_path, status, outcome,
 	        requested_by_user_id, requested_by_profile_id, is_anime,
+	        external_id, external_status, external_library_id, external_download_id, external_detail,
+	        imported_path, scan_run_id, silo_audiobook_id, silo_audiobook_link, retryable,
 	        last_error, created_at, updated_at, approved_at, completed_at`
 }
 
@@ -808,9 +884,12 @@ type requestScanner interface {
 func scanRequest(row requestScanner) (*Request, error) {
 	var req Request
 	var tmdbID, tvdbID, year sql.NullInt64
-	var approvedAt, completedAt sql.NullTime
+	var approvedAt, completedAt, submissionStartedAt sql.NullTime
 	if err := row.Scan(
 		&req.ID,
+		&req.FulfillmentKey,
+		&req.SubmissionState,
+		&submissionStartedAt,
 		&req.Provider,
 		&req.MediaType,
 		&tmdbID,
@@ -827,6 +906,16 @@ func scanRequest(row requestScanner) (*Request, error) {
 		&req.RequestedByUserID,
 		&req.RequestedByProfileID,
 		&req.IsAnime,
+		&req.ExternalID,
+		&req.ExternalStatus,
+		&req.ExternalLibraryID,
+		&req.ExternalDownloadID,
+		&req.ExternalDetail,
+		&req.ImportedPath,
+		&req.ScanRunID,
+		&req.SiloAudiobookID,
+		&req.SiloAudiobookLink,
+		&req.Retryable,
 		&req.LastError,
 		&req.CreatedAt,
 		&req.UpdatedAt,
@@ -851,6 +940,9 @@ func scanRequest(row requestScanner) (*Request, error) {
 	}
 	if completedAt.Valid {
 		req.CompletedAt = &completedAt.Time
+	}
+	if submissionStartedAt.Valid {
+		req.SubmissionStartedAt = &submissionStartedAt.Time
 	}
 	return &req, nil
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/access"
@@ -82,10 +83,14 @@ type Service struct {
 	users             access.UserRepository
 	requesterIdentity RequesterIdentityResolver
 	audiobookSearch   AudiobookSearcher
+	audiobookLinker   *AudiobookImportLinker
 	notifier          FulfillmentNotifier
 	lifecycle         LifecycleNotifier
+	submissionMu      sync.Mutex
 	Now               func() time.Time
 }
+
+const submissionLease = 5 * time.Minute
 
 type DiscoverySection struct {
 	Key          string        `json:"key"`
@@ -127,6 +132,10 @@ func (s *Service) SetRequesterIdentityResolver(r RequesterIdentityResolver) {
 
 func (s *Service) SetAudiobookSearcher(searcher AudiobookSearcher) {
 	s.audiobookSearch = searcher
+}
+
+func (s *Service) SetAudiobookImportLinker(linker *AudiobookImportLinker) {
+	s.audiobookLinker = linker
 }
 
 // populateRequesterIdentity fills req.RequesterEmail/Username from the resolver.
@@ -1746,12 +1755,23 @@ func integrationSupportsMediaType(in Integration, mediaType MediaType) bool {
 }
 
 func (s *Service) submitApprovedRequest(ctx context.Context, req Request, actor Viewer, fc *fulfillContext) (*Request, error) {
+	s.submissionMu.Lock()
+	defer s.submissionMu.Unlock()
 	if req.Outcome != OutcomeActive || req.Status != StatusApproved {
 		return &req, nil
 	}
-	if req.MediaType == MediaTypeAudiobook {
-		return &req, nil
+	key := req.FulfillmentKey
+	if key == "" {
+		key = req.ID
 	}
+	claimed, ok, err := s.store.ClaimRequestSubmission(ctx, req.ID, key, s.now(), submissionLease)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return s.store.GetRequest(ctx, req.ID)
+	}
+	req = *claimed
 	if s.router == nil {
 		return s.markSubmissionFailed(ctx, req.ID, actor, fmt.Errorf("no fulfillment backend configured"))
 	}
@@ -1800,7 +1820,7 @@ func (s *Service) submitApprovedRequest(ctx context.Context, req Request, actor 
 		}
 	}
 	if len(want) == 0 {
-		return &req, nil
+		return s.store.SetRequestSubmissionState(ctx, req.ID, SubmissionStateFulfilled)
 	}
 	for _, t := range existing { // drop stale failed targets for the qualities we re-submit
 		if t.Status == StatusFailed {
@@ -1816,6 +1836,12 @@ func (s *Service) submitApprovedRequest(ctx context.Context, req Request, actor 
 	s.populateRequesterIdentity(ctx, &req)
 	targets, msg, err := s.router.Fulfill(ctx, installationID, capabilityID, req, want, conns)
 	if err != nil {
+		if stateErr := s.setSubmissionFailed(ctx, req.ID); stateErr != nil {
+			return nil, errors.Join(err, stateErr)
+		}
+		if req.MediaType == MediaTypeAudiobook {
+			return s.markSubmissionFailed(ctx, req.ID, actor, err)
+		}
 		return nil, err
 	}
 	if len(targets) == 0 {
@@ -1834,6 +1860,7 @@ func (s *Service) submitApprovedRequest(ctx context.Context, req Request, actor 
 	validQuality := map[Quality]bool{Quality1080p: true, Quality2160p: true}
 	validStatus := map[Status]bool{StatusQueued: true, StatusDownloading: true, StatusCompleted: true, StatusFailed: true}
 	returned := map[Quality]bool{}
+	lifecycleFailure := false
 	for _, rt := range targets {
 		if !validQuality[rt.Quality] {
 			slog.WarnContext(ctx, "requests: plugin returned unknown quality; skipping", "component", "requests", "request_id", req.ID, "quality", string(rt.Quality))
@@ -1860,6 +1887,68 @@ func (s *Service) submitApprovedRequest(ctx context.Context, req Request, actor 
 		if status == "" || !validStatus[status] {
 			status = StatusQueued // coerce unknown/empty status to the DB-valid default
 		}
+		lifecyclePersisted := false
+		if req.MediaType == MediaTypeAudiobook && status == StatusCompleted {
+			persisted, err := s.persistRouterTargetLifecycle(ctx, req, rt, false)
+			if err != nil {
+				return nil, err
+			}
+			if persisted != nil {
+				req = *persisted
+				latest = persisted
+			}
+			lifecyclePersisted = true
+			var lifecycle RequestLifecycle
+			var linkErr error
+			if s.audiobookLinker == nil {
+				linkErr = errors.New("audiobook import linker is not configured")
+			} else {
+				connection := ResolvedRouterConnection{ID: rt.ConnectionID}
+				for _, candidate := range conns {
+					if candidate.ID == rt.ConnectionID {
+						connection = candidate
+						break
+					}
+				}
+				lifecycle, linkErr = s.audiobookLinker.LinkWithConnection(ctx, req, RouterTargetStatus{
+					Quality: rt.Quality, ConnectionID: rt.ConnectionID, Status: status,
+					ExternalStatus: rt.ExternalStatus, Message: rt.Message, Metadata: rt.Metadata,
+				}, connection)
+			}
+			if linkErr != nil {
+				failedLifecycle := RequestLifecycle{
+					ExternalLibraryID: req.ExternalLibraryID, ExternalDownloadID: rt.ExternalID,
+					ExternalStatus: rt.ExternalStatus, ExternalDetail: linkErr.Error(),
+					ImportedPath: lifecycle.ImportedPath, ScanRunID: lifecycle.ScanRunID,
+					Retryable: true,
+				}
+				persisted, persistErr := s.store.UpdateRequestLifecycle(ctx, req.ID, failedLifecycle)
+				if persistErr != nil {
+					return nil, errors.Join(linkErr, persistErr)
+				}
+				if persisted != nil {
+					req = *persisted
+					latest = persisted
+				}
+				updated, updateErr := s.store.UpdateTargetStatus(ctx, created.ID, StatusFailed, rt.ExternalID, rt.ExternalStatus, linkErr.Error(), actor)
+				if updateErr != nil {
+					return nil, updateErr
+				}
+				if updated != nil {
+					latest = updated
+				}
+				lifecycleFailure = true
+				continue
+			}
+			persisted, err = s.store.UpdateRequestLifecycle(ctx, req.ID, lifecycle)
+			if err != nil {
+				return nil, err
+			}
+			if persisted != nil {
+				req = *persisted
+				latest = persisted
+			}
+		}
 		updated, err := s.store.UpdateTargetStatus(ctx, created.ID, status, rt.ExternalID, rt.ExternalStatus, rt.Message, actor)
 		if err != nil {
 			return nil, err
@@ -1867,15 +1956,27 @@ func (s *Service) submitApprovedRequest(ctx context.Context, req Request, actor 
 		if updated != nil {
 			latest = updated
 		}
+		if !lifecyclePersisted {
+			persisted, err := s.persistRouterTargetLifecycle(ctx, req, rt, false)
+			if err != nil {
+				return nil, err
+			}
+			if persisted != nil {
+				req = *persisted
+				latest = persisted
+			}
+		}
 	}
 	// Any wanted quality the plugin did not fulfill is recorded as a failed target
 	// rather than silently dropped, so it stays visible and Retry re-attempts it
 	// (a failed target is not "healthy").
 	const noTargetMsg = "fulfillment backend returned no target for this quality"
+	missingTarget := false
 	for _, q := range want {
 		if returned[q] {
 			continue
 		}
+		missingTarget = true
 		created, err := s.store.CreateTarget(ctx, Target{
 			RequestID: req.ID, Quality: q, IsAnime: req.IsAnime, Status: StatusFailed, LastError: noTargetMsg,
 		})
@@ -1889,6 +1990,28 @@ func (s *Service) submitApprovedRequest(ctx context.Context, req Request, actor 
 		if updated != nil {
 			latest = updated
 		}
+	}
+	if missingTarget {
+		persisted, err := s.persistRouterTargetLifecycle(ctx, req, RouterTarget{
+			Status: StatusFailed, Message: noTargetMsg,
+		}, true)
+		if err != nil {
+			return nil, err
+		}
+		if persisted != nil {
+			latest = persisted
+		}
+	}
+	finalState := SubmissionStateFulfilled
+	if missingTarget || lifecycleFailure {
+		finalState = SubmissionStateFailed
+	}
+	fulfilled, err := s.store.SetRequestSubmissionState(ctx, req.ID, finalState)
+	if err != nil {
+		return nil, err
+	}
+	if fulfilled != nil {
+		latest = fulfilled
 	}
 	return latest, nil
 }
@@ -1962,7 +2085,74 @@ func (s *Service) markSubmissionFailed(ctx context.Context, requestID string, ac
 	if err != nil {
 		return nil, fmt.Errorf("submit request failed: %w; mark failed: %v", submitErr, err)
 	}
+	if failed.MediaType == MediaTypeAudiobook {
+		failed, err = s.store.UpdateRequestLifecycle(ctx, requestID, RequestLifecycle{
+			ExternalLibraryID:  failed.ExternalLibraryID,
+			ExternalDownloadID: failed.ExternalDownloadID,
+			ExternalStatus:     failed.ExternalStatus,
+			ExternalDetail:     submitErr.Error(),
+			ImportedPath:       failed.ImportedPath,
+			ScanRunID:          failed.ScanRunID,
+			SiloAudiobookID:    failed.SiloAudiobookID,
+			SiloAudiobookLink:  failed.SiloAudiobookLink,
+			Retryable:          true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("persist retryable request failure: %w", err)
+		}
+	}
+	failed, err = s.store.SetRequestSubmissionState(ctx, requestID, SubmissionStateFailed)
+	if err != nil {
+		return nil, fmt.Errorf("persist submission failure: %w", err)
+	}
 	return failed, nil
+}
+
+func (s *Service) setSubmissionFailed(ctx context.Context, requestID string) error {
+	_, err := s.store.SetRequestSubmissionState(ctx, requestID, SubmissionStateFailed)
+	return err
+}
+
+func (s *Service) persistRouterTargetLifecycle(ctx context.Context, req Request, target RouterTarget, retryable bool) (*Request, error) {
+	if req.MediaType != MediaTypeAudiobook {
+		return nil, nil
+	}
+	lifecycle := RequestLifecycle{
+		ExternalLibraryID:  req.ExternalLibraryID,
+		ExternalDownloadID: target.ExternalID,
+		ExternalStatus:     target.ExternalStatus,
+		ExternalDetail:     target.Message,
+		ImportedPath:       req.ImportedPath,
+		ScanRunID:          req.ScanRunID,
+		SiloAudiobookID:    req.SiloAudiobookID,
+		SiloAudiobookLink:  req.SiloAudiobookLink,
+		Retryable: retryable || target.Status == StatusFailed ||
+			(req.Retryable && req.Status != StatusApproved),
+	}
+	if lifecycle.ExternalDownloadID == "" {
+		lifecycle.ExternalDownloadID = req.ExternalDownloadID
+	}
+	if lifecycle.ExternalStatus == "" {
+		lifecycle.ExternalStatus = req.ExternalStatus
+	}
+	if lifecycle.ExternalDetail == "" {
+		lifecycle.ExternalDetail = req.ExternalDetail
+	}
+	if target.Metadata != nil {
+		if target.Metadata.ExternalCorrelationID != "" {
+			lifecycle.ExternalLibraryID = target.Metadata.ExternalCorrelationID
+		}
+		if target.Metadata.StatusText != "" {
+			lifecycle.ExternalDetail = target.Metadata.StatusText
+		}
+		if target.Metadata.ImportedPath != "" {
+			lifecycle.ImportedPath = target.Metadata.ImportedPath
+		}
+	}
+	if lifecycle.ExternalLibraryID == "" {
+		lifecycle.ExternalLibraryID = req.ExternalLibraryID
+	}
+	return s.store.UpdateRequestLifecycle(ctx, req.ID, lifecycle)
 }
 
 type reconcileChange string
@@ -2069,11 +2259,64 @@ func (s *Service) reconcileRequest(ctx context.Context, req Request, fc *fulfill
 			continue
 		}
 		newStatus := st.Status
-		if newStatus == "" || newStatus == target.Status {
+		if newStatus == "" {
 			continue
 		}
-		if _, err := s.store.UpdateTargetStatus(ctx, target.ID, newStatus, "", st.ExternalStatus, st.Message, Viewer{}); err != nil {
+		if req.MediaType == MediaTypeAudiobook && newStatus == StatusCompleted && s.audiobookLinker != nil {
+			connection := ResolvedRouterConnection{ID: st.ConnectionID}
+			for _, candidate := range conns {
+				if candidate.ID == st.ConnectionID {
+					connection = candidate
+					break
+				}
+			}
+			lifecycle, linkErr := s.audiobookLinker.LinkWithConnection(ctx, req, st, connection)
+			if linkErr != nil {
+				failedLifecycle := RequestLifecycle{
+					ExternalLibraryID: req.ExternalLibraryID, ExternalDownloadID: target.ExternalID,
+					ExternalStatus: st.ExternalStatus, ExternalDetail: linkErr.Error(),
+					ImportedPath: lifecycle.ImportedPath, ScanRunID: lifecycle.ScanRunID,
+					Retryable: true,
+				}
+				if _, persistErr := s.store.UpdateRequestLifecycle(ctx, req.ID, failedLifecycle); persistErr != nil {
+					return reconcileUnchanged, errors.Join(linkErr, persistErr)
+				}
+				if _, updateErr := s.store.UpdateTargetStatus(ctx, target.ID, StatusFailed, "", st.ExternalStatus, linkErr.Error(), Viewer{}); updateErr != nil {
+					return reconcileUnchanged, updateErr
+				}
+				change = reconcileFailed
+				continue
+			}
+			if _, persistErr := s.store.UpdateRequestLifecycle(ctx, req.ID, lifecycle); persistErr != nil {
+				return reconcileUnchanged, persistErr
+			}
+			req.ImportedPath = lifecycle.ImportedPath
+			req.ScanRunID = lifecycle.ScanRunID
+			req.SiloAudiobookID = lifecycle.SiloAudiobookID
+			req.SiloAudiobookLink = lifecycle.SiloAudiobookLink
+			req.ExternalLibraryID = lifecycle.ExternalLibraryID
+			req.ExternalDownloadID = lifecycle.ExternalDownloadID
+			req.Retryable = lifecycle.Retryable
+		}
+		if newStatus != target.Status {
+			if _, err := s.store.UpdateTargetStatus(ctx, target.ID, newStatus, "", st.ExternalStatus, st.Message, Viewer{}); err != nil {
+				return reconcileUnchanged, err
+			}
+		}
+		metadata := st.Metadata
+		if req.MediaType == MediaTypeAudiobook && newStatus == StatusCompleted && s.audiobookLinker != nil {
+			metadata = nil
+		}
+		persisted, err := s.persistRouterTargetLifecycle(ctx, req, RouterTarget{
+			Quality: st.Quality, ConnectionID: st.ConnectionID, Status: newStatus,
+			ExternalStatus: st.ExternalStatus, Message: st.Message,
+			Metadata: metadata,
+		}, newStatus == StatusFailed)
+		if err != nil {
 			return reconcileUnchanged, err
+		}
+		if persisted != nil {
+			req = *persisted
 		}
 		switch newStatus {
 		case StatusCompleted:

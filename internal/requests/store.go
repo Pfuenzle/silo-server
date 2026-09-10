@@ -17,6 +17,9 @@ type Store interface {
 	DeleteFailedByTMDB(ctx context.Context, mediaType MediaType, tmdbID int) (int, error)
 	CreateRequest(ctx context.Context, input CreateRequestRecord) (*Request, error)
 	GetRequest(ctx context.Context, id string) (*Request, error)
+	UpdateRequestLifecycle(ctx context.Context, id string, lifecycle RequestLifecycle) (*Request, error)
+	ClaimRequestSubmission(ctx context.Context, id, key string, now time.Time, lease time.Duration) (*Request, bool, error)
+	SetRequestSubmissionState(ctx context.Context, id, state string) (*Request, error)
 	ListReconciliationCandidates(ctx context.Context, limit int) ([]*Request, error)
 	// ListFulfilledUnnotified returns completed requests whose fulfillment
 	// notification has not fired yet (presence-gated notify pass).
