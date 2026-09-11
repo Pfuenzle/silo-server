@@ -75,16 +75,16 @@ func TestNewRouter_mountsLiveTVSourcesAtTopLevelNativePath(t *testing.T) {
 	t.Cleanup(pool.Close)
 	router := NewRouter(Dependencies{DB: pool, Config: cfg, FolderRepo: catalog.NewFolderRepository(pool)})
 	wanted := map[string]bool{
-		"GET /livetv/libraries/{library_id}/sources/":                      true,
-		"POST /livetv/libraries/{library_id}/sources/":                     true,
-		"PUT /livetv/libraries/{library_id}/sources/{source_key}":          true,
-		"DELETE /livetv/libraries/{library_id}/sources/{source_key}":       true,
-		"POST /livetv/libraries/{library_id}/sources/{source_key}/refresh": true,
+		"GET /api/v1/livetv/libraries/{library_id}/sources/":                      true,
+		"POST /api/v1/livetv/libraries/{library_id}/sources/":                     true,
+		"PUT /api/v1/livetv/libraries/{library_id}/sources/{source_key}":          true,
+		"DELETE /api/v1/livetv/libraries/{library_id}/sources/{source_key}":       true,
+		"POST /api/v1/livetv/libraries/{library_id}/sources/{source_key}/refresh": true,
 	}
 	seen := make(map[string]bool)
 
 	// When the final NewRouter routes are walked.
-	if err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...string) error {
+	if err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 		seen[method+" "+route] = true
 		return nil
 	}); err != nil {
@@ -101,6 +101,52 @@ func TestNewRouter_mountsLiveTVSourcesAtTopLevelNativePath(t *testing.T) {
 		if strings.Contains(route, "/libraries/livetv/") {
 			t.Fatalf("final NewRouter nested Live TV source route under /libraries: %q", route)
 		}
+	}
+}
+
+func TestNewRouter_liveTVSourceMutationsAreNotRejectedAsMethodNotAllowed(t *testing.T) {
+	// Given the production router composition with Live TV dependencies and no credentials.
+	cfg, err := config.LoadFromDB(map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pgxpool.New(context.Background(), "postgres://nobody:nobody@127.0.0.1:1/none?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	router := NewRouter(Dependencies{DB: pool, Config: cfg, FolderRepo: catalog.NewFolderRepository(pool)})
+
+	requests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{
+			name:   "source update",
+			method: http.MethodPut,
+			path:   "/api/v1/livetv/libraries/42/sources/playlist-main",
+		},
+		{
+			name:   "source refresh",
+			method: http.MethodPost,
+			path:   "/api/v1/livetv/libraries/42/sources/playlist-main/refresh",
+		},
+	}
+	for _, request := range requests {
+		t.Run(request.name, func(t *testing.T) {
+			// When the exact client mutation request reaches the final production router.
+			recording := httptest.NewRecorder()
+			router.ServeHTTP(recording, httptest.NewRequest(request.method, request.path, strings.NewReader(`{}`)))
+
+			// Then routing reaches authentication rather than returning chi's 405.
+			if recording.Code == http.StatusMethodNotAllowed {
+				t.Fatalf("%s %s returned HTTP 405; route was not matched by final NewRouter", request.method, request.path)
+			}
+			if recording.Code != http.StatusUnauthorized {
+				t.Fatalf("%s %s returned HTTP %d, want HTTP 401 after route match", request.method, request.path, recording.Code)
+			}
+		})
 	}
 }
 
