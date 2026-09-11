@@ -49,6 +49,25 @@ func TestResolverClassifiesLibraryRoot(t *testing.T) {
 	}
 }
 
+func TestResolverRejectsLiveTVLibraryScan(t *testing.T) {
+	// Given an enabled Live TV library with no filesystem roots.
+	repo := &fakeFolderRepo{folders: []*models.MediaFolder{{ID: 71, Type: "livetv", Enabled: true}}}
+
+	// When a caller requests a library scan.
+	_, err := NewResolver(repo).Resolve(context.Background(), Request{LibraryID: intPtr(71)})
+
+	// Then the filesystem scan surface rejects it with a typed error.
+	var reqErr *RequestError
+	if !errors.As(err, &reqErr) {
+		t.Fatalf("expected RequestError, got %T: %v", err, err)
+	}
+	if reqErr.Reason != ReasonLiveTVLibrary {
+		t.Fatalf("reason = %q, want %q", reqErr.Reason, ReasonLiveTVLibrary)
+	}
+}
+
+func intPtr(value int) *int { return &value }
+
 func TestResolverClassifiesSubtree(t *testing.T) {
 	root := t.TempDir()
 	subtree := filepath.Join(root, "Show")

@@ -13,6 +13,29 @@ import (
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
+func TestScanFolderRejectsLiveTVBeforeFilesystemScan(t *testing.T) {
+	// Given a Live TV folder and a scanner with no filesystem dependencies.
+	folder := &models.MediaFolder{ID: 41, Type: "livetv", Paths: []string{"/not-a-real-root"}}
+
+	// When the direct scanner entry point is called.
+	_, err := (&Scanner{}).ScanFolder(context.Background(), folder)
+
+	// Then it rejects the folder before reaching the filesystem pipeline.
+	if !errors.Is(err, ErrLiveTVScanUnsupported) {
+		t.Fatalf("ScanFolder error = %v, want ErrLiveTVScanUnsupported", err)
+	}
+}
+
+func TestScanFolderAllowsFilesystemKindsPastLiveTVGuard(t *testing.T) {
+	// Given a normal filesystem library kind.
+	folder := &models.MediaFolder{Type: "movies"}
+
+	// When the Live TV guard is evaluated.
+	if err := rejectLiveTVScan(folder); err != nil {
+		t.Fatalf("movies rejected by Live TV guard: %v", err)
+	}
+}
+
 type recordingQueueSyncer struct {
 	folderID int
 	scope    string

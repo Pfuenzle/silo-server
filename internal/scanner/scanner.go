@@ -23,6 +23,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/s3client"
 )
 
+var ErrLiveTVScanUnsupported = errors.New("filesystem scanning is unsupported for Live TV libraries")
+
 // videoExtensions is the set of file extensions recognized as media files.
 var videoExtensions = map[string]bool{
 	".mkv": true,
@@ -312,6 +314,9 @@ func (s *Scanner) SetEbookEnrichmentQueue(queue EbookEnrichmentQueue) {
 // libraries by ScanPodcastFolder; both bypass the per-file movie/TV
 // pipeline entirely.
 func (s *Scanner) ScanFolder(ctx context.Context, folder *models.MediaFolder) (*ScanResult, error) {
+	if err := rejectLiveTVScan(folder); err != nil {
+		return nil, err
+	}
 	watchCtx, stopWatch := s.watchFolderContext(ctx, folder.ID)
 	defer stopWatch()
 
@@ -350,6 +355,13 @@ func (s *Scanner) ScanFolder(ctx context.Context, folder *models.MediaFolder) (*
 	}
 
 	return s.scanPaths(watchCtx, folder, folder.Paths, folder.Paths, true)
+}
+
+func rejectLiveTVScan(folder *models.MediaFolder) error {
+	if folder != nil && librarykind.IsLiveTV(folder.Type) {
+		return ErrLiveTVScanUnsupported
+	}
+	return nil
 }
 
 // ScanSubtree walks a single subtree within a media folder and reconciles only

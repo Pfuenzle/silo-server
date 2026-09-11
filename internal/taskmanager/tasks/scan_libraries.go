@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/Silo-Server/silo-server/internal/cache"
+	"github.com/Silo-Server/silo-server/internal/librarykind"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 )
@@ -81,6 +82,11 @@ func (t *ScanLibrariesTask) Execute(ctx context.Context, progress taskmanager.Pr
 	for _, folder := range folders {
 		if folder == nil {
 			done.Add(1)
+			continue
+		}
+		if librarykind.IsLiveTV(folder.Type) {
+			done.Add(1)
+			progress.Report(float64(done.Load())/float64(total)*100, fmt.Sprintf("Skipped %s (Live TV library)", folder.Name))
 			continue
 		}
 

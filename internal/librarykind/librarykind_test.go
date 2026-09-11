@@ -58,6 +58,10 @@ func TestPredicates(t *testing.T) {
 		{"IsManga", IsManga, "ebooks", false},
 		{"IsManga", IsManga, "movies", false},
 		{"IsManga", IsManga, "", false},
+
+		{"IsLiveTV", IsLiveTV, "livetv", true},
+		{"IsLiveTV", IsLiveTV, " Live TV ", true},
+		{"IsLiveTV", IsLiveTV, "movies", false},
 	}
 	for _, tc := range cases {
 		if got := tc.fn(tc.in); got != tc.want {
@@ -78,5 +82,8 @@ func TestOf(t *testing.T) {
 	}
 	if got := Of("unknown"); got != (Kinds{}) {
 		t.Errorf("Of(unknown) = %+v", got)
+	}
+	if got := Of("live_tv"); !got.LiveTV {
+		t.Errorf("Of(live_tv).LiveTV = false, want true")
 	}
 }

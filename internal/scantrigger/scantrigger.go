@@ -71,6 +71,7 @@ const (
 	ReasonPathAmbiguous         Reason = "path_ambiguous"
 	ReasonNoLibraryMatch        Reason = "no_library_match"
 	ReasonUnsupportedExtension  Reason = "unsupported_extension"
+	ReasonLiveTVLibrary         Reason = "live_tv_library"
 )
 
 // Error codes and the messages repeated across more than one rejection site.
@@ -253,6 +254,9 @@ func (r *Resolver) resolve(ctx context.Context, req Request, pathFolders []*mode
 				return nil, &RequestError{Status: http.StatusNotFound, Code: codeNotFound, Message: "Library not found", Reason: ReasonLibraryNotFound}
 			}
 			return nil, fmt.Errorf("fetching library for scan: %w", err)
+		}
+		if librarykind.IsLiveTV(folder.Type) {
+			return nil, &RequestError{Status: http.StatusBadRequest, Code: codeBadRequest, Message: "Live TV libraries do not support filesystem scans", Reason: ReasonLiveTVLibrary}
 		}
 	}
 

@@ -19,6 +19,7 @@ type Kinds struct {
 	Movie     bool
 	TV        bool
 	Mixed     bool
+	LiveTV    bool
 	Audiobook bool
 	Ebook     bool
 	Podcast   bool
@@ -31,10 +32,21 @@ func Of(libraryType string) Kinds {
 		Movie:     IsMovie(libraryType),
 		TV:        IsTV(libraryType),
 		Mixed:     IsMixed(libraryType),
+		LiveTV:    IsLiveTV(libraryType),
 		Audiobook: IsAudiobook(libraryType),
 		Ebook:     IsEbook(libraryType),
 		Podcast:   IsPodcast(libraryType),
 		Manga:     IsManga(libraryType),
+	}
+}
+
+// IsLiveTV reports whether the library is a normalized Live TV library.
+func IsLiveTV(libraryType string) bool {
+	switch normalize(libraryType) {
+	case "livetv", "live tv", "live_tv":
+		return true
+	default:
+		return false
 	}
 }
 

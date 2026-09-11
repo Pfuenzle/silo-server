@@ -150,6 +150,9 @@ func (e *Executor) ingest(ctx context.Context, folder *models.MediaFolder, mode 
 	if e == nil || e.scanner == nil || e.matcher == nil || folder == nil {
 		return nil, fmt.Errorf("library ingest executor is not fully configured")
 	}
+	if librarykind.IsLiveTV(folder.Type) {
+		return nil, fmt.Errorf("filesystem ingest is not supported for Live TV libraries")
+	}
 
 	// Wrap the caller's context so we can cancel from CancelLibrary.
 	scanCtx, cancel := context.WithCancel(ctx)
