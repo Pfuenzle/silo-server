@@ -3113,9 +3113,6 @@ func (h *AdminHandler) HandleUpdateSetting(w http.ResponseWriter, r *http.Reques
 	if effectiveChanged {
 		h.publishSettingsChanged(r.Context(), []string{key})
 	}
-	if effectiveChanged {
-		h.publishSettingsChanged(r.Context(), []string{key})
-	}
 	if sensitiveSettingKeys[key] {
 		writeJSON(w, http.StatusOK, adminSettingResponse{Key: key, RestartRequired: restartRequired})
 		return
