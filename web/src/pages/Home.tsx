@@ -6,6 +6,7 @@ import { LayoutDashboard } from "lucide-react";
 import HeroBanner from "@/components/HeroBanner";
 import SectionRow from "@/components/SectionRow";
 import TasteSeedBanner from "@/components/TasteSeedBanner";
+import { LiveTVHomeSection } from "@/components/LiveTVHomeSection";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { HomeSectionItemsResponse, ResolvedSection, ResolvedSectionLayout } from "@/api/types";
 import { useDocumentTitle } from "@/hooks/useDocumentTitle";
@@ -21,6 +22,8 @@ import { planNextHomeSectionBatch } from "./homeSectionQueue";
 import { buildHomeSectionViewModel, type HomeSectionSlot } from "./homeSectionState";
 import { collectCachedHomeSections } from "./homeSectionCache";
 import { useSectionRefreshSignal } from "./homeSurfaceRefresh";
+import { useUserLibraries } from "@/hooks/queries/libraries";
+import { useCurrentProfile } from "@/hooks/useCurrentProfile";
 import { useUICustomization } from "@/hooks/useUICustomization";
 import { carouselIntrinsicHeight } from "@/lib/uiCustomization";
 import {
@@ -43,6 +46,8 @@ export default function Home() {
   const queryClient = useQueryClient();
   const { data, isLoading, isError, refetch } = useHomeLayout();
   const { data: homeRefreshSignal = 0 } = useSectionRefreshSignal();
+  const { data: libraries } = useUserLibraries();
+  const { profile } = useCurrentProfile();
   const { cardPresentation } = useUICustomization();
   const [rowRestorationReady, setRowRestorationReady] = useState(
     () => !shouldWaitForSidebarReturn(),
@@ -227,6 +232,8 @@ export default function Home() {
   const heroSlot = renderHeroSlot(viewModel.hero, retrySection);
   const hasHeroSlot = heroSlot !== null;
   const rowPlaceholderHeight = carouselIntrinsicHeight(cardPresentation.poster_size);
+  const liveTVLibrary = libraries?.find((library) => library.type === "livetv");
+  const liveTVLocale = profile?.language?.startsWith("de") ? "de" : "en";
   let readyRowIndex = 0;
 
   if (isLoading && !data) {
@@ -259,6 +266,9 @@ export default function Home() {
       <div className={`space-y-10 ${hasHeroSlot ? "pb-2" : "pt-6 pb-2"}`}>
         {heroSlot}
         <TasteSeedBanner />
+        {liveTVLibrary ? (
+          <LiveTVHomeSection libraryId={liveTVLibrary.id} locale={liveTVLocale} />
+        ) : null}
 
         {viewModel.rows.map((slot) => {
           if (slot.state === "empty") {

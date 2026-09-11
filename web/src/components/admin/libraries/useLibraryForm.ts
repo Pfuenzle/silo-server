@@ -56,6 +56,8 @@ export function contentLevelsForType(libraryType: string): string[] {
       return ["manga"];
     case "podcasts":
       return ["podcast", "podcast_episode"];
+    case "livetv":
+      return [];
     default:
       return [];
   }
@@ -182,9 +184,10 @@ export function useLibraryForm({
   const allErrors = useMemo<LibraryFormErrors>(() => {
     const next: LibraryFormErrors = {};
     if (!name.trim()) next.name = "Give this library a name.";
-    if (!paths.some((p) => p.trim())) next.paths = "Add at least one folder to scan.";
+    if (type !== "livetv" && !paths.some((p) => p.trim()))
+      next.paths = "Add at least one folder to scan.";
     return next;
-  }, [name, paths]);
+  }, [name, paths, type]);
   const errors: LibraryFormErrors = submitAttempted ? allErrors : {};
 
   function updatePath(index: number, value: string) {
@@ -260,7 +263,7 @@ export function useLibraryForm({
 
     const body: CreateLibraryRequest = {
       name: name.trim(),
-      paths: paths.filter((p) => p.trim()),
+      paths: type === "livetv" ? [] : paths.filter((p) => p.trim()),
       type,
       enabled,
       metadata_language: metadataLanguage,

@@ -15,7 +15,14 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
-import { AdvancedFields, FolderFields, GeneralFields, MetadataFields } from "./LibraryFormSections";
+import {
+  AdvancedFields,
+  FolderFields,
+  GeneralFields,
+  LiveTVSourceFields,
+  MetadataFields,
+} from "./LibraryFormSections";
+import { LiveTVSourceEditor } from "./LiveTVSourceEditor";
 import { libraryTypeMeta } from "./libraryTypes";
 import { LibraryPosterSection } from "./LibraryPosterSection";
 import { useLibraryForm } from "./useLibraryForm";
@@ -106,6 +113,7 @@ function LibraryEditorBody({
   const form = useLibraryForm({ library, onClose });
 
   const typeMeta = libraryTypeMeta(form.type);
+  const liveTV = form.type === "livetv";
   const folderCount = form.paths.filter((p) => p.trim()).length;
   const errorSections = new Set<SectionId>();
   if (form.errors.name) errorSections.add("general");
@@ -146,59 +154,71 @@ function LibraryEditorBody({
       >
         <div className="border-border shrink-0 overflow-y-auto border-r">
           <TabsList className="w-13 flex-col items-stretch justify-start gap-1 rounded-none bg-transparent p-2 sm:w-44 sm:p-3">
-            {SECTIONS.map(({ id, label, icon: Icon }) => (
-              <TabsTrigger
-                key={id}
-                value={id}
-                className="h-auto shrink-0 justify-start gap-2.5 rounded-lg px-2.5 py-2 sm:px-3"
-              >
-                <Icon className="size-4 shrink-0" />
-                <span className="hidden sm:inline">{label}</span>
-                {errorSections.has(id) ? (
-                  <span
-                    className={cn(
-                      "bg-destructive size-1.5 rounded-full",
-                      "absolute top-1 right-1 sm:static sm:ml-auto",
-                    )}
-                  />
-                ) : id === "folders" && folderCount > 0 ? (
-                  <span className="text-muted-foreground ml-auto hidden font-mono text-[10px] tabular-nums sm:inline">
-                    {folderCount}
-                  </span>
-                ) : null}
-              </TabsTrigger>
-            ))}
+            {SECTIONS.filter(({ id }) => !liveTV || id === "general").map(
+              ({ id, label, icon: Icon }) => (
+                <TabsTrigger
+                  key={id}
+                  value={id}
+                  className="h-auto shrink-0 justify-start gap-2.5 rounded-lg px-2.5 py-2 sm:px-3"
+                >
+                  <Icon className="size-4 shrink-0" />
+                  <span className="hidden sm:inline">{label}</span>
+                  {errorSections.has(id) ? (
+                    <span
+                      className={cn(
+                        "bg-destructive size-1.5 rounded-full",
+                        "absolute top-1 right-1 sm:static sm:ml-auto",
+                      )}
+                    />
+                  ) : id === "folders" && folderCount > 0 ? (
+                    <span className="text-muted-foreground ml-auto hidden font-mono text-[10px] tabular-nums sm:inline">
+                      {folderCount}
+                    </span>
+                  ) : null}
+                </TabsTrigger>
+              ),
+            )}
           </TabsList>
         </div>
         <div className="overlay-scroll min-h-0 flex-1 overflow-y-auto">
-          {SECTIONS.map(({ id, title, description }) => (
-            <TabsContent
-              key={id}
-              value={id}
-              className="animate-in fade-in-0 slide-in-from-right-1 px-5 py-5 duration-200 sm:px-6"
-            >
-              <div className="mb-5 space-y-1">
-                <h3 className="text-sm font-semibold">{title}</h3>
-                <p className="text-muted-foreground text-xs">{description}</p>
-              </div>
-              {id === "general" && (
-                <GeneralFields
-                  form={form}
-                  posterSlot={library ? <LibraryPosterSection library={library} /> : null}
-                />
-              )}
-              {id === "folders" && <FolderFields form={form} />}
-              {id === "metadata" && <MetadataFields form={form} />}
-              {id === "advanced" && (
-                <AdvancedFields
-                  form={form}
-                  chapterThumbnailsSupported={chapterThumbnailsSupported}
-                />
-              )}
-            </TabsContent>
-          ))}
+          {SECTIONS.filter(({ id }) => !liveTV || id === "general").map(
+            ({ id, title, description }) => (
+              <TabsContent
+                key={id}
+                value={id}
+                className="animate-in fade-in-0 slide-in-from-right-1 px-5 py-5 duration-200 sm:px-6"
+              >
+                <div className="mb-5 space-y-1">
+                  <h3 className="text-sm font-semibold">{title}</h3>
+                  <p className="text-muted-foreground text-xs">{description}</p>
+                </div>
+                {id === "general" && (
+                  <GeneralFields
+                    form={form}
+                    posterSlot={
+                      liveTV ? (
+                        <LiveTVSourceFields form={form} />
+                      ) : library ? (
+                        <LibraryPosterSection library={library} />
+                      ) : null
+                    }
+                  />
+                )}
+                {id === "folders" && <FolderFields form={form} />}
+                {id === "metadata" && <MetadataFields form={form} />}
+                {id === "advanced" && (
+                  <AdvancedFields
+                    form={form}
+                    chapterThumbnailsSupported={chapterThumbnailsSupported}
+                  />
+                )}
+              </TabsContent>
+            ),
+          )}
         </div>
       </Tabs>
+
+      {liveTV && library ? <LiveTVSourceEditor libraryId={library.id} /> : null}
 
       <div className="border-border flex shrink-0 items-center justify-end gap-2 border-t px-5 py-4 sm:px-6">
         {errorSections.size > 0 ? (

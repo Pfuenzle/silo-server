@@ -282,6 +282,18 @@ export const sectionKeys = {
     ["sections", "profile", scope, libraryId, "raw"] as const,
 };
 
+export const liveTVKeys = {
+  all: ["livetv"] as const,
+  library: (libraryId: number) => ["livetv", "library", libraryId] as const,
+  channels: (libraryId: number) => ["livetv", "channels", libraryId] as const,
+  guide: (libraryId: number, from: string, to: string) =>
+    ["livetv", "guide", libraryId, from, to] as const,
+  home: (libraryId: number) => ["livetv", "home", libraryId] as const,
+  favorites: (libraryId: number, kind: "channels" | "programmes") =>
+    ["livetv", "favorites", libraryId, kind] as const,
+  sources: (libraryId: number) => ["livetv", "sources", libraryId] as const,
+};
+
 export const mediaSurfaceKeys = {
   // Client-only signal: keep it outside sectionKeys so refreshing section data
   // cannot reset the counter immediately before a mutation increments it.

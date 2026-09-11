@@ -185,6 +185,20 @@ export function FolderFields({ form }: { form: LibraryFormController }) {
   );
 }
 
+export function LiveTVSourceFields({ form }: { form: LibraryFormController }) {
+  return (
+    <div className="surface-panel rounded-xl border-0 p-4 text-sm">
+      <p className="font-medium">Live TV sources</p>
+      <p className="text-muted-foreground mt-1 text-xs">
+        Save the library first, then add server-side M3U and XMLTV sources from the source panel.
+      </p>
+      <p className="text-muted-foreground mt-3 text-xs">
+        {form.library ? "Sources are ready to configure." : "Sources can be added after creation."}
+      </p>
+    </div>
+  );
+}
+
 function ProviderLevelSection({
   level,
   items,

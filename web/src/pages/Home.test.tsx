@@ -17,6 +17,8 @@ import { sectionKeys } from "@/hooks/queries/keys";
 
 const mockUseHomeLayout = vi.fn();
 const mockFetchHomeSectionItems = vi.fn();
+const mockUseUserLibraries = vi.fn();
+const mockUseCurrentProfile = vi.fn();
 const SAFARI_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.6 Safari/605.1.15";
 const FIREFOX_USER_AGENT =
@@ -29,6 +31,20 @@ vi.mock("@/hooks/queries/sections", () => ({
   fetchHomeSectionItems: (...args: unknown[]) => mockFetchHomeSectionItems(...args),
   HOME_SECTION_STALE_TIME: 10 * 60 * 1000,
   HOME_SECTION_GC_TIME: 60 * 60 * 1000,
+}));
+
+vi.mock("@/hooks/queries/libraries", () => ({
+  useUserLibraries: (...args: unknown[]) => mockUseUserLibraries(...args),
+}));
+
+vi.mock("@/hooks/useCurrentProfile", () => ({
+  useCurrentProfile: (...args: unknown[]) => mockUseCurrentProfile(...args),
+}));
+
+vi.mock("@/components/LiveTVHomeSection", () => ({
+  LiveTVHomeSection: ({ libraryId, locale }: { libraryId: number; locale: string }) => (
+    <div data-kind="live-tv-home" data-library-id={libraryId} data-locale={locale} />
+  ),
 }));
 
 vi.mock("@/hooks/useDocumentTitle", () => ({
@@ -68,6 +84,8 @@ describe("Home", () => {
       isError: false,
       refetch: vi.fn(),
     });
+    mockUseUserLibraries.mockReturnValue({ data: undefined });
+    mockUseCurrentProfile.mockReturnValue({ profile: null });
     mockFetchHomeSectionItems.mockReset();
   });
 
@@ -97,6 +115,26 @@ describe("Home", () => {
 
     expect(invalidateQueries).not.toHaveBeenCalled();
     invalidateQueries.mockRestore();
+  });
+
+  it("mounts Live TV Home for the visible library and passes the profile locale", async () => {
+    mockUseUserLibraries.mockReturnValue({
+      data: [{ id: 7, name: "Live", type: "livetv", sort_order: 0 }],
+    });
+    mockUseCurrentProfile.mockReturnValue({ profile: { language: "de-DE" } });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={new QueryClient()}>
+          <Home />
+        </QueryClientProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[data-kind="live-tv-home"]')).toMatchObject({
+      dataset: { libraryId: "7", locale: "de" },
+    });
   });
 
   it("keeps section items cached past the client-wide gc time", async () => {

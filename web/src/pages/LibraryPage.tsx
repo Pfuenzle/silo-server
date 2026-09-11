@@ -9,6 +9,7 @@ import { useDocumentTitle } from "@/hooks/useDocumentTitle";
 import LibraryRecommended from "./LibraryRecommended";
 import LibraryBrowse from "./LibraryBrowse";
 import LibraryCollections from "./LibraryCollections";
+import { LiveTVLibraryPage } from "./LiveTVLibraryPage";
 import {
   libraryPageStateWriteRetryDelay,
   useLibraryPageStatePreference,
@@ -425,6 +426,10 @@ export default function LibraryPage() {
         </Link>
       </div>
     );
+  }
+
+  if (library.type === "livetv") {
+    return <LiveTVLibraryPage libraryId={id} libraryName={library.name} />;
   }
 
   const isRecommended = activeTab === "recommended";

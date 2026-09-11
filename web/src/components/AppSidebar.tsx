@@ -66,6 +66,7 @@ import {
   LayoutGrid,
   Puzzle,
   BookHeadphones,
+  Radio,
   Send,
   Bell,
 } from "lucide-react";
@@ -84,6 +85,8 @@ function getLibraryIcon(type: string) {
     case "audiobook":
     case "audiobooks":
       return <BookHeadphones className="h-[18px] w-[18px]" />;
+    case "livetv":
+      return <Radio className="h-[18px] w-[18px]" />;
     default:
       return <Library className="h-[18px] w-[18px]" />;
   }

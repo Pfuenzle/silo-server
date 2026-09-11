@@ -1,0 +1,18 @@
+import { describe, expect, it } from "vitest";
+
+import { parseLiveTVSearchParams, updateLiveTVSearchParams } from "./liveTVSearchParams";
+
+describe("Live TV URL state", () => {
+  it("parses the localized tabs and defaults the channel view to grid", () => {
+    const state = parseLiveTVSearchParams(new URLSearchParams("tab=Programm&view=list"));
+
+    expect(state).toEqual({ tab: "program", view: "list" });
+  });
+
+  it("preserves unrelated parameters while persisting tab and view", () => {
+    const current = new URLSearchParams("source=guide");
+    const next = updateLiveTVSearchParams(current, { tab: "favorites", view: "list" });
+
+    expect(next.toString()).toBe("source=guide&tab=favorites&view=list");
+  });
+});
