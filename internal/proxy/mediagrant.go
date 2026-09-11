@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Silo-Server/silo-server/internal/auth"
+	"github.com/Silo-Server/silo-server/internal/livetv"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
 )
@@ -136,6 +137,44 @@ func grantBearerToken(r *http.Request) string {
 		return ""
 	}
 	return token
+}
+
+func (s *Server) handleLivePlayback(w http.ResponseWriter, r *http.Request) {
+	if s.livePlayback == nil {
+		writeGrantError(w, http.StatusServiceUnavailable, "service_unavailable", "Live TV playback is unavailable")
+		return
+	}
+	cfg := s.watcher.Config()
+	secret := ""
+	if cfg != nil {
+		secret = cfg.Auth.JWTSecret
+	}
+	token := grantBearerToken(r)
+	if token == "" || secret == "" {
+		writeGrantError(w, http.StatusUnauthorized, "unauthorized", "Missing or malformed authorization header")
+		return
+	}
+	claims, err := auth.NewJWTService(secret, 0, 0).ValidateToken(token)
+	if err != nil || claims.TokenType != auth.TokenTypeAccess {
+		writeGrantError(w, http.StatusUnauthorized, "unauthorized", "Invalid or expired token")
+		return
+	}
+	if s.loginSessions == nil {
+		writeGrantError(w, http.StatusServiceUnavailable, "service_unavailable", "Live TV authorization is unavailable")
+		return
+	}
+	valid, err := s.loginSessions.IsValid(r.Context(), claims.SessionID)
+	if err != nil || !valid {
+		writeGrantError(w, http.StatusUnauthorized, "unauthorized", "Session is no longer valid")
+		return
+	}
+	profileID := claims.ProfileID
+	if profileID == "" {
+		writeGrantError(w, http.StatusForbidden, "forbidden", "Live TV playback requires a profile-bound access token")
+		return
+	}
+	ctx := livetv.WithLivePlaybackIdentity(r.Context(), livetv.LivePlaybackIdentity{UserID: claims.UserID, ProfileID: profileID, SessionID: claims.SessionID})
+	s.livePlayback.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // handleGrantIdentity serves a direct-play or progressive-remux session. It

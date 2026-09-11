@@ -25,6 +25,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	"github.com/Silo-Server/silo-server/internal/httpstream"
+	"github.com/Silo-Server/silo-server/internal/livetv"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/nodemetrics"
 	"github.com/Silo-Server/silo-server/internal/noderouting"
@@ -50,6 +51,7 @@ type Server struct {
 	// mode, which is why those routes answer 503 rather than assuming either.
 	grants        proxyGrantLookup
 	loginSessions loginSessionValidator
+	livePlayback  *livetv.LivePlaybackService
 	egress        *egressMeter
 	clientIP      *clientip.Resolver
 	telemetry     *streamtelemetry.Registry
@@ -122,6 +124,10 @@ func NewServer(watcher *nodeconfig.Watcher, tracker *nodesessions.Tracker) *Serv
 func (s *Server) SetMediaGrantAuthority(grants proxyGrantLookup, sessions loginSessionValidator) {
 	s.grants = grants
 	s.loginSessions = sessions
+}
+
+func (s *Server) SetLivePlayback(service *livetv.LivePlaybackService) {
+	s.livePlayback = service
 }
 
 // SetRemoteArtifactMissReporter wires the authoritative database transition
@@ -203,6 +209,8 @@ func (s *Server) Handler() http.Handler {
 		r.Head("/stream/transcode/{token}/master.m3u8", observeProxy(s.telemetry, http.MethodHead, "/stream/transcode/{token}/master.m3u8", s.handleTranscodeManifest))
 		r.Get("/stream/transcode/{token}/master.m3u8", observeProxy(s.telemetry, http.MethodGet, "/stream/transcode/{token}/master.m3u8", s.handleTranscodeManifest))
 		r.Get("/stream/transcode/{token}/segment/{name}", observeProxy(s.telemetry, http.MethodGet, "/stream/transcode/{token}/segment/{name}", s.handleTranscodeSegment))
+		r.Get("/stream/live/{grant_id}/manifest", observeProxy(s.telemetry, http.MethodGet, "/stream/live/{grant_id}/manifest", s.handleLivePlayback))
+		r.Get("/stream/live/{grant_id}/segment/{name}", observeProxy(s.telemetry, http.MethodGet, "/stream/live/{grant_id}/segment/{name}", s.handleLivePlayback))
 		// Credential-free grant routes (authorized_media_origins_v1). Same media
 		// bytes as the token routes above, addressed by session id and
 		// authorized by the caller's own Authorization header.
