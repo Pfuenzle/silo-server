@@ -58,6 +58,13 @@ func (p *ProxyPool) Pick() *Node {
 	return nil
 }
 
+func (p *ProxyPool) LivePlaybackOrigin() string {
+	if node := p.Pick(); node != nil {
+		return node.ClientURL()
+	}
+	return ""
+}
+
 // FindByURL returns the node with the given URL, or nil if not found. Same
 // contract as the transcode pool's: the caller has already selected the URL,
 // so enabled and healthy are not filtered here.

@@ -1103,3 +1103,23 @@ func TestClientURLPrefersThePublicURL(t *testing.T) {
 		}
 	}
 }
+
+func TestLivePlaybackOrigin_requiresHealthyEnabledProxy(t *testing.T) {
+	pool := NewProxyPool()
+	if got := pool.LivePlaybackOrigin(); got != "" {
+		t.Fatalf("origin without proxies = %q, want empty", got)
+	}
+
+	publicURL := "https://proxy.example/stream"
+	pool.SetNodes([]*Node{{
+		URL: "http://proxy:8080/", PublicURL: &publicURL, Enabled: true, Healthy: true,
+	}})
+	if got := pool.LivePlaybackOrigin(); got != publicURL {
+		t.Fatalf("origin with registered proxy = %q, want %q", got, publicURL)
+	}
+
+	pool.SetNodes([]*Node{{URL: "http://proxy:8080", Enabled: true, Healthy: false}})
+	if got := pool.LivePlaybackOrigin(); got != "" {
+		t.Fatalf("origin with unhealthy proxy = %q, want empty", got)
+	}
+}
