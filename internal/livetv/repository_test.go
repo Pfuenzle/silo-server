@@ -51,6 +51,71 @@ func TestPostgresRepository_roundTripsChannelsProgrammesAndMappings(t *testing.T
 	}
 }
 
+func TestPostgresRepository_CreateSourceDefaultsOmittedConfig(t *testing.T) {
+	// Given a valid source request with no optional config payload.
+	pool := liveTVTestPool(t)
+	ctx := context.Background()
+	var libraryID int
+	if err := pool.QueryRow(ctx, `INSERT INTO media_folders (type, name) VALUES ('livetv', 'Source config fixture') RETURNING id`).Scan(&libraryID); err != nil {
+		t.Fatalf("seed library: %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM media_folders WHERE id = $1`, libraryID) })
+
+	// When the repository persists the source with a nil config.
+	source, err := NewPostgresRepository(pool).CreateSource(ctx, Source{
+		LibraryID: libraryID,
+		Kind:      SourceKindPlaylist,
+		SourceKey: "playlist-a",
+		Name:      "Playlist A",
+		Location:  "http://example.invalid/playlist",
+		Enabled:   true,
+	})
+
+	// Then PostgreSQL receives the schema's empty JSON object default.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(source.Config) != `{}` {
+		t.Fatalf("source config = %s, want {}", source.Config)
+	}
+}
+
+func TestPostgresRepository_ApplyEPGSnapshotAttachesExistingChannels(t *testing.T) {
+	// Given a playlist channel and an EPG source in the same library.
+	pool := liveTVTestPool(t)
+	ctx := context.Background()
+	libraryID, playlistSourceID, epgSourceID := seedLiveTVFixtures(t, pool)
+	repo := NewPostgresRepository(pool)
+	channel, err := repo.CreateChannel(ctx, Channel{
+		LibraryID: libraryID, SourceID: playlistSourceID, ExternalID: "news-1",
+		StableID: "playlist-a|news-1", Name: "News", StreamURL: "http://example.invalid/news",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// When the EPG snapshot contains a programme but no channel rows.
+	programme := ParsedProgramme{
+		ChannelExternalID: "news-1",
+		Programme: Programme{
+			SourceID: epgSourceID, ExternalID: "programme-1", StableID: "epg-a|programme-1",
+			Title: "Morning News", StartsAt: time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC), EndsAt: time.Date(2026, 9, 11, 13, 0, 0, 0, time.UTC),
+		},
+	}
+	if err := repo.ApplySnapshot(ctx, epgSourceID, SourceSnapshot{Programmes: []ParsedProgramme{programme}}, "ready", "", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Then the programme points at the existing playlist channel.
+	programmes, err := repo.ListProgrammes(ctx, libraryID, channel.ID, programme.StartsAt, programme.EndsAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(programmes) != 1 || programmes[0].ChannelID != channel.ID {
+		t.Fatalf("EPG programmes = %#v, want one programme for channel %d", programmes, channel.ID)
+	}
+}
+
 func TestPostgresRepository_JSONBArtworkComparisonIgnoresDatabaseFormatting(t *testing.T) {
 	// Given equivalent JSON with compact and PostgreSQL-style whitespace.
 	compact := []byte(`{"logo":"key"}`)

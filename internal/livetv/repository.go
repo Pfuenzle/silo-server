@@ -80,10 +80,12 @@ func (r *PostgresRepository) ApplySnapshot(ctx context.Context, sourceID int64, 
 		for _, parsed := range snapshot.Programmes {
 			channelID, ok := channelIDs[parsed.ChannelExternalID]
 			if !ok {
-				continue
+				if err := tx.QueryRow(ctx, `SELECT id FROM live_tv_channels WHERE library_id = $1 AND external_id = $2`, libraryID, parsed.ChannelExternalID).Scan(&channelID); err != nil {
+					continue
+				}
 			}
 			programme := parsed.Programme
-			if err := tx.QueryRow(ctx, `INSERT INTO live_tv_programmes (library_id, source_id, channel_id, external_id, stable_id, title, description, starts_at, ends_at, artwork, rating) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`, libraryID, sourceID, channelID, programme.ExternalID, programme.StableID, programme.Title, programme.Description, programme.StartsAt, programme.EndsAt, programme.Artwork, programme.Rating).Scan(&programme.ID); err != nil {
+			if err := tx.QueryRow(ctx, `INSERT INTO live_tv_programmes (library_id, source_id, channel_id, external_id, stable_id, title, description, starts_at, ends_at, artwork, rating) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`, libraryID, sourceID, channelID, programme.ExternalID, programme.StableID, programme.Title, programme.Description, programme.StartsAt, programme.EndsAt, normalizeJSON(programme.Artwork), normalizeJSON(programme.Rating)).Scan(&programme.ID); err != nil {
 				return fmt.Errorf("insert Live TV programme: %w", err)
 			}
 		}
@@ -126,6 +128,9 @@ func (r *PostgresRepository) CreateSource(ctx context.Context, source Source) (S
 	if err := ValidateSource(source.Kind, source.SourceKey, source.Name, source.Location); err != nil {
 		return Source{}, err
 	}
+	if len(source.Config) == 0 {
+		source.Config = []byte(`{}`)
+	}
 	const query = `INSERT INTO live_tv_sources (library_id, kind, source_key, name, location, config, enabled)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING id, library_id, kind, source_key, name, location, config, enabled, last_refresh_at, refresh_state, refresh_error`
@@ -141,6 +146,9 @@ FROM live_tv_sources WHERE library_id = $1 AND source_key = $2`
 func (r *PostgresRepository) UpdateSource(ctx context.Context, source Source) (Source, error) {
 	if err := ValidateSource(source.Kind, source.SourceKey, source.Name, source.Location); err != nil {
 		return Source{}, err
+	}
+	if len(source.Config) == 0 {
+		source.Config = []byte(`{}`)
 	}
 	const query = `UPDATE live_tv_sources SET kind = $3, name = $4, location = $5, config = $6, enabled = $7, updated_at = now()
 WHERE library_id = $1 AND source_key = $2
