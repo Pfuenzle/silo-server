@@ -168,12 +168,18 @@ func (s *Server) handleLivePlayback(w http.ResponseWriter, r *http.Request) {
 		writeGrantError(w, http.StatusUnauthorized, "unauthorized", "Session is no longer valid")
 		return
 	}
-	profileID := claims.ProfileID
-	if profileID == "" {
-		writeGrantError(w, http.StatusForbidden, "forbidden", "Live TV playback requires a profile-bound access token")
+	if s.profileTokens == nil {
+		writeGrantError(w, http.StatusServiceUnavailable, "service_unavailable", "Live TV profile authorization is unavailable")
 		return
 	}
-	ctx := livetv.WithLivePlaybackIdentity(r.Context(), livetv.LivePlaybackIdentity{UserID: claims.UserID, ProfileID: profileID, SessionID: claims.SessionID})
+	profileID := strings.TrimSpace(r.Header.Get("X-Profile-Id"))
+	profileToken := strings.TrimSpace(r.Header.Get("X-Profile-Token"))
+	profileClaims, err := s.profileTokens.Validate(profileToken)
+	if err != nil || profileID == "" || profileClaims.UserID != claims.UserID || profileClaims.SessionID != claims.SessionID || profileClaims.ProfileID != profileID {
+		writeGrantError(w, http.StatusForbidden, "forbidden", "Live TV playback requires a verified profile")
+		return
+	}
+	ctx := livetv.WithLivePlaybackIdentity(r.Context(), livetv.LivePlaybackIdentity{UserID: profileClaims.UserID, ProfileID: profileClaims.ProfileID, SessionID: profileClaims.SessionID})
 	s.livePlayback.ServeHTTP(w, r.WithContext(ctx))
 }
 

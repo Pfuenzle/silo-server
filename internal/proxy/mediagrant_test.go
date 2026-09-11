@@ -3,15 +3,20 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/livetv"
 	"github.com/Silo-Server/silo-server/internal/nodeconfig"
 	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/nodesessions"
@@ -50,6 +55,121 @@ func newGrantProxyServer(t *testing.T, cards map[string]playback.RecipeCard) *Se
 	srv := NewServer(w, nodesessions.NewTracker(nil, "http://proxy-1", "proxy-1", "proxy"))
 	srv.SetMediaGrantAuthority(stubGrantStore{cards: cards}, stubLoginSessions{valid: map[string]bool{"login-1": true}})
 	return srv
+}
+
+func profileToken(t *testing.T, userID int, sessionID, profileID string) string {
+	t.Helper()
+	token, _, err := access.NewProfileTokenService(grantTestSecret, time.Hour).Mint(access.ProfileTokenClaims{
+		UserID: userID, SessionID: sessionID, ProfileID: profileID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
+func liveProxyRequest(t *testing.T, srv *Server, path, accessToken, profileID, verifiedProfileToken string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	if profileID != "" {
+		req.Header.Set("X-Profile-Id", profileID)
+	}
+	if verifiedProfileToken != "" {
+		req.Header.Set("X-Profile-Token", verifiedProfileToken)
+	}
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, req)
+	return recorder
+}
+
+func TestProxyLivePlayback_requiresMatchingSignedProfileProof(t *testing.T) {
+	// Given an access token and a Live TV grant bound to one profile/session.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		switch r.URL.Path {
+		case "/live.m3u8":
+			_, _ = io.WriteString(w, "#EXTM3U\n#EXTINF:2,News\nsegment-1.ts\n")
+		case "/segment-1.ts":
+			_, _ = io.WriteString(w, "segment-bytes")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	srv := newGrantProxyServer(t, nil)
+	srv.SetProfileTokenService(access.NewProfileTokenService(grantTestSecret, time.Hour))
+	liveService := livetv.NewLivePlaybackService(livetv.LivePlaybackConfig{
+		Fetch: livetv.NewFetchService(livetv.FetchConfig{
+			Policy:   livetv.NetworkPolicy{AllowPrivateNetworks: true},
+			Resolver: liveProxyResolver{},
+			Dialer: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
+			},
+		}),
+		ProxyOrigin: "http://proxy",
+		Authority:   liveProxyAuthority{streamURL: "http://provider.example/live.m3u8"},
+	})
+	grant, err := liveService.Start(context.Background(), livetv.LivePlaybackRequest{
+		UserID: 7, ProfileID: "profile-a", LibraryID: 4, ChannelID: "fixture|channel-1", SessionID: "login-1", Mode: livetv.LivePlaybackModeHLS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetLivePlayback(liveService)
+	accessToken := grantAccessToken(t, 7, "login-1")
+	manifestPath := "/stream/live/" + grant.GrantID + "/manifest"
+
+	// When a request supplies no profile proof, a forged profile token, or a
+	// proof bound to another profile/session.
+	for _, test := range []struct {
+		name, profileID, proof string
+	}{
+		{name: "missing proof", profileID: "profile-a"},
+		{name: "forged proof", profileID: "profile-a", proof: "not-a-jwt"},
+		{name: "wrong profile", profileID: "profile-b", proof: profileToken(t, 7, "login-1", "profile-a")},
+		{name: "wrong login session", profileID: "profile-a", proof: profileToken(t, 7, "login-2", "profile-a")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := liveProxyRequest(t, srv, manifestPath, accessToken, test.profileID, test.proof)
+			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403; body = %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+	revoked := grantAccessToken(t, 7, "login-2")
+	revokedRequest := liveProxyRequest(t, srv, manifestPath, revoked, "profile-a", profileToken(t, 7, "login-2", "profile-a"))
+	if revokedRequest.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked session status = %d, want 401", revokedRequest.Code)
+	}
+
+	validProof := profileToken(t, 7, "login-1", "profile-a")
+	manifest := liveProxyRequest(t, srv, manifestPath, accessToken, "profile-a", validProof)
+	if manifest.Code != http.StatusOK || strings.Contains(manifest.Body.String(), "provider.example") {
+		t.Fatalf("manifest response = %d %q", manifest.Code, manifest.Body.String())
+	}
+	segmentPath := strings.TrimSpace(strings.Split(manifest.Body.String(), "\n")[2])
+	segment := liveProxyRequest(t, srv, segmentPath, accessToken, "profile-a", validProof)
+	if segment.Code != http.StatusOK || segment.Body.String() != "segment-bytes" {
+		t.Fatalf("segment response = %d %q", segment.Code, segment.Body.String())
+	}
+	liveService.RevokeContext(context.Background(), grant.GrantID)
+	stopped := liveProxyRequest(t, srv, manifestPath, accessToken, "profile-a", validProof)
+	if stopped.Code != http.StatusNotFound && stopped.Code != http.StatusForbidden {
+		t.Fatalf("stopped grant status = %d, want 404 or 403", stopped.Code)
+	}
+}
+
+type liveProxyResolver struct{}
+
+func (liveProxyResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("192.0.2.1")}}, nil
+}
+
+type liveProxyAuthority struct{ streamURL string }
+
+func (a liveProxyAuthority) ResolveLiveChannel(context.Context, int, livetv.SourceQualifiedID) (livetv.Channel, error) {
+	return livetv.Channel{ID: 9, LibraryID: 4, SourceID: 12, StableID: "fixture|channel-1", StreamURL: a.streamURL}, nil
 }
 
 func grantAccessToken(t *testing.T, userID int, loginSessionID string) string {
