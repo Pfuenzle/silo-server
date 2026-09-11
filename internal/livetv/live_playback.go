@@ -133,11 +133,20 @@ func (s *LivePlaybackService) SetProxyOrigin(origin string) {
 	}
 }
 
+func (s *LivePlaybackService) ProxyOrigin() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.proxyOrigin
+}
+
 func (s *LivePlaybackService) Start(ctx context.Context, request LivePlaybackRequest) (LivePlaybackGrant, error) {
 	if request.SeekSeconds != 0 {
 		return LivePlaybackGrant{}, ErrLivePlaybackSeekUnsupported
 	}
-	if s == nil || s.fetch == nil || s.proxyOrigin == "" || s.authority == nil {
+	if s == nil || s.fetch == nil || s.ProxyOrigin() == "" || s.authority == nil {
 		return LivePlaybackGrant{}, ErrLivePlaybackUnavailable
 	}
 	if request.UserID <= 0 || strings.TrimSpace(request.ProfileID) == "" || request.LibraryID <= 0 || request.ChannelID == "" || strings.TrimSpace(request.SessionID) == "" {
@@ -188,5 +197,5 @@ func (s *LivePlaybackService) Start(ctx context.Context, request LivePlaybackReq
 	if s.observer != nil {
 		s.observer.Started(*session)
 	}
-	return LivePlaybackGrant{GrantID: session.GrantID, ManifestURL: s.proxyOrigin + "/stream/live/" + session.GrantID + "/manifest", IsLive: true}, nil
+	return LivePlaybackGrant{GrantID: session.GrantID, ManifestURL: s.ProxyOrigin() + "/stream/live/" + session.GrantID + "/manifest", IsLive: true}, nil
 }

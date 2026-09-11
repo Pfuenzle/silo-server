@@ -48,6 +48,44 @@ func TestLivePlayback_Start_returnsSiloOnlyOpaqueGrant_boundToOwnership(t *testi
 	}
 }
 
+func TestLivePlayback_Start_withoutProxyOrigin_isUnavailable(t *testing.T) {
+	service := NewLivePlaybackService(LivePlaybackConfig{
+		Fetch:     NewFetchService(FetchConfig{Resolver: liveTestResolver{}}),
+		Authority: liveTestAuthority{},
+	})
+
+	_, err := service.Start(context.Background(), LivePlaybackRequest{
+		UserID: 7, ProfileID: "profile-a", LibraryID: 4,
+		SessionID: "session-a", Mode: LivePlaybackModeHLS,
+		ChannelID: SourceQualifiedID("fixture|channel-1"),
+	})
+
+	if !errors.Is(err, ErrLivePlaybackUnavailable) {
+		t.Fatalf("error = %v, want %v", err, ErrLivePlaybackUnavailable)
+	}
+}
+
+func TestLivePlayback_Start_withRegisteredProxyOrigin_isAvailable(t *testing.T) {
+	service := NewLivePlaybackService(LivePlaybackConfig{
+		Fetch:       NewFetchService(FetchConfig{Resolver: liveTestResolver{}}),
+		ProxyOrigin: "http://proxy:8080/",
+		Authority:   liveTestAuthority{},
+	})
+
+	grant, err := service.Start(context.Background(), LivePlaybackRequest{
+		UserID: 7, ProfileID: "profile-a", LibraryID: 4,
+		SessionID: "session-a", Mode: LivePlaybackModeHLS,
+		ChannelID: SourceQualifiedID("fixture|channel-1"),
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant.ManifestURL != "http://proxy:8080/stream/live/"+grant.GrantID+"/manifest" {
+		t.Fatalf("manifest URL = %q, provider origin must not be used", grant.ManifestURL)
+	}
+}
+
 func TestLivePlayback_Start_rejectsContextIdentityMismatch(t *testing.T) {
 	// Given an authenticated profile context and a request for another profile.
 	service := NewLivePlaybackService(LivePlaybackConfig{Fetch: NewFetchService(FetchConfig{Resolver: liveTestResolver{}}), ProxyOrigin: "https://silo.example", Authority: liveTestAuthority{}})
