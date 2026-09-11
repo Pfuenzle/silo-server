@@ -23,6 +23,7 @@ export function adminFormForConfigSchema(schema: PluginConfigSchema): PluginAdmi
           writeOnly?: boolean;
           format?: string;
           default?: unknown;
+          items?: unknown;
         }
       >;
     };
@@ -33,9 +34,28 @@ export function adminFormForConfigSchema(schema: PluginConfigSchema): PluginAdmi
     const inferredFields = Object.entries(parsed.properties).map(
       ([key, property]): PluginAdminFormField | null => {
         const propertyType = property.type;
-        if (!propertyType || !["string", "number", "integer", "boolean"].includes(propertyType)) {
-          return null;
+        if (!propertyType) return null;
+        if (propertyType === "array") {
+          const itemType =
+            property.items && typeof property.items === "object" && !Array.isArray(property.items)
+              ? (property.items as { type?: unknown }).type
+              : undefined;
+          if (itemType !== "object") return null;
+          return {
+            key,
+            label: property.title || humanizeConfigKey(key),
+            description: property.description,
+            control: "TEXTAREA",
+            placeholder: "[{\"source\":\"/imports\",\"destination\":\"/library\"}]",
+            required: parsed.required?.includes(key) ?? false,
+            secret: false,
+            multiline: true,
+            default_value: undefined,
+            options: [],
+            rows: 6,
+          };
         }
+        if (!["string", "number", "integer", "boolean"].includes(propertyType)) return null;
         const secret = property.writeOnly === true || property.format === "password";
         const control =
           propertyType === "boolean"

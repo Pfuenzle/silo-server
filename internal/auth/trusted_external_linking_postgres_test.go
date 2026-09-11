@@ -1076,7 +1076,7 @@ func TestTrustedLink_APIKeyPreservation(t *testing.T) {
 	localUserID := insertLocalPasswordUserNamed(t, ctx, pool, apiUsername, apiUsername+"@example.invalid")
 
 	apiRepo := NewAPIKeyRepository(pool)
-	targetKey, err := apiRepo.Create(ctx, localUserID, "test-api-key")
+	targetKey, err := apiRepo.Create(ctx, localUserID, "test-api-key", nil)
 	if err != nil {
 		t.Fatalf("create target API key: %v", err)
 	}

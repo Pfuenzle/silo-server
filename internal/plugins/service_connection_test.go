@@ -9,8 +9,63 @@ import (
 	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	"github.com/Silo-Server/silo-server/internal/pluginhost"
 	"google.golang.org/protobuf/types/known/structpb"
 )
+
+func TestRequestRouterConnectionCheck_selectsTheAdvertisedCapability(t *testing.T) {
+	// Given
+	manifest := &pluginv1.PluginManifest{Capabilities: []*pluginv1.CapabilityDescriptor{{
+		Type: "request_router.v1", Id: "listenarr",
+	}}}
+
+	// When
+	capabilityID, err := requestRouterConnectionCheckCapabilityID(manifest)
+
+	// Then
+	if err != nil {
+		t.Fatalf("requestRouterConnectionCheckCapabilityID() error = %v", err)
+	}
+	if capabilityID != "listenarr" {
+		t.Fatalf("capability id = %q, want listenarr", capabilityID)
+	}
+}
+
+func TestServiceTestGlobalConfig_usesRequestRouterConnectionCheck(t *testing.T) {
+	// Given
+	manifest := connectionTestManifest(t, "silo.requests.listenarr", "0.0.0-dev")
+	manifest.Capabilities = []*pluginv1.CapabilityDescriptor{{Type: "request_router.v1", Id: "listenarr"}}
+	manifest.GlobalConfigSchema[0].JsonSchema = `{"type":"object","properties":{"base_url":{"type":"string"}},"required":["base_url"],"additionalProperties":false}`
+	installPath := writeInstalledPluginManifest(t, manifest)
+	host := &fakeServiceHost{startResult: &fakePluginClient{manifest: manifest}}
+	service := &Service{
+		installations: newFakeServiceInstallationStore(&Installation{
+			ID: 7, PluginID: manifest.GetPluginId(), Version: manifest.GetVersion(), InstallPath: installPath, Enabled: true,
+		}),
+		host: host,
+	}
+	called := false
+	previous := runRequestRouterConnectionCheck
+	runRequestRouterConnectionCheck = func(_ context.Context, _ *pluginhost.RequestRouterClient, got *pluginv1.PluginManifest, value map[string]any) error {
+		called = got.GetPluginId() == manifest.GetPluginId() && value["base_url"] == "https://listenarr.example"
+		return nil
+	}
+	t.Cleanup(func() { runRequestRouterConnectionCheck = previous })
+
+	// When
+	err := service.TestGlobalConfig(context.Background(), 7, "connection", map[string]any{"base_url": "https://listenarr.example"})
+
+	// Then
+	if err != nil {
+		t.Fatalf("TestGlobalConfig() error = %v", err)
+	}
+	if !called {
+		t.Fatal("request-router connection check did not receive the prospective config")
+	}
+	if len(host.started) != 1 || len(host.stopped) != 1 || host.stopped[0] >= 0 {
+		t.Fatalf("temporary process lifecycle = started:%d stopped:%v", len(host.started), host.stopped)
+	}
+}
 
 type fakeServiceConfigStore struct {
 	configsByInstallation map[int][]*RuntimeConfig

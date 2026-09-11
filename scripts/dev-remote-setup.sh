@@ -5,7 +5,7 @@
 set -euo pipefail
 
 DEV_HOST="${DEV_HOST:-root@silo-dev.example.invalid}"
-DEV_DIR="${DEV_DIR:-/opt/git/silo-dev}"
+DEV_DIR="${DEV_DIR:-/opt/git/silo}"
 
 echo "==> Setting up dev environment on ${DEV_HOST}..."
 
@@ -74,7 +74,7 @@ else
 fi
 
 # --- Create directories ---
-mkdir -p "${DEV_DIR}/Silo/web/dist"
+mkdir -p "${DEV_DIR}/silo-server/web/dist"
 mkdir -p "${DEV_DIR}/silo-plugin-sdk"
 mkdir -p /tmp/silo-transcode
 mkdir -p /opt/silo/plugins /opt/silo/transcode /opt/silo/postgres /opt/silo/redis
@@ -96,7 +96,7 @@ if [ ! -L /var/lib/silo/plugins ] && [ -d /opt/silo/plugins ]; then
 fi
 
 # --- Create .env for native execution ---
-ENV_FILE="${DEV_DIR}/Silo/.env"
+ENV_FILE="${DEV_DIR}/silo-server/.env"
 if [ ! -f "${ENV_FILE}" ]; then
     echo "==> Creating ${ENV_FILE}..."
     cat > "${ENV_FILE}" <<'EOF'

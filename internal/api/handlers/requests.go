@@ -52,6 +52,43 @@ type RequestsHandler struct {
 	service RequestService
 }
 
+type requestAPIResponse struct {
+	mediarequests.Request
+	ExternalStatus     *string `json:"external_status"`
+	ExternalDetail     *string `json:"external_detail"`
+	ExternalLibraryID  *string `json:"external_library_id"`
+	ExternalDownloadID *string `json:"external_download_id"`
+	SiloAudiobookLink  *string `json:"silo_audiobook_link"`
+}
+
+func requestResponseFrom(request *mediarequests.Request) requestAPIResponse {
+	return requestAPIResponse{
+		Request:            *request,
+		ExternalStatus:     nullableRequestString(request.ExternalStatus),
+		ExternalDetail:     nullableRequestString(request.ExternalDetail),
+		ExternalLibraryID:  nullableRequestString(request.ExternalLibraryID),
+		ExternalDownloadID: nullableRequestString(request.ExternalDownloadID),
+		SiloAudiobookLink:  nullableRequestString(request.SiloAudiobookLink),
+	}
+}
+
+func nullableRequestString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func requestResponsesFrom(requests []*mediarequests.Request) []requestAPIResponse {
+	responses := make([]requestAPIResponse, 0, len(requests))
+	for _, request := range requests {
+		if request != nil {
+			responses = append(responses, requestResponseFrom(request))
+		}
+	}
+	return responses
+}
+
 func NewRequestsHandler(service RequestService) *RequestsHandler {
 	return &RequestsHandler{service: service}
 }
@@ -248,7 +285,7 @@ func (h *RequestsHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		writeRequestServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, req)
+	writeJSON(w, http.StatusCreated, requestResponseFrom(req))
 }
 
 func (h *RequestsHandler) HandleListMine(w http.ResponseWriter, r *http.Request) {
@@ -262,8 +299,8 @@ func (h *RequestsHandler) HandleListMine(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
-		Requests []*mediarequests.Request `json:"requests"`
-	}{Requests: requests})
+		Requests []requestAPIResponse `json:"requests"`
+	}{Requests: requestResponsesFrom(requests)})
 }
 
 func (h *RequestsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
@@ -276,7 +313,7 @@ func (h *RequestsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 		writeRequestServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, req)
+	writeJSON(w, http.StatusOK, requestResponseFrom(req))
 }
 
 func (h *RequestsHandler) HandleAdminList(w http.ResponseWriter, r *http.Request) {
@@ -290,8 +327,8 @@ func (h *RequestsHandler) HandleAdminList(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
-		Requests []*mediarequests.Request `json:"requests"`
-	}{Requests: requests})
+		Requests []requestAPIResponse `json:"requests"`
+	}{Requests: requestResponsesFrom(requests)})
 }
 
 func (h *RequestsHandler) HandleApprove(w http.ResponseWriter, r *http.Request) {
@@ -304,7 +341,7 @@ func (h *RequestsHandler) HandleApprove(w http.ResponseWriter, r *http.Request) 
 		writeRequestServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, req)
+	writeJSON(w, http.StatusOK, requestResponseFrom(req))
 }
 
 func (h *RequestsHandler) HandleDecline(w http.ResponseWriter, r *http.Request) {
@@ -326,7 +363,7 @@ func (h *RequestsHandler) HandleDecline(w http.ResponseWriter, r *http.Request) 
 		writeRequestServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, req)
+	writeJSON(w, http.StatusOK, requestResponseFrom(req))
 }
 
 func (h *RequestsHandler) HandleCancel(w http.ResponseWriter, r *http.Request) {
@@ -348,7 +385,7 @@ func (h *RequestsHandler) HandleCancel(w http.ResponseWriter, r *http.Request) {
 		writeRequestServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, req)
+	writeJSON(w, http.StatusOK, requestResponseFrom(req))
 }
 
 func (h *RequestsHandler) HandleRetry(w http.ResponseWriter, r *http.Request) {
@@ -361,7 +398,7 @@ func (h *RequestsHandler) HandleRetry(w http.ResponseWriter, r *http.Request) {
 		writeRequestServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, req)
+	writeJSON(w, http.StatusOK, requestResponseFrom(req))
 }
 
 func (h *RequestsHandler) HandleGetStatus(w http.ResponseWriter, r *http.Request) {

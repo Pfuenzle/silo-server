@@ -18,11 +18,13 @@ import (
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
-type pluginAuthClient interface {
+type PluginAuthClient interface {
 	Authenticate(ctx context.Context, req *pluginv1.AuthenticateRequest) (*pluginv1.AuthenticateResponse, error)
 	InitAuthorize(ctx context.Context, req *pluginv1.InitAuthorizeRequest) (*pluginv1.InitAuthorizeResponse, error)
 	ExchangeCode(ctx context.Context, req *pluginv1.ExchangeCodeRequest) (*pluginv1.AuthenticateResponse, error)
 }
+
+type pluginAuthClient = PluginAuthClient
 
 type pluginAuthClientFactory func(ctx context.Context) (pluginAuthClient, error)
 
@@ -188,6 +190,10 @@ func (p *PluginProvider) InstallationID() int { return p.config.InstallationID }
 
 // CapabilityID exposes the bound capability slug (e.g. "whmcs").
 func (p *PluginProvider) CapabilityID() string { return p.config.CapabilityID }
+
+func (p *PluginProvider) SessionProviderKey() (models.SessionProviderKey, error) {
+	return models.NewPluginSessionProviderKey(p.InstallationID(), p.CapabilityID())
+}
 
 // OAuthClient returns a host-side gRPC client wrapping the plugin's
 // AuthProvider service. Used by the OAuth handler to call InitAuthorize

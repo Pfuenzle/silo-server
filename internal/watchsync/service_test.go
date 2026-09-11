@@ -677,6 +677,9 @@ func cloneStringMapForTest(values map[string]string) map[string]string {
 type authProviderStub struct {
 	started       bool
 	polled        bool
+	authStarted   bool
+	authCompleted bool
+	authSession   AuthorizationCodeSession
 	pollErr       error
 	refreshed     bool
 	refreshTokens TokenSet
@@ -721,6 +724,26 @@ func (p *authProviderStub) PollDeviceAuth(
 	}
 	expires := time.Now().Add(time.Hour)
 	return TokenSet{AccessToken: testAccessToken, RefreshToken: testRefreshToken, TokenExpiresAt: &expires}, nil
+}
+
+func (p *authProviderStub) StartAuthorizationCodeAuth(_ context.Context, redirectURI string, state string) (AuthorizationCodeSession, error) {
+	p.authStarted = true
+	p.authSession = AuthorizationCodeSession{
+		RedirectURI:   redirectURI,
+		State:         state,
+		ProviderState: "provider-state",
+		AuthorizeURL:  "https://provider.example/oauth?state=" + state,
+	}
+	return p.authSession, nil
+}
+
+func (p *authProviderStub) CompleteAuthorizationCodeAuth(_ context.Context, code string, session AuthorizationCodeSession) (TokenSet, ProviderAccount, error) {
+	p.authCompleted = true
+	p.authSession = session
+	if code != "provider-code" {
+		return TokenSet{}, ProviderAccount{}, fmt.Errorf("unexpected authorization code")
+	}
+	return TokenSet{AccessToken: testAccessToken, RefreshToken: testRefreshToken}, ProviderAccount{ID: "trakt-user-1", Username: "alex"}, nil
 }
 
 func (p *authProviderStub) RefreshToken(context.Context, ServerConfig, Connection) (TokenSet, error) {
@@ -1217,6 +1240,41 @@ func TestServiceStartsAndPollsDeviceAuth(t *testing.T) {
 	storedSession := repo.sessions[session.ID]
 	if storedSession.CompletedAt == nil {
 		t.Fatalf("auth session was not marked completed: %+v", storedSession)
+	}
+}
+
+func TestServiceStartsAndCompletesAuthorizationCodeAuth(t *testing.T) {
+	repo := newServiceFakeRepo()
+	provider := &authProviderStub{}
+	reg := NewRegistry()
+	if err := reg.Register(provider); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	service := NewService(repo, reg)
+	now := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+
+	session, err := service.StartAuthorizationCodeAuth(context.Background(), 7, "profile-1", "trakt", "https://silo.example/api/v1/watch-providers/trakt/auth/callback")
+	if err != nil {
+		t.Fatalf("StartAuthorizationCodeAuth: %v", err)
+	}
+	if !provider.authStarted || session.ID == "" || session.AuthorizeURL == "" {
+		t.Fatalf("session = %+v authStarted=%v", session, provider.authStarted)
+	}
+	storedSession := repo.sessions[session.ID]
+	if storedSession.UserID != 7 || storedSession.ProfileID != "profile-1" || storedSession.UserCode != session.RedirectURI || storedSession.DeviceCode != "provider-state" {
+		t.Fatalf("stored authorization session = %+v", storedSession)
+	}
+
+	conn, err := service.CompleteAuthorizationCodeAuth(context.Background(), "trakt", session.ID, "provider-code")
+	if err != nil {
+		t.Fatalf("CompleteAuthorizationCodeAuth: %v", err)
+	}
+	if !provider.authCompleted || conn.ProviderUsername != "alex" || conn.AccessToken != testAccessToken {
+		t.Fatalf("connection = %+v authCompleted=%v", conn, provider.authCompleted)
+	}
+	if repo.sessions[session.ID].CompletedAt == nil {
+		t.Fatalf("authorization session was not marked completed: %+v", repo.sessions[session.ID])
 	}
 }
 

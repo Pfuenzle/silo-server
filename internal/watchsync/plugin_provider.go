@@ -23,6 +23,8 @@ import (
 )
 
 type WatchSyncPluginClient interface {
+	InitAuthorize(context.Context, *pluginv1.WatchSyncInitAuthorizeRequest) (*pluginv1.WatchSyncInitAuthorizeResponse, error)
+	ExchangeCode(context.Context, *pluginv1.WatchSyncExchangeCodeRequest) (*pluginv1.WatchSyncCredentialResponse, error)
 	ExchangeAPIKey(context.Context, *pluginv1.WatchSyncExchangeAPIKeyRequest) (*pluginv1.WatchSyncCredentialResponse, error)
 	StartDeviceAuthorization(context.Context, *pluginv1.WatchSyncDeviceAuthorizationServiceStartRequest) (*pluginv1.WatchSyncDeviceAuthorizationServiceStartResponse, error)
 	PollDeviceAuthorization(context.Context, *pluginv1.WatchSyncDeviceAuthorizationServicePollRequest) (*pluginv1.WatchSyncDeviceAuthorizationServicePollResponse, error)
@@ -180,6 +182,91 @@ func (p *PluginProvider) ConnectWithAPIKey(ctx context.Context, apiKey string) (
 	return p.ConnectWithAPIKeyConfig(ctx, apiKey, nil)
 }
 
+func (p *PluginProvider) StartAuthorizationCodeAuth(ctx context.Context, redirectURI string, state string) (AuthorizationCodeSession, error) {
+	if p.authMethod != AuthMethodAuthorizationCode {
+		return AuthorizationCodeSession{}, errors.New("watch sync plugin does not support authorization-code authentication")
+	}
+	redirectURI = strings.TrimSpace(redirectURI)
+	state = strings.TrimSpace(state)
+	if redirectURI == "" || state == "" {
+		return AuthorizationCodeSession{}, errors.New("watch sync authorization redirect URI and state are required")
+	}
+	config, err := p.providerConfig(ctx)
+	if err != nil {
+		return AuthorizationCodeSession{}, err
+	}
+	client, err := p.resolveClient(ctx, p.installationID, p.capabilityID)
+	if err != nil {
+		return AuthorizationCodeSession{}, watchSyncUnavailableError()
+	}
+	response, err := client.InitAuthorize(ctx, &pluginv1.WatchSyncInitAuthorizeRequest{
+		CapabilityId:   p.capabilityID,
+		ProviderConfig: config,
+		RedirectUri:    redirectURI,
+		State:          state,
+	})
+	if err != nil {
+		return AuthorizationCodeSession{}, watchSyncRPCError()
+	}
+	if err := watchSyncFaultError(p.Key(), response.GetFault(), state); err != nil {
+		return AuthorizationCodeSession{}, err
+	}
+	authorizeURL, err := validAuthorizationURL(response.GetAuthorizationUrl())
+	if err != nil {
+		return AuthorizationCodeSession{}, err
+	}
+	return AuthorizationCodeSession{
+		RedirectURI:   redirectURI,
+		State:         state,
+		ProviderState: base64.RawURLEncoding.EncodeToString(response.GetProviderState()),
+		AuthorizeURL:  authorizeURL,
+	}, nil
+}
+
+func (p *PluginProvider) CompleteAuthorizationCodeAuth(ctx context.Context, code string, session AuthorizationCodeSession) (TokenSet, ProviderAccount, error) {
+	if p.authMethod != AuthMethodAuthorizationCode {
+		return TokenSet{}, ProviderAccount{}, errors.New("watch sync plugin does not support authorization-code authentication")
+	}
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return TokenSet{}, ProviderAccount{}, errors.New("authorization code is required")
+	}
+	providerState, err := base64.RawURLEncoding.DecodeString(session.ProviderState)
+	if err != nil {
+		return TokenSet{}, ProviderAccount{}, errors.New("watch sync plugin authorization state is invalid")
+	}
+	config, err := p.providerConfig(ctx)
+	if err != nil {
+		return TokenSet{}, ProviderAccount{}, err
+	}
+	client, err := p.resolveClient(ctx, p.installationID, p.capabilityID)
+	if err != nil {
+		return TokenSet{}, ProviderAccount{}, watchSyncUnavailableError()
+	}
+	response, err := client.ExchangeCode(ctx, &pluginv1.WatchSyncExchangeCodeRequest{
+		CapabilityId:      p.capabilityID,
+		ProviderConfig:    config,
+		RedirectUri:       session.RedirectURI,
+		AuthorizationCode: code,
+		ProviderState:     providerState,
+	})
+	if err != nil {
+		return TokenSet{}, ProviderAccount{}, watchSyncRPCError()
+	}
+	if err := watchSyncFaultError(p.Key(), response.GetFault(), code, session.ProviderState); err != nil {
+		return TokenSet{}, ProviderAccount{}, err
+	}
+	tokens, err := tokenSetFromProto(response.GetCredentials())
+	if err != nil {
+		return TokenSet{}, ProviderAccount{}, err
+	}
+	account, err := accountFromProto(response.GetAccount())
+	if err != nil {
+		return TokenSet{}, ProviderAccount{}, err
+	}
+	return tokens, account, nil
+}
+
 func (p *PluginProvider) ConnectWithAPIKeyConfig(
 	ctx context.Context,
 	apiKey string,
@@ -321,11 +408,15 @@ func (p *PluginProvider) PollDeviceAuth(ctx context.Context, _ ServerConfig, ses
 }
 
 func validDeviceVerificationURL(value string) (string, error) {
+	return validAuthorizationURL(value)
+}
+
+func validAuthorizationURL(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	parsed, err := url.Parse(value)
 	if err != nil || parsed == nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil ||
 		(parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return "", errors.New("watch sync plugin returned an invalid device authorization verification URL")
+		return "", errors.New("watch sync plugin returned an invalid authorization URL")
 	}
 	return parsed.String(), nil
 }
@@ -1230,9 +1321,11 @@ func resultForEvent(results []*pluginv1.WatchSyncApplyResult, eventID string) *p
 }
 
 func supportedWatchSyncAuthMethod(descriptor *pluginv1.WatchSyncProviderDescriptor) (string, error) {
-	supported := make(map[string]struct{}, 2)
+	supported := make(map[string]struct{}, 3)
 	for _, method := range descriptor.GetAuthMethods() {
 		switch method {
+		case pluginv1.WatchSyncAuthMethod_WATCH_SYNC_AUTH_METHOD_AUTHORIZATION_CODE:
+			supported[AuthMethodAuthorizationCode] = struct{}{}
 		case pluginv1.WatchSyncAuthMethod_WATCH_SYNC_AUTH_METHOD_API_KEY:
 			supported[AuthMethodAPIKey] = struct{}{}
 		case pluginv1.WatchSyncAuthMethod_WATCH_SYNC_AUTH_METHOD_DEVICE_CODE:
@@ -1247,6 +1340,9 @@ func supportedWatchSyncAuthMethod(descriptor *pluginv1.WatchSyncProviderDescript
 	}
 	if _, ok := supported[AuthMethodDeviceCode]; ok {
 		return AuthMethodDeviceCode, nil
+	}
+	if _, ok := supported[AuthMethodAuthorizationCode]; ok {
+		return AuthMethodAuthorizationCode, nil
 	}
 	return "", errors.New("does not advertise an authentication method supported by the host")
 }

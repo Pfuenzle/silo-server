@@ -1428,6 +1428,61 @@ func TestCreateIntegrationPassesCapabilitySubIDToPlugin(t *testing.T) {
 	}
 }
 
+func TestCreateIntegrationLeavesCapabilityConfigToProviderBoundary(t *testing.T) {
+	// Given a capability-specific config submitted to the generic request service
+	store := newFakeStore()
+	router := &fakeRouterProvider{}
+	service := newTestService(store)
+	service.SetRouterProvider(router)
+	install := 1
+
+	// When the service validates and saves the integration
+	created, err := service.CreateIntegration(context.Background(), Viewer{UserID: 1, IsAdmin: true}, Integration{
+		Name:           "custom-audiobook-provider",
+		CapabilityID:   "custom-books",
+		BaseURL:        "https://router.example",
+		APIKeyRef:      "secret-api-key",
+		InstallationID: &install,
+		PluginConfig: map[string]any{
+			"base_url":      "https://router.example/",
+			"api_key":       "secret-api-key",
+			"timeout":       "30s",
+			"poll_interval": "250ms",
+			"poll_timeout":  "2m",
+			"path_mappings": []any{map[string]any{"source": "/media/books", "destination": "/mnt/media/audiobooks"}},
+		},
+	})
+
+	// Then the core service leaves plugin-specific config interpretation to the provider boundary
+	if err != nil {
+		t.Fatalf("CreateIntegration() error = %v", err)
+	}
+	if created.PluginConfig["timeout"] != "30s" || router.gotValidateConfig["timeout"] != "30s" {
+		t.Fatalf("plugin config was interpreted in core: persisted=%#v validated=%#v", created.PluginConfig, router.gotValidateConfig)
+	}
+}
+
+func TestAudiobookApprovalRoutesThroughArbitraryCapability(t *testing.T) {
+	// Given an approved audiobook and an arbitrary request-router capability
+	store := newFakeStore()
+	store.integrations = []Integration{routerInstWithCapability("books", "custom-books")}
+	request := &Request{ID: "book-generic", MediaType: MediaTypeAudiobook, Title: "The Book", Status: StatusPending, Outcome: OutcomeActive}
+	store.requests[request.ID] = request
+	router := &fakeRouterProvider{targetsOverride: []RouterTarget{{Quality: Quality1080p, ConnectionID: "custom-books", Status: StatusQueued}}}
+	service := newTestService(store)
+	service.SetRouterProvider(router)
+
+	// When an administrator approves it
+	if _, err := service.Approve(context.Background(), Viewer{UserID: 1, IsAdmin: true}, request.ID); err != nil {
+		t.Fatalf("Approve() error = %v", err)
+	}
+
+	// Then routing uses the declared capability generically, without provider-name or URL logic
+	if router.fulfillCalls != 1 || router.gotFulfillCapability != "books" {
+		t.Fatalf("fulfillment = calls:%d capability:%q, want 1/books", router.fulfillCalls, router.gotFulfillCapability)
+	}
+}
+
 // TestUpdateIntegrationRefusesStoredKeyReuseOnChangedBaseURL covers the security
 // hardening: when the caller leaves api_key_ref blank ("keep saved key") but
 // changes the base_url, the service must refuse rather than pair the stored,
@@ -1781,21 +1836,22 @@ func TestCreateAudiobookRequestPersistsProviderIdentityWithoutFulfillment(t *tes
 func intPtr(value int) *int { return &value }
 
 type fakeStore struct {
-	mu            sync.Mutex
-	settings      Settings
-	limit         *UserLimit
-	count         int
-	active        map[MediaType]map[int]*Request
-	created       []CreateRequestRecord
-	integrations  []Integration
-	candidates    []*Request
-	mine          []*Request
-	statusUpdates []Status
-	requests      map[string]*Request
-	targets       map[string][]Target
-	targetSeq     int64
-	unnotified    []string
-	notified      []string
+	mu                   sync.Mutex
+	settings             Settings
+	limit                *UserLimit
+	count                int
+	active               map[MediaType]map[int]*Request
+	created              []CreateRequestRecord
+	integrations         []Integration
+	candidates           []*Request
+	mine                 []*Request
+	statusUpdates        []Status
+	requests             map[string]*Request
+	targets              map[string][]Target
+	targetSeq            int64
+	createTargetFailures int
+	unnotified           []string
+	notified             []string
 
 	listIntegrationsCalls int
 	getSettingsCalls      int
@@ -2130,6 +2186,10 @@ func (f *fakeStore) ListTargets(_ context.Context, requestID string) ([]Target, 
 func (f *fakeStore) CreateTarget(_ context.Context, t Target) (Target, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.createTargetFailures > 0 {
+		f.createTargetFailures--
+		return Target{}, errors.New("simulated target persistence interruption")
+	}
 	if f.targets == nil {
 		f.targets = map[string][]Target{}
 	}
@@ -2557,10 +2617,12 @@ type fakeRouterProvider struct {
 	validateErr           error
 	validateCalls         int
 	gotValidateCapability string
+	gotValidateConfig     map[string]any
+	gotFulfillCapability  string
 	gotValidateSiblings   []ResolvedRouterConnection
 }
 
-func (f *fakeRouterProvider) Fulfill(_ context.Context, installationID int, _ string, req Request, qualities []Quality, conns []ResolvedRouterConnection) ([]RouterTarget, string, error) {
+func (f *fakeRouterProvider) Fulfill(_ context.Context, installationID int, capabilityID string, req Request, qualities []Quality, conns []ResolvedRouterConnection) ([]RouterTarget, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.gotRequesterEmail = req.RequesterEmail
@@ -2569,6 +2631,7 @@ func (f *fakeRouterProvider) Fulfill(_ context.Context, installationID int, _ st
 	f.gotQualities = append(f.gotQualities, qualities...)
 	f.gotConns = conns
 	f.gotInstallationID = installationID
+	f.gotFulfillCapability = capabilityID
 	if f.fulfillErr != nil {
 		return nil, "", f.fulfillErr
 	}
@@ -2613,10 +2676,11 @@ func (f *fakeRouterProvider) TestConnection(_ context.Context, _ int, _ string, 
 	return true, "", nil
 }
 
-func (f *fakeRouterProvider) Validate(_ context.Context, _ int, capabilityID string, _ ResolvedRouterConnection, siblings []ResolvedRouterConnection) (map[string]string, string, error) {
+func (f *fakeRouterProvider) Validate(_ context.Context, _ int, capabilityID string, conn ResolvedRouterConnection, siblings []ResolvedRouterConnection) (map[string]string, string, error) {
 	f.mu.Lock()
 	f.validateCalls++
 	f.gotValidateCapability = capabilityID
+	f.gotValidateConfig = conn.Config
 	f.gotValidateSiblings = siblings
 	f.mu.Unlock()
 	return f.validateFieldErrors, f.validateFormError, f.validateErr
@@ -2640,6 +2704,12 @@ func routerInstOn(id string, installID int) Integration {
 		CapabilityID:   "arr",
 		InstallationID: &install,
 	}
+}
+
+func routerInstWithCapability(capabilityID, id string) Integration {
+	in := routerInst(id)
+	in.CapabilityID = capabilityID
+	return in
 }
 
 // autoApproveRouterInst is a router connection that satisfies the auto-approval

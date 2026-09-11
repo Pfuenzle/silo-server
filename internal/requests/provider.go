@@ -11,7 +11,9 @@ import (
 
 // RequestRouterProvider fulfills a whole request and checks target status via a
 // request_router.v1 plugin. The host owns governance (which qualities) and the
-// target records; the provider is the plugin boundary.
+// target records; the provider is the plugin boundary. Fulfill implementations
+// must treat Request.FulfillmentKey as an idempotency key across retries and
+// process restarts.
 type RequestRouterProvider interface {
 	Fulfill(ctx context.Context, installationID int, capabilityID string, req Request, qualities []Quality, conns []ResolvedRouterConnection) ([]RouterTarget, string, error)
 	CheckStatus(ctx context.Context, installationID int, capabilityID string, req Request, targets []RouterTargetRef, conns []ResolvedRouterConnection) ([]RouterTargetStatus, error)
@@ -35,6 +37,7 @@ type RouterTarget struct {
 	ExternalStatus string
 	Status         Status
 	Message        string
+	Metadata       *RouterMetadata `json:"metadata,omitempty"`
 }
 
 type RouterTargetRef struct {
@@ -49,7 +52,28 @@ type RouterTargetStatus struct {
 	Status         Status
 	ExternalStatus string
 	Message        string
+	Metadata       *RouterMetadata `json:"metadata,omitempty"`
 }
+
+// RouterMetadata carries optional fulfillment details that are useful to a
+// host without making any integration-specific field part of request logic.
+type RouterMetadata struct {
+	ExternalCorrelationID string        `json:"external_correlation_id,omitempty"`
+	StatusText            string        `json:"status_text,omitempty"`
+	ExternalURL           string        `json:"external_url,omitempty"`
+	LibraryURL            string        `json:"library_url,omitempty"`
+	ImportedPath          string        `json:"imported_path,omitempty"`
+	ScanLinkState         ScanLinkState `json:"scan_link_state,omitempty"`
+}
+
+type ScanLinkState string
+
+const (
+	ScanLinkStatePending  ScanLinkState = "pending"
+	ScanLinkStateScanning ScanLinkState = "scanning"
+	ScanLinkStateLinked   ScanLinkState = "linked"
+	ScanLinkStateFailed   ScanLinkState = "failed"
+)
 
 type RouterOption struct {
 	Value string `json:"value"`
@@ -79,6 +103,21 @@ func NewPluginRouterProvider(r RouterClientResolver) RequestRouterProvider {
 
 func routerDescriptor(req Request) *pluginv1.RequestDescriptor {
 	ids := map[string]string{}
+	if req.ID != "" {
+		ids["silo_request_id"] = req.ID
+	}
+	if req.FulfillmentKey != "" {
+		ids["silo_fulfillment_key"] = req.FulfillmentKey
+	}
+	if req.Provider != "" {
+		ids["provider"] = req.Provider
+	}
+	if req.ProviderItemID != "" {
+		ids["provider_item_id"] = req.ProviderItemID
+	}
+	if req.ExternalLibraryID != "" {
+		ids["external_library_id"] = req.ExternalLibraryID
+	}
 	if req.TMDBID != 0 {
 		ids["tmdb"] = strconv.Itoa(req.TMDBID)
 	}
@@ -102,6 +141,8 @@ func routerDescriptor(req Request) *pluginv1.RequestDescriptor {
 		RequesterProfileId: req.RequestedByProfileID,
 		RequesterEmail:     req.RequesterEmail,
 		RequesterUsername:  req.RequesterUsername,
+		RequestId:          req.ID,
+		FulfillmentKey:     req.FulfillmentKey,
 	}
 }
 
@@ -149,7 +190,7 @@ func (p *pluginRouterProvider) Fulfill(ctx context.Context, installationID int, 
 		targets = append(targets, RouterTarget{
 			Quality: Quality(t.GetQuality()), ConnectionID: t.GetConnectionId(),
 			ExternalID: t.GetExternalId(), ExternalStatus: t.GetExternalStatus(),
-			Status: Status(t.GetStatus()), Message: t.GetMessage(),
+			Status: Status(t.GetStatus()), Message: t.GetMessage(), Metadata: routerMetadataFromProto(t.GetMetadata()),
 		})
 	}
 	return targets, resp.GetMessage(), nil
@@ -179,6 +220,7 @@ func (p *pluginRouterProvider) CheckStatus(ctx context.Context, installationID i
 		out = append(out, RouterTargetStatus{
 			Quality: Quality(st.GetQuality()), ConnectionID: st.GetConnectionId(),
 			Status: Status(st.GetStatus()), ExternalStatus: st.GetExternalStatus(), Message: st.GetMessage(),
+			Metadata: routerMetadataFromProto(st.GetMetadata()),
 		})
 	}
 	return out, nil

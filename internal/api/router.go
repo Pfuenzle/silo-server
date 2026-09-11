@@ -814,6 +814,9 @@ func NewRouter(deps Dependencies) chi.Router {
 			}))
 		}
 		AttachRequestRouter(requestSvc, deps.PluginService)
+		if err := AttachAudiobookImport(requestSvc, deps.LibraryScanQueue, deps.FolderRepo, deps.FileRepo, itemRepo); err != nil {
+			slog.Warn("requests: audiobook import linker unavailable", "error", err)
+		}
 		requestSvc.SetGroupPolicyProvider(accessGroupStore)
 		if userRepo != nil {
 			requestSvc.SetUserRepository(userRepo)
@@ -1005,7 +1008,7 @@ func NewRouter(deps Dependencies) chi.Router {
 		}
 	}
 	if deps.WatchProviderService != nil {
-		watchProviderHandler = handlers.NewWatchProviderHandler(deps.WatchProviderService)
+		watchProviderHandler = handlers.NewWatchProviderHandlerWithPublicURL(deps.WatchProviderService, deps.PublicURL)
 	}
 
 	// Build ratings handler if both repo and itemRepo are available.
@@ -2244,6 +2247,10 @@ func NewRouter(deps Dependencies) chi.Router {
 			)
 		}
 
+		if watchProviderHandler != nil {
+			r.Get("/watch-providers/{provider}/auth/callback", watchProviderHandler.HandleAuthorizationCodeCallback)
+		}
+
 		// All remaining routes require auth.
 		if authMiddleware != nil {
 			r.Group(func(r chi.Router) {
@@ -2612,6 +2619,7 @@ func NewRouter(deps Dependencies) chi.Router {
 						r.Get("/{provider}/connection", watchProviderHandler.HandleGetConnection)
 						r.Patch("/{provider}/connection", watchProviderHandler.HandleUpdateConnection)
 						r.Delete("/{provider}/connection", watchProviderHandler.HandleDeleteConnection)
+						r.Post("/{provider}/auth/authorization-code", watchProviderHandler.HandleStartAuthorizationCodeAuth)
 						r.Post("/{provider}/auth/device-code", watchProviderHandler.HandleStartDeviceAuth)
 						r.Post("/{provider}/auth/poll", watchProviderHandler.HandlePollDeviceAuth)
 						r.Post("/{provider}/auth/api-key", watchProviderHandler.HandleConnectAPIKey)

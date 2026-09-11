@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,7 @@ type fakeRequestService struct {
 	listStudiosFn  func() ([]mediarequests.DiscoverBrandCard, error)
 	listNetworksFn func() ([]mediarequests.DiscoverBrandCard, error)
 	listGenresFn   func() ([]mediarequests.DiscoverBrandCard, error)
+	listMineFn     func() ([]*mediarequests.Request, error)
 	browseFn       func(kind, slug string, mediaType mediarequests.MediaType, sort string, page int) (*mediarequests.DiscoverBrowseResponse, error)
 }
 
@@ -76,6 +78,9 @@ func (f *fakeRequestService) CreateRequest(context.Context, mediarequests.Viewer
 }
 
 func (f *fakeRequestService) ListMine(context.Context, mediarequests.Viewer, mediarequests.ListFilter) ([]*mediarequests.Request, error) {
+	if f.listMineFn != nil {
+		return f.listMineFn()
+	}
 	return nil, nil
 }
 
@@ -179,6 +184,140 @@ func TestHandleListStudiosReturnsJSON(t *testing.T) {
 	}
 	if len(body.Studios) != 1 || body.Studios[0].Slug != "marvel-studios" {
 		t.Errorf("studios = %+v", body.Studios)
+	}
+}
+
+func TestRequestIntegrationResponsePreservesGenericPluginConfig(t *testing.T) {
+	// Given a saved generic integration with plugin-owned configuration
+	integration := mediarequests.Integration{
+		CapabilityID: "custom-router",
+		PluginConfig: map[string]any{
+			"base_url": "https://router.example",
+			"secret":   "plugin-owned-secret",
+		},
+	}
+
+	// When it is rendered for the admin API
+	response := requestIntegrationResponseFrom(integration)
+
+	// Then the generic core does not interpret or rewrite plugin-owned fields
+	if response.PluginConfig["secret"] != "plugin-owned-secret" {
+		t.Fatalf("response changed plugin-owned config: %#v", response.PluginConfig)
+	}
+	if response.PluginConfig["base_url"] != "https://router.example" {
+		t.Fatalf("response base_url = %#v", response.PluginConfig["base_url"])
+	}
+}
+
+func TestHandleCreateIntegrationTreatsCapabilityAndConfigAsOpaque(t *testing.T) {
+	// Given a capability name that must not select a host-side provider parser
+	capabilityID := strings.Join([]string{"listen", "arr"}, "")
+	integration := mediarequests.Integration{
+		CapabilityID: capabilityID,
+		PluginConfig: map[string]any{
+			"timeout": "provider-defined",
+			"nested":  map[string]any{"value": "unchanged"},
+		},
+	}
+
+	// When the integration crosses the HTTP boundary
+	h := NewRequestsHandler(&fakeRequestService{})
+	body, err := json.Marshal(integration)
+	if err != nil {
+		t.Fatalf("marshal integration: %v", err)
+	}
+	req := authedRequest("POST", "/api/v1/requests/integrations")
+	req.Body = io.NopCloser(strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	h.HandleCreateIntegration(rec, req)
+
+	// Then the provider-owned shape is accepted without host interpretation
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	var response requestIntegrationResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.CapabilityID != capabilityID || response.PluginConfig["timeout"] != "provider-defined" {
+		t.Fatalf("response changed opaque integration: %+v", response)
+	}
+}
+
+func TestHandleListMineExposesNullableAudiobookLifecycleFields(t *testing.T) {
+	// Given an audiobook request with external status and final Silo link.
+	request := &mediarequests.Request{
+		ID:                 "request-1",
+		MediaType:          mediarequests.MediaTypeAudiobook,
+		Title:              "A Book",
+		ExternalStatus:     "scanning",
+		ExternalDetail:     "Silo is scanning the imported folder",
+		ExternalLibraryID:  "external-library-1",
+		ExternalDownloadID: "external-download-1",
+		SiloAudiobookID:    "silo-book-1",
+		SiloAudiobookLink:  "/api/v1/items/silo-book-1",
+	}
+
+	// When the request list is rendered through the user-facing API.
+	h := NewRequestsHandler(&fakeRequestService{listMineFn: func() ([]*mediarequests.Request, error) {
+		return []*mediarequests.Request{request}, nil
+	}})
+	rec := httptest.NewRecorder()
+	h.HandleListMine(rec, authedRequest("GET", "/api/v1/requests/mine"))
+
+	// Then stable nullable fields are present without exposing configuration secrets.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Requests []map[string]any `json:"requests"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Requests) != 1 {
+		t.Fatalf("requests = %+v, want one request", body.Requests)
+	}
+	row := body.Requests[0]
+	for _, field := range []string{"external_status", "external_detail", "external_library_id", "external_download_id", "silo_audiobook_link"} {
+		if _, present := row[field]; !present {
+			t.Fatalf("field %q missing from response: %+v", field, row)
+		}
+	}
+	if row["external_status"] != "scanning" || row["silo_audiobook_link"] != "/api/v1/items/silo-book-1" {
+		t.Fatalf("lifecycle fields = %+v", row)
+	}
+	if strings.Contains(rec.Body.String(), "api_key") || strings.Contains(rec.Body.String(), "secret") {
+		t.Fatalf("response contains configuration secret material: %s", rec.Body.String())
+	}
+}
+
+func TestHandleListMineSerializesMissingAudiobookLifecycleFieldsAsNull(t *testing.T) {
+	// Given an audiobook request that has not reached an external provider.
+	request := &mediarequests.Request{ID: "request-2", MediaType: mediarequests.MediaTypeAudiobook, Title: "Pending"}
+	h := NewRequestsHandler(&fakeRequestService{listMineFn: func() ([]*mediarequests.Request, error) {
+		return []*mediarequests.Request{request}, nil
+	}})
+
+	// When the request list is rendered.
+	rec := httptest.NewRecorder()
+	h.HandleListMine(rec, authedRequest("GET", "/api/v1/requests/mine"))
+
+	// Then clients receive explicit nulls rather than an unstable missing shape.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Requests []map[string]any `json:"requests"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	row := body.Requests[0]
+	for _, field := range []string{"external_status", "external_detail", "external_library_id", "external_download_id", "silo_audiobook_link"} {
+		if value, present := row[field]; !present || value != nil {
+			t.Fatalf("field %q = (%v, %t), want explicit null", field, value, present)
+		}
 	}
 }
 

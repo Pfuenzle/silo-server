@@ -2704,6 +2704,9 @@ func main() {
 		}))
 		requestReconcileSvc.SetRequesterIdentityResolver(plugins.RequesterIdentityFromLookup(plugins.NewPgUserIdentityLookup(deps.DB)))
 		api.AttachRequestRouter(requestReconcileSvc, pluginService)
+		if err := api.AttachAudiobookImport(requestReconcileSvc, deps.LibraryScanQueue, deps.FolderRepo, deps.FileRepo, itemRepo); err != nil {
+			slog.Warn("requests: audiobook import linker unavailable", "error", err)
+		}
 		requestReconcileSvc.SetGroupPolicyProvider(accessGroupStore)
 		if userStoreProvider != nil {
 			userRepo := auth.NewUserRepository(deps.DB)
@@ -2786,26 +2789,30 @@ func main() {
 	// available. Routes are mounted at the root level by NewRouter (not under
 	// /api/v1/) so ABS clients resolve /login, /api/*, /abs/api/*, and
 	// /abs/socket.io/* without path prefix hacks.
-	if absCompatEnabled && deps.DB != nil {
-		absUserRepo := auth.NewUserRepository(deps.DB)
-		absSessionRepo := auth.NewSessionRepository(deps.DB)
-		absJWTService := auth.NewJWTService(
+	var compatibilityAuthService *auth.Service
+	if deps.DB != nil {
+		compatUserRepo := auth.NewUserRepository(deps.DB)
+		compatSessionRepo := auth.NewSessionRepository(deps.DB)
+		compatJWTService := auth.NewJWTService(
 			cfg.Auth.JWTSecret,
 			cfg.Auth.AccessTokenExpiry,
 			cfg.Auth.RefreshTokenExpiry,
 		)
 		configWatcher.OnChange(func(_, updated *config.Config) {
-			absJWTService.SetExpiries(updated.Auth.AccessTokenExpiry, updated.Auth.RefreshTokenExpiry)
+			compatJWTService.SetExpiries(updated.Auth.AccessTokenExpiry, updated.Auth.RefreshTokenExpiry)
 		})
-		absAuthSvc := auth.NewService(
-			auth.NewLocalProvider(absUserRepo, absSessionRepo),
-			absJWTService,
-			absSessionRepo,
-			absUserRepo,
-			nil, // invite codes: not needed for ABS compat
-			nil, // settings: not needed here
-			nil, // user store: not needed here
+		compatibilityAuthService = auth.NewService(
+			auth.NewLocalProvider(compatUserRepo, compatSessionRepo),
+			compatJWTService,
+			compatSessionRepo,
+			compatUserRepo,
+			nil,
+			settingsRepo,
+			userStoreProvider,
 		)
+	}
+	if absCompatEnabled && deps.DB != nil {
+		absUserRepo := auth.NewUserRepository(deps.DB)
 		absItemRepo := catalog.NewItemRepository(deps.DB)
 		absEpisodeRepo := catalog.NewEpisodeRepository(deps.DB)
 		absSeasonRepo := catalog.NewSeasonRepository(deps.DB)
@@ -2830,7 +2837,7 @@ func main() {
 			Files:    deps.FileRepo,
 			Settings: settingsRepo,
 			Auth: &audiobooks.SiloCredValidator{
-				Auth: absAuthSvc,
+				Auth: compatibilityAuthService,
 				Pool: deps.DB,
 			},
 			AccessResolver: audiobooks.NewABSAccessResolver(absUserRepo, userStoreProvider, absScopeResolver, accessGroupStore),
@@ -2943,6 +2950,11 @@ func main() {
 					deps.PluginService,
 				),
 			})
+		}
+	}
+	if compatibilityAuthService != nil {
+		for _, registration := range deps.AuthProviders {
+			compatibilityAuthService.RegisterProvider(registration.Info, registration.Provider)
 		}
 	}
 
@@ -3167,22 +3179,11 @@ func main() {
 
 			compatDeps.SubtitleRepo = subtitles.NewPgRepository(deps.DB, deps.SecretCipher)
 
-			// Construct auth service for jellycompat login.
 			userRepo := auth.NewUserRepository(deps.DB)
 			compatDeps.APIKeyValidator = auth.NewAPIKeyRepository(deps.DB)
 			compatDeps.APIKeyUserLoader = userRepo
 			compatDeps.ScanQueue = deps.LibraryScanQueue
-			sessionRepo := auth.NewSessionRepository(deps.DB)
-			jwtService := auth.NewJWTService(
-				cfg.Auth.JWTSecret,
-				cfg.Auth.AccessTokenExpiry,
-				cfg.Auth.RefreshTokenExpiry,
-			)
-			configWatcher.OnChange(func(_, updated *config.Config) {
-				jwtService.SetExpiries(updated.Auth.AccessTokenExpiry, updated.Auth.RefreshTokenExpiry)
-			})
-			provider := auth.NewLocalProvider(userRepo, sessionRepo)
-			compatDeps.AuthService = auth.NewService(provider, jwtService, sessionRepo, userRepo, nil, nil, nil)
+			compatDeps.AuthService = compatibilityAuthService
 
 			// Access filter resolver for viewer-scoped library access.
 			// Backed by the shared access.Resolver so account-level library

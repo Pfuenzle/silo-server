@@ -130,40 +130,57 @@ type EffectivePolicy struct {
 }
 
 type Request struct {
-	ID                   string    `json:"id"`
-	Provider             string    `json:"provider"`
-	ProviderItemID       string    `json:"provider_item_id,omitempty"`
-	MediaType            MediaType `json:"media_type"`
-	TMDBID               int       `json:"tmdb_id"`
-	TVDBID               *int      `json:"tvdb_id,omitempty"`
-	IMDbID               string    `json:"imdb_id,omitempty"`
-	Title                string    `json:"title"`
-	Year                 *int      `json:"year,omitempty"`
-	Overview             string    `json:"overview,omitempty"`
-	PosterPath           string    `json:"poster_path,omitempty"`
-	BackdropPath         string    `json:"backdrop_path,omitempty"`
-	Status               Status    `json:"status"`
-	Outcome              Outcome   `json:"outcome"`
-	RequestedByUserID    int       `json:"requested_by_user_id,omitempty"`
-	RequestedByProfileID string    `json:"requested_by_profile_id,omitempty"`
-	RequesterEmail       string    `json:"-"`
-	RequesterUsername    string    `json:"-"`
+	ID                   string     `json:"id"`
+	FulfillmentKey       string     `json:"-"`
+	SubmissionState      string     `json:"-"`
+	SubmissionStartedAt  *time.Time `json:"-"`
+	Provider             string     `json:"provider"`
+	ProviderItemID       string     `json:"provider_item_id,omitempty"`
+	MediaType            MediaType  `json:"media_type"`
+	TMDBID               int        `json:"tmdb_id"`
+	TVDBID               *int       `json:"tvdb_id,omitempty"`
+	IMDbID               string     `json:"imdb_id,omitempty"`
+	Title                string     `json:"title"`
+	Year                 *int       `json:"year,omitempty"`
+	Overview             string     `json:"overview,omitempty"`
+	PosterPath           string     `json:"poster_path,omitempty"`
+	BackdropPath         string     `json:"backdrop_path,omitempty"`
+	Status               Status     `json:"status"`
+	Outcome              Outcome    `json:"outcome"`
+	RequestedByUserID    int        `json:"requested_by_user_id,omitempty"`
+	RequestedByProfileID string     `json:"requested_by_profile_id,omitempty"`
+	RequesterEmail       string     `json:"-"`
+	RequesterUsername    string     `json:"-"`
 	// DeclineReason is the admin's decline message, populated transiently for
 	// the lifecycle notifier (the durable copy lives in the request event
 	// record, not on this row).
-	DeclineReason    string     `json:"-"`
-	IntegrationKind  string     `json:"integration_kind,omitempty"`
-	IsAnime          bool       `json:"is_anime"`
-	Targets          []Target   `json:"targets,omitempty"`
-	ExternalID       string     `json:"external_id,omitempty"`
-	ExternalStatus   string     `json:"external_status,omitempty"`
-	LibraryContentID string     `json:"library_content_id,omitempty"`
-	LastError        string     `json:"last_error,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	ApprovedAt       *time.Time `json:"approved_at,omitempty"`
-	CompletedAt      *time.Time `json:"completed_at,omitempty"`
+	DeclineReason      string     `json:"-"`
+	IntegrationKind    string     `json:"integration_kind,omitempty"`
+	IsAnime            bool       `json:"is_anime"`
+	Targets            []Target   `json:"targets,omitempty"`
+	ExternalID         string     `json:"external_id,omitempty"`
+	ExternalStatus     string     `json:"external_status,omitempty"`
+	ExternalLibraryID  string     `json:"external_library_id,omitempty"`
+	ExternalDownloadID string     `json:"external_download_id,omitempty"`
+	ExternalDetail     string     `json:"external_detail,omitempty"`
+	ImportedPath       string     `json:"-"`
+	ScanRunID          string     `json:"-"`
+	SiloAudiobookID    string     `json:"silo_audiobook_id,omitempty"`
+	SiloAudiobookLink  string     `json:"silo_audiobook_link,omitempty"`
+	Retryable          bool       `json:"retryable"`
+	LibraryContentID   string     `json:"library_content_id,omitempty"`
+	LastError          string     `json:"last_error,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	ApprovedAt         *time.Time `json:"approved_at,omitempty"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
 }
+
+const (
+	SubmissionStateInFlight  = "in_flight"
+	SubmissionStateFulfilled = "fulfilled"
+	SubmissionStateFailed    = "failed"
+)
 
 type RequestEvent struct {
 	ID             int64     `json:"id"`
@@ -299,6 +316,18 @@ type FulfillmentStatus struct {
 	ExternalID      string
 	ExternalStatus  string
 	Message         string
+}
+
+type RequestLifecycle struct {
+	ExternalLibraryID  string
+	ExternalDownloadID string
+	ExternalStatus     string
+	ExternalDetail     string
+	ImportedPath       string
+	ScanRunID          string
+	SiloAudiobookID    string
+	SiloAudiobookLink  string
+	Retryable          bool
 }
 
 type ReconcileResult struct {

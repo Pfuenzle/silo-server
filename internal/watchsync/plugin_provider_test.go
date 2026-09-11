@@ -24,22 +24,42 @@ const (
 )
 
 type fakeWatchSyncPluginClient struct {
-	exchangeResponse    *pluginv1.WatchSyncCredentialResponse
-	refreshResponse     *pluginv1.WatchSyncCredentialResponse
-	accountResponse     *pluginv1.WatchSyncGetAccountResponse
-	applyResponse       *pluginv1.WatchSyncApplyEventsResponse
-	deviceStartResponse *pluginv1.WatchSyncDeviceAuthorizationServiceStartResponse
-	devicePollResponse  *pluginv1.WatchSyncDeviceAuthorizationServicePollResponse
-	listResponse        *pluginv1.WatchSyncListRemoteStateResponse
-	listResponses       []*pluginv1.WatchSyncListRemoteStateResponse
-	applyErr            error
-	applyRequest        *pluginv1.WatchSyncApplyEventsRequest
-	exchangeRequest     *pluginv1.WatchSyncExchangeAPIKeyRequest
-	refreshRequest      *pluginv1.WatchSyncRefreshCredentialsRequest
-	accountRequest      *pluginv1.WatchSyncGetAccountRequest
-	deviceStartRequest  *pluginv1.WatchSyncDeviceAuthorizationServiceStartRequest
-	devicePollRequest   *pluginv1.WatchSyncDeviceAuthorizationServicePollRequest
-	listRequests        []*pluginv1.WatchSyncListRemoteStateRequest
+	initAuthorizeResponse *pluginv1.WatchSyncInitAuthorizeResponse
+	exchangeCodeResponse  *pluginv1.WatchSyncCredentialResponse
+	exchangeResponse      *pluginv1.WatchSyncCredentialResponse
+	refreshResponse       *pluginv1.WatchSyncCredentialResponse
+	accountResponse       *pluginv1.WatchSyncGetAccountResponse
+	applyResponse         *pluginv1.WatchSyncApplyEventsResponse
+	deviceStartResponse   *pluginv1.WatchSyncDeviceAuthorizationServiceStartResponse
+	devicePollResponse    *pluginv1.WatchSyncDeviceAuthorizationServicePollResponse
+	listResponse          *pluginv1.WatchSyncListRemoteStateResponse
+	listResponses         []*pluginv1.WatchSyncListRemoteStateResponse
+	applyErr              error
+	applyRequest          *pluginv1.WatchSyncApplyEventsRequest
+	exchangeRequest       *pluginv1.WatchSyncExchangeAPIKeyRequest
+	refreshRequest        *pluginv1.WatchSyncRefreshCredentialsRequest
+	accountRequest        *pluginv1.WatchSyncGetAccountRequest
+	deviceStartRequest    *pluginv1.WatchSyncDeviceAuthorizationServiceStartRequest
+	devicePollRequest     *pluginv1.WatchSyncDeviceAuthorizationServicePollRequest
+	listRequests          []*pluginv1.WatchSyncListRemoteStateRequest
+	initAuthorizeRequest  *pluginv1.WatchSyncInitAuthorizeRequest
+	exchangeCodeRequest   *pluginv1.WatchSyncExchangeCodeRequest
+}
+
+func (f *fakeWatchSyncPluginClient) InitAuthorize(_ context.Context, req *pluginv1.WatchSyncInitAuthorizeRequest) (*pluginv1.WatchSyncInitAuthorizeResponse, error) {
+	f.initAuthorizeRequest = req
+	if f.initAuthorizeResponse != nil {
+		return f.initAuthorizeResponse, nil
+	}
+	return &pluginv1.WatchSyncInitAuthorizeResponse{}, nil
+}
+
+func (f *fakeWatchSyncPluginClient) ExchangeCode(_ context.Context, req *pluginv1.WatchSyncExchangeCodeRequest) (*pluginv1.WatchSyncCredentialResponse, error) {
+	f.exchangeCodeRequest = req
+	if f.exchangeCodeResponse != nil {
+		return f.exchangeCodeResponse, nil
+	}
+	return &pluginv1.WatchSyncCredentialResponse{}, nil
 }
 
 func (f *fakeWatchSyncPluginClient) StartDeviceAuthorization(_ context.Context, req *pluginv1.WatchSyncDeviceAuthorizationServiceStartRequest) (*pluginv1.WatchSyncDeviceAuthorizationServiceStartResponse, error) {
@@ -141,8 +161,8 @@ func TestPluginProviderUsesConnectionSpecificHistorySource(t *testing.T) {
 	}
 }
 
-func TestPluginProviderRejectsUnsupportedInitialDescriptor(t *testing.T) {
-	_, err := NewPluginProvider(PluginProviderOptions{
+func TestPluginProviderAcceptsAuthorizationCodeDescriptor(t *testing.T) {
+	provider, err := NewPluginProvider(PluginProviderOptions{
 		InstallationID: 4,
 		ProviderKey:    testPluginProviderKey,
 		CapabilityID:   testPluginCapabilityID,
@@ -152,8 +172,11 @@ func TestPluginProviderRejectsUnsupportedInitialDescriptor(t *testing.T) {
 		},
 		ResolveClient: func(context.Context, int, string) (WatchSyncPluginClient, error) { return nil, nil },
 	})
-	if err == nil {
-		t.Fatal("expected authorization-code-only descriptor to be rejected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.AuthMethod() != AuthMethodAuthorizationCode {
+		t.Fatalf("auth method = %q, want %q", provider.AuthMethod(), AuthMethodAuthorizationCode)
 	}
 
 	_, err = NewPluginProvider(PluginProviderOptions{
@@ -201,6 +224,45 @@ func TestPluginProviderConnectsAPIKeyWithoutPersistingInPluginConfig(t *testing.
 	}
 	if tokens.AccessToken != testValidatedToken || account.ID != "7" || account.Username != testPluginUsername {
 		t.Fatalf("tokens=%#v account=%#v", tokens, account)
+	}
+}
+
+func TestPluginProviderSupportsAuthorizationCode(t *testing.T) {
+	client := &fakeWatchSyncPluginClient{
+		initAuthorizeResponse: &pluginv1.WatchSyncInitAuthorizeResponse{
+			AuthorizationUrl: "https://provider.example/oauth?state=host-state",
+			ProviderState:    []byte("provider-state"),
+		},
+		exchangeCodeResponse: &pluginv1.WatchSyncCredentialResponse{
+			Credentials: &pluginv1.WatchSyncCredentials{AccessToken: testAccessToken, RefreshToken: testRefreshToken, TokenType: testBearerTokenType},
+			Account:     &pluginv1.WatchSyncAccount{ExternalSubject: "account-7", Username: testPluginUsername},
+		},
+	}
+	provider := testPluginProviderWithDescriptor(t, client, &pluginv1.WatchSyncProviderDescriptor{
+		AuthMethods:   []pluginv1.WatchSyncAuthMethod{pluginv1.WatchSyncAuthMethod_WATCH_SYNC_AUTH_METHOD_AUTHORIZATION_CODE},
+		ExportWatched: true,
+	})
+
+	session, err := provider.StartAuthorizationCodeAuth(context.Background(), "https://silo.example/api/v1/watch-providers/plugin:4:anilist/auth/callback", "host-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.AuthorizeURL != "https://provider.example/oauth?state=host-state" || session.ProviderState != base64.RawURLEncoding.EncodeToString([]byte("provider-state")) {
+		t.Fatalf("authorization session = %#v", session)
+	}
+	if client.initAuthorizeRequest.GetRedirectUri() != "https://silo.example/api/v1/watch-providers/plugin:4:anilist/auth/callback" || client.initAuthorizeRequest.GetState() != "host-state" {
+		t.Fatalf("init authorize request = %#v", client.initAuthorizeRequest)
+	}
+
+	tokens, account, err := provider.CompleteAuthorizationCodeAuth(context.Background(), "provider-code", session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens.AccessToken != testAccessToken || tokens.RefreshToken != testRefreshToken || account.ID != "account-7" || account.Username != testPluginUsername {
+		t.Fatalf("tokens=%#v account=%#v", tokens, account)
+	}
+	if client.exchangeCodeRequest.GetAuthorizationCode() != "provider-code" || string(client.exchangeCodeRequest.GetProviderState()) != "provider-state" {
+		t.Fatalf("exchange code request = %#v", client.exchangeCodeRequest)
 	}
 }
 

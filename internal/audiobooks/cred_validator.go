@@ -51,7 +51,7 @@ func (v *SiloCredValidator) Validate(
 
 	// Authenticate using just the user portion. DeviceName and IP are
 	// informational for session bookkeeping only.
-	_, user, err := v.Auth.Login(ctx, authName, password, "abs-compat", "")
+	_, user, err := v.Auth.LoginWithProvider(ctx, "", authName, password, "abs-compat", "")
 	if err != nil {
 		// Propagate auth sentinel errors as-is so callers can distinguish
 		// "bad credentials" (ErrInvalidCredentials) from "service down".

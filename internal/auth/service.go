@@ -78,6 +78,10 @@ type Service struct {
 	accounts    *AccountProvisioner
 }
 
+type sessionProviderKeyer interface {
+	SessionProviderKey() (models.SessionProviderKey, error)
+}
+
 type LoginProviderInfo struct {
 	ID          string `json:"id"`
 	DisplayName string `json:"display_name"`
@@ -343,11 +347,10 @@ func (s *Service) providerSessionKey(providerID string) (models.SessionProviderK
 	if providerID == "local" {
 		return models.LocalSessionProviderKey(), nil
 	}
-	provider, ok := s.providers[providerID].(*PluginProvider)
-	if !ok || provider == nil {
-		return models.SessionProviderKey{}, ErrInvalidCredentials
+	if keyer, ok := s.providers[providerID].(sessionProviderKeyer); ok {
+		return keyer.SessionProviderKey()
 	}
-	return models.NewPluginSessionProviderKey(provider.InstallationID(), provider.CapabilityID())
+	return models.SessionProviderKey{}, ErrInvalidCredentials
 }
 
 // NeedsSetup reports whether the system still needs its initial user account.

@@ -65,10 +65,10 @@ func (r *LoginResolver) Resolve(ctx context.Context, combinedUsername, password,
 
 	// Try auth with full password first, fall back to base#pin split.
 	basePw, pinCandidate := splitPasswordPIN(password)
-	tokenPair, user, err := r.authService.Login(ctx, accountUsername, password, userAgent, remoteIP)
+	tokenPair, user, err := r.authService.LoginWithProvider(ctx, "", accountUsername, password, userAgent, remoteIP)
 	if err != nil && basePw != "" {
 		// Full password failed and there's a # — try the base portion.
-		tokenPair, user, err = r.authService.Login(ctx, accountUsername, basePw, userAgent, remoteIP)
+		tokenPair, user, err = r.authService.LoginWithProvider(ctx, "", accountUsername, basePw, userAgent, remoteIP)
 		if err != nil {
 			return nil, mapAuthError(err)
 		}

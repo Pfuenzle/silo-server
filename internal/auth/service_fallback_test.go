@@ -10,11 +10,17 @@ import (
 )
 
 type mockAuthProvider struct {
-	user *models.User
-	err  error
+	user  *models.User
+	err   error
+	calls int
+}
+
+func (m *mockAuthProvider) SessionProviderKey() (models.SessionProviderKey, error) {
+	return models.LocalSessionProviderKey(), nil
 }
 
 func (m *mockAuthProvider) Authenticate(_ context.Context, _ Credentials) (*models.User, error) {
+	m.calls++
 	return m.user, m.err
 }
 
@@ -195,6 +201,58 @@ func TestLoginWithProvider_ExplicitProvider_NoFallback(t *testing.T) {
 	}
 	if !errors.Is(err, ErrAccountNotFound) {
 		t.Fatalf("expected ErrAccountNotFound (no fallback for explicit), got: %v", err)
+	}
+}
+
+func TestLoginWithProvider_EmptyProviderID_UsesConfiguredOrder(t *testing.T) {
+	// Given
+	local := &mockAuthProvider{err: ErrAccountNotFound}
+	ldap := &mockAuthProvider{err: ErrAccountNotFound}
+	svc := newTestService(
+		map[string]AuthProvider{"local": local, "ldap": ldap},
+		map[string]LoginProviderInfo{
+			"local": {ID: "local", Mode: "credentials"},
+			"ldap":  {ID: "ldap", Mode: "credentials"},
+		},
+		"local",
+		map[string]string{SettingKeyCredentialProviderFallback: `["local","ldap"]`},
+	)
+
+	// When
+	_, _, err := svc.LoginWithProvider(context.Background(), "", "testuser", "pass", "test", "127.0.0.1")
+
+	// Then
+	if err == nil || !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("LoginWithProvider() error = %v, want ErrInvalidCredentials after both providers", err)
+	}
+	if local.calls != 1 || ldap.calls != 1 {
+		t.Fatalf("provider calls = (local %d, ldap %d), want (1, 1)", local.calls, ldap.calls)
+	}
+}
+
+func TestLoginWithFallback_InvalidPassword_DoesNotTryNextProvider(t *testing.T) {
+	// Given
+	local := &mockAuthProvider{err: ErrInvalidCredentials}
+	ldap := &mockAuthProvider{err: ErrInvalidCredentials}
+	svc := newTestService(
+		map[string]AuthProvider{"local": local, "ldap": ldap},
+		map[string]LoginProviderInfo{
+			"local": {ID: "local", Mode: "credentials"},
+			"ldap":  {ID: "ldap", Mode: "credentials"},
+		},
+		"local",
+		map[string]string{SettingKeyCredentialProviderFallback: `[]`},
+	)
+
+	// When
+	_, _, err := svc.loginWithFallback(context.Background(), CredentialProviderPolicy{providerIDs: []string{"local", "ldap"}}, "testuser", "wrongpass", "test", "127.0.0.1")
+
+	// Then
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("loginWithFallback() error = %v, want ErrInvalidCredentials", err)
+	}
+	if local.calls != 1 || ldap.calls != 0 {
+		t.Fatalf("provider calls = (local %d, ldap %d), want (1, 0)", local.calls, ldap.calls)
 	}
 }
 

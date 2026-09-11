@@ -525,10 +525,6 @@ export const ADMIN_SETTINGS_GROUPS: AdminSettingsSearchGroup[] = [
   },
 ];
 
-export const ADMIN_SETTINGS_NAV = ADMIN_SETTINGS_GROUPS.flatMap((group) => group.items);
-
-const ADMIN_SETTINGS_PAGE_IDS = new Set(ADMIN_SETTINGS_NAV.map((item) => item.id));
-
 export const LEGACY_ADMIN_SETTINGS_PAGE_ALIASES: Readonly<Record<string, string>> = {
   branding: "appearance",
   theming: "appearance",
@@ -547,6 +543,17 @@ export const LEGACY_ADMIN_SETTINGS_PAGE_ALIASES: Readonly<Record<string, string>
   storage: "infrastructure",
   "log-retention": "infrastructure",
 };
+
+export const ADMIN_SETTINGS_NAV = ADMIN_SETTINGS_GROUPS.flatMap((group) => group.items)
+  .map((item) => ({
+    ...item,
+    id: LEGACY_ADMIN_SETTINGS_PAGE_ALIASES[item.id] ?? item.id,
+  }))
+  .filter(
+    (item, index, items) => items.findIndex((candidate) => candidate.id === item.id) === index,
+  );
+
+const ADMIN_SETTINGS_PAGE_IDS = new Set(ADMIN_SETTINGS_NAV.map((item) => item.id));
 
 export function resolveAdminSettingsPageID(value: string | null): string | null {
   if (!value) return null;

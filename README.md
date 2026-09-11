@@ -88,6 +88,51 @@ printf '\nPOSTGRES_PASSWORD=%s\nSECRET_KEY=%s\n' \
 ```
 
 Set `MEDIA_ROOT` in `.env` to the absolute path of your media, then:
+If you are splitting workers across multiple hosts, use the separate remote worker example instead of trying to stretch the main compose file across machines.
+
+### Advanced Remote Node Example
+
+For a dedicated remote transcode worker, use [docker-compose.remote-transcode.yml](docker-compose.remote-transcode.yml). That file is intended for a separate worker host that connects back to an existing Silo deployment using shared PostgreSQL and Redis.
+
+### Deployment Notes
+
+The default compose stack intentionally bundles PostgreSQL and Redis for ease of setup and assumes a fresh install without those services already available. If you already operate PostgreSQL and Redis, omit those examples from compose and point Silo at your existing infrastructure instead. For serious installs, PostgreSQL is better on a separate VM or a managed service so upgrades, tuning, and backups are isolated from the app host. Redis can stay local for many installs, but externalizing it is also reasonable if you already operate shared infrastructure.
+
+Silo is externally stateful by default rather than fully stateless. Durable application state lives in PostgreSQL. Redis only stores coordination and cache-style data. Silo still writes transient transcode output locally under `/tmp/silo-transcode`. If you switch `userdb.backend=sqlite`, Silo also becomes locally stateful at `/var/lib/silo/userdb`.
+
+Migrating an existing Continuum Docker install should be done with the preflight
+helper and cutover guide in [docs/continuum-to-silo-docker-migration.md](docs/continuum-to-silo-docker-migration.md).
+
+## Configuration
+
+Silo requires only a `DATABASE_URL` when running from source or against external infrastructure. In the default Docker Compose path, the stack wires the database and Redis URLs for you. All other settings — libraries, metadata providers, transcoding, users — are managed through the admin UI after first launch.
+
+For OIDC or LDAP login, follow the [external authentication operator and security guide](docs/external-auth.md). It covers the local break-glass prerequisite, provider setup, restart boundary, authorization mappings, rollback, and recovery.
+
+### Server Modes
+
+| Mode | Description |
+|---|---|
+| `integrated` | Full server: API + frontend + scanner + transcode (default) |
+| `api` | API server only, no local transcoding |
+| `proxy` | Stream proxy node that connects to the shared deployment database and Redis |
+| `transcode` | HLS transcode worker node that connects to the shared deployment database and Redis |
+
+### PostgreSQL Auto-Tuning
+
+The default Docker Compose stack does not require a checked-in `postgresql.conf`.
+It enables Silo's [pgtune](https://github.com/le0pard/pgtune)-style OLTP tuning
+by default:
+
+```yaml
+POSTGRES_TUNE: auto
+```
+
+When enabled, Silo connects with `DATABASE_URL` and applies recommendations with
+`ALTER SYSTEM`, which writes to PostgreSQL's `postgresql.auto.conf` inside the
+database data directory. Reloadable settings are applied immediately with
+`pg_reload_conf()`. Settings that PostgreSQL marks as restart-only are written
+too, and Silo logs the setting names so you can restart PostgreSQL once:
 
 ```sh
 docker compose up -d

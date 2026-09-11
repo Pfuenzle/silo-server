@@ -38,8 +38,9 @@ const (
 )
 
 const (
-	AuthMethodDeviceCode = "device_code"
-	AuthMethodAPIKey     = "api_key"
+	AuthMethodDeviceCode        = "device_code"
+	AuthMethodAPIKey            = "api_key"
+	AuthMethodAuthorizationCode = "authorization_code"
 )
 
 type Provider interface {
@@ -73,6 +74,24 @@ type authoritativeRefreshProvider interface {
 // working unchanged.
 type APIKeyAuthProvider interface {
 	ConnectWithAPIKey(ctx context.Context, apiKey string) (TokenSet, ProviderAccount, error)
+}
+
+type AuthorizationCodeAuthProvider interface {
+	StartAuthorizationCodeAuth(ctx context.Context, redirectURI string, state string) (AuthorizationCodeSession, error)
+	CompleteAuthorizationCodeAuth(ctx context.Context, code string, session AuthorizationCodeSession) (TokenSet, ProviderAccount, error)
+}
+
+type AuthorizationCodeSession struct {
+	ID            string
+	Provider      string
+	UserID        int
+	ProfileID     string
+	RedirectURI   string
+	State         string
+	ProviderState string
+	AuthorizeURL  string
+	ExpiresAt     time.Time
+	CompletedAt   *time.Time
 }
 
 // ConnectionConfigValues contains manifest-declared, per-connection setup

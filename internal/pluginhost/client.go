@@ -408,6 +408,18 @@ func (c *WatchSyncProviderClient) ExchangeAPIKey(ctx context.Context, req *plugi
 	return c.client.ExchangeAPIKey(callCtx, req)
 }
 
+func (c *WatchSyncProviderClient) InitAuthorize(ctx context.Context, req *pluginv1.WatchSyncInitAuthorizeRequest) (*pluginv1.WatchSyncInitAuthorizeResponse, error) {
+	callCtx, cancel := ensureDeadline(ctx, c.timeout)
+	defer cancel()
+	return c.client.InitAuthorize(callCtx, req)
+}
+
+func (c *WatchSyncProviderClient) ExchangeCode(ctx context.Context, req *pluginv1.WatchSyncExchangeCodeRequest) (*pluginv1.WatchSyncCredentialResponse, error) {
+	callCtx, cancel := ensureDeadline(ctx, c.timeout)
+	defer cancel()
+	return c.client.ExchangeCode(callCtx, req)
+}
+
 func (c *WatchSyncProviderClient) StartDeviceAuthorization(ctx context.Context, req *pluginv1.WatchSyncDeviceAuthorizationServiceStartRequest) (*pluginv1.WatchSyncDeviceAuthorizationServiceStartResponse, error) {
 	callCtx, cancel := ensureDeadline(ctx, c.timeout)
 	defer cancel()

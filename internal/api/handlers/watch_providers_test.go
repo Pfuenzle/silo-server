@@ -20,6 +20,7 @@ import (
 type stubWatchProviderService struct {
 	providers []watchsync.ProviderSummary
 	session   watchsync.DeviceAuthSession
+	oauth     watchsync.AuthorizationCodeSession
 	manual    watchsync.ManualSyncResult
 	manualErr error
 	runs      []watchsync.SyncRun
@@ -51,6 +52,12 @@ func (s stubWatchProviderService) StartDeviceAuth(context.Context, int, string, 
 	return s.session, nil
 }
 func (s stubWatchProviderService) PollDeviceAuth(context.Context, int, string, string, string) (watchsync.Connection, error) {
+	return watchsync.Connection{}, nil
+}
+func (s stubWatchProviderService) StartAuthorizationCodeAuth(context.Context, int, string, string, string) (watchsync.AuthorizationCodeSession, error) {
+	return s.oauth, nil
+}
+func (s stubWatchProviderService) CompleteAuthorizationCodeAuth(context.Context, string, string, string) (watchsync.Connection, error) {
 	return watchsync.Connection{}, nil
 }
 func (s stubWatchProviderService) ConnectAPIKeyWithConfig(context.Context, int, string, string, string, watchsync.ConnectionConfigValues) (watchsync.Connection, error) {
@@ -193,6 +200,53 @@ func TestWatchProviderHandlerStartsDeviceAuthWithFrontendJSONShape(t *testing.T)
 	}
 	if resp["verification_url"] != "https://trakt.tv/activate" {
 		t.Fatalf("verification_url = %#v, want https://trakt.tv/activate", resp["verification_url"])
+	}
+}
+
+func TestWatchProviderHandlerStartsAuthorizationCodeAuth(t *testing.T) {
+	handler := NewWatchProviderHandlerWithPublicURL(stubWatchProviderService{
+		oauth: watchsync.AuthorizationCodeSession{AuthorizeURL: "https://anilist.co/oauth/authorize?state=state-1"},
+	}, "https://silo.example")
+	req := httptest.NewRequest(http.MethodPost, "/watch-providers/plugin:4:anilist/auth/authorization-code", nil)
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("provider", "plugin:4:anilist")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx)
+	ctx = middleware.SetClaims(ctx, &auth.Claims{UserID: 7})
+	ctx = middleware.SetProfileID(ctx, "profile-1")
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	handler.HandleStartAuthorizationCodeAuth(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		AuthorizationURL string `json:"authorization_url"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.AuthorizationURL != "https://anilist.co/oauth/authorize?state=state-1" {
+		t.Fatalf("authorization_url = %q", resp.AuthorizationURL)
+	}
+}
+
+func TestWatchProviderHandlerCompletesAuthorizationCodeCallback(t *testing.T) {
+	handler := NewWatchProviderHandler(stubWatchProviderService{})
+	req := httptest.NewRequest(http.MethodGet, "/watch-providers/plugin:4:anilist/auth/callback?state=state-1&code=code-1", nil)
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("provider", "plugin:4:anilist")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+	rec := httptest.NewRecorder()
+
+	handler.HandleAuthorizationCodeCallback(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusFound)
+	}
+	if location := rec.Header().Get("Location"); location != "/settings/watch-providers" {
+		t.Fatalf("location = %q, want /settings/watch-providers", location)
 	}
 }
 

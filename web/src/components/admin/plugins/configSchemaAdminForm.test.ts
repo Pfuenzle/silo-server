@@ -138,4 +138,30 @@ describe("adminFormForConfigSchema", () => {
       { key: "advanced", secret: true },
     ]);
   });
+
+  it("infers editable JSON controls for object arrays in plugin config", () => {
+    const form = adminFormForConfigSchema(
+      schema({
+        json_schema: JSON.stringify({
+          type: "object",
+          properties: {
+            path_mappings: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  source: { type: "string" },
+                  destination: { type: "string" },
+                },
+              },
+            },
+          },
+        }),
+      }),
+    );
+
+    expect(form?.fields).toEqual([
+      expect.objectContaining({ key: "path_mappings", control: "TEXTAREA", multiline: true }),
+    ]);
+  });
 });

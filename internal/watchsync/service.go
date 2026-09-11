@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Silo-Server/silo-server/internal/historyimport"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/watchstate"
@@ -51,8 +53,9 @@ type watchStateImporter interface {
 }
 
 const (
-	manualSyncCooldown = time.Hour
-	manualSyncTimeout  = 10 * time.Minute
+	manualSyncCooldown          = time.Hour
+	manualSyncTimeout           = 10 * time.Minute
+	authorizationCodeSessionTTL = 10 * time.Minute
 	// A completed stop may require a cold metadata lookup in a provider plugin.
 	// Match the plugin-host watch-sync deadline so the durable confirmation path
 	// does not cancel valid provider work before the RPC can finish. The reclaim
@@ -543,6 +546,131 @@ func (s *Service) PollDeviceAuth(
 	}
 
 	return conn, nil
+}
+
+func (s *Service) StartAuthorizationCodeAuth(
+	ctx context.Context,
+	userID int,
+	profileID string,
+	providerKey string,
+	redirectURI string,
+) (AuthorizationCodeSession, error) {
+	if userID <= 0 {
+		return AuthorizationCodeSession{}, fmt.Errorf("user id is required")
+	}
+	if profileID == "" {
+		return AuthorizationCodeSession{}, fmt.Errorf("profile id is required")
+	}
+	provider, ok := s.registry.Get(providerKey)
+	if !ok {
+		return AuthorizationCodeSession{}, fmt.Errorf("unknown provider %q", providerKey)
+	}
+	authProvider, ok := provider.(AuthorizationCodeAuthProvider)
+	if !ok {
+		return AuthorizationCodeSession{}, fmt.Errorf("provider %q does not support authorization-code auth", providerKey)
+	}
+
+	state := uuid.NewString()
+	session, err := authProvider.StartAuthorizationCodeAuth(ctx, redirectURI, state)
+	if err != nil {
+		return AuthorizationCodeSession{}, err
+	}
+	session.Provider = providerKey
+	session.UserID = userID
+	session.ProfileID = profileID
+	session.State = state
+	if session.ExpiresAt.IsZero() {
+		session.ExpiresAt = s.now().Add(authorizationCodeSessionTTL)
+	}
+	saved, err := s.repo.UpsertAuthSession(ctx, deviceAuthSessionFromAuthorizationCode(session))
+	if err != nil {
+		return AuthorizationCodeSession{}, err
+	}
+	session.ID = saved.ID
+	return session, nil
+}
+
+func (s *Service) CompleteAuthorizationCodeAuth(
+	ctx context.Context,
+	providerKey string,
+	state string,
+	code string,
+) (Connection, error) {
+	if strings.TrimSpace(state) == "" {
+		return Connection{}, fmt.Errorf("authorization state is required")
+	}
+	provider, ok := s.registry.Get(providerKey)
+	if !ok {
+		return Connection{}, fmt.Errorf("unknown provider %q", providerKey)
+	}
+	authProvider, ok := provider.(AuthorizationCodeAuthProvider)
+	if !ok {
+		return Connection{}, fmt.Errorf("provider %q does not support authorization-code auth", providerKey)
+	}
+	sessionRow, err := s.repo.GetAuthSession(ctx, state)
+	if err != nil {
+		return Connection{}, err
+	}
+	session, err := authorizationCodeSessionFromDeviceAuthSession(sessionRow)
+	if err != nil {
+		return Connection{}, err
+	}
+	if session.Provider != providerKey || session.State != state {
+		return Connection{}, fmt.Errorf("authorization session does not match provider")
+	}
+	if session.CompletedAt != nil {
+		return Connection{}, fmt.Errorf("authorization session is already completed")
+	}
+	if !session.ExpiresAt.IsZero() && !session.ExpiresAt.After(s.now()) {
+		return Connection{}, fmt.Errorf("authorization session has expired")
+	}
+	tokens, account, err := authProvider.CompleteAuthorizationCodeAuth(ctx, code, session)
+	if err != nil {
+		return Connection{}, err
+	}
+	conn, err := s.persistConnection(ctx, providerKey, session.UserID, session.ProfileID, tokens, account)
+	if err != nil {
+		return Connection{}, err
+	}
+	completedAt := s.now()
+	session.CompletedAt = &completedAt
+	if _, err := s.repo.UpsertAuthSession(ctx, deviceAuthSessionFromAuthorizationCode(session)); err != nil {
+		return Connection{}, err
+	}
+	return conn, nil
+}
+
+func deviceAuthSessionFromAuthorizationCode(session AuthorizationCodeSession) DeviceAuthSession {
+	return DeviceAuthSession{
+		ID:              session.State,
+		Provider:        session.Provider,
+		UserID:          session.UserID,
+		ProfileID:       session.ProfileID,
+		DeviceCode:      session.ProviderState,
+		UserCode:        session.RedirectURI,
+		VerificationURL: session.AuthorizeURL,
+		IntervalSeconds: 1,
+		ExpiresAt:       session.ExpiresAt,
+		CompletedAt:     session.CompletedAt,
+	}
+}
+
+func authorizationCodeSessionFromDeviceAuthSession(session DeviceAuthSession) (AuthorizationCodeSession, error) {
+	if session.ID == "" || session.UserCode == "" || session.VerificationURL == "" {
+		return AuthorizationCodeSession{}, fmt.Errorf("authorization session is incomplete")
+	}
+	return AuthorizationCodeSession{
+		ID:            session.ID,
+		Provider:      session.Provider,
+		UserID:        session.UserID,
+		ProfileID:     session.ProfileID,
+		RedirectURI:   session.UserCode,
+		State:         session.ID,
+		ProviderState: session.DeviceCode,
+		AuthorizeURL:  session.VerificationURL,
+		ExpiresAt:     session.ExpiresAt,
+		CompletedAt:   session.CompletedAt,
+	}, nil
 }
 
 func (s *Service) ConnectAPIKey(

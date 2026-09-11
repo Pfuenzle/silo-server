@@ -23,13 +23,13 @@ COPY go.mod go.sum ./
 COPY internal/compat/zishang520-webtransport-go/ internal/compat/zishang520-webtransport-go/
 # Apply the local SDK replacement before downloading modules. Copy its module
 # metadata first so SDK source edits do not invalidate the dependency layer.
-COPY --from=silo_plugin_sdk go.mod go.sum /tmp/silo-plugin-sdk/
-RUN test -f /tmp/silo-plugin-sdk/go.mod
+COPY --from=silo_plugin_sdk go.mod go.sum silo-plugin-sdk/
+RUN test -f silo-plugin-sdk/go.mod
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    go mod edit -replace=github.com/Silo-Server/silo-plugin-sdk=/tmp/silo-plugin-sdk && \
+    go mod edit -replace=github.com/Silo-Server/silo-plugin-sdk=./silo-plugin-sdk && \
     go mod download
-COPY --from=silo_plugin_sdk pkg/ /tmp/silo-plugin-sdk/pkg/
+COPY --from=silo_plugin_sdk pkg/ silo-plugin-sdk/pkg/
 COPY web/embed.go web/embed.go
 COPY --from=frontend /app/web/dist web/dist
 COPY cmd/ cmd/
