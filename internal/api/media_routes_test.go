@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,48 @@ func TestMediaRouteManifest(t *testing.T) {
 	for _, route := range nativeMediaRoutes {
 		if !route.Enrolled {
 			t.Fatalf("native route not enrolled: %s %s", route.Method, route.Pattern)
+		}
+	}
+}
+
+func TestNewRouter_mountsLiveTVSourcesAtTopLevelNativePath(t *testing.T) {
+	// Given the production router composition with database and library dependencies.
+	cfg, err := config.LoadFromDB(map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pgxpool.New(context.Background(), "postgres://nobody:nobody@127.0.0.1:1/none?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	router := NewRouter(Dependencies{DB: pool, Config: cfg, FolderRepo: catalog.NewFolderRepository(pool)})
+	wanted := map[string]bool{
+		"GET /livetv/libraries/{library_id}/sources/":                      true,
+		"POST /livetv/libraries/{library_id}/sources/":                     true,
+		"PUT /livetv/libraries/{library_id}/sources/{source_key}":          true,
+		"DELETE /livetv/libraries/{library_id}/sources/{source_key}":       true,
+		"POST /livetv/libraries/{library_id}/sources/{source_key}/refresh": true,
+	}
+	seen := make(map[string]bool)
+
+	// When the final NewRouter routes are walked.
+	if err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...string) error {
+		seen[method+" "+route] = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Then the documented routes exist and no /libraries prefix was inserted.
+	for route := range wanted {
+		if !seen[route] {
+			t.Fatalf("missing final NewRouter route %q; registered=%v", route, seen)
+		}
+	}
+	for route := range seen {
+		if strings.Contains(route, "/libraries/livetv/") {
+			t.Fatalf("final NewRouter nested Live TV source route under /libraries: %q", route)
 		}
 	}
 }

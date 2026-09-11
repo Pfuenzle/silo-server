@@ -5,23 +5,126 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-server/internal/api"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/livetv"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/plugins"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
 )
+
+func TestBuildLiveTVRuntime_RefreshesConfiguredSourceOnExplicitInvocation(t *testing.T) {
+	// Given the production Live TV runtime factory and a configured playlist source.
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/x-mpegurl")
+		_, _ = io.WriteString(w, "#EXTM3U\n#EXTINF:-1 tvg-id=\"fixture-1\",Fixture News\nhttp://stream.invalid/news\n")
+	}))
+	t.Cleanup(server.Close)
+	store := &liveTVSnapshotStore{}
+	runtime := livetv.NewRuntime(store, time.Unix(1700000000, 0).UTC(), livetv.FetchConfig{
+		Policy:   livetv.NetworkPolicy{MaxBodyBytes: 256},
+		Resolver: liveTVTestResolver{},
+		Dialer: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+		},
+	})
+
+	// When the configured-source refresh is explicitly invoked.
+	diagnostics, err := runtime.RefreshSource(context.Background(), livetv.Source{
+		ID:           42,
+		Kind:         livetv.SourceKindPlaylist,
+		SourceKey:    "fixture-source",
+		Location:     "http://source.example:8080/playlist",
+		RefreshState: "pending",
+	}, nil)
+
+	// Then production wiring executes ingestion without exposing the provider URL.
+	if err != nil {
+		t.Fatalf("RefreshSource: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("source requests = %d, want exactly one explicit refresh request", requests.Load())
+	}
+	if len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %#v, want empty", diagnostics)
+	}
+	if store.state != "ready" || len(store.snapshot.Channels) != 1 {
+		t.Fatalf("snapshot state = %q, channels = %d, want ready and one channel", store.state, len(store.snapshot.Channels))
+	}
+	if strings.Contains(store.message, "source.example") || strings.Contains(store.message, "/playlist") {
+		t.Fatalf("provider location leaked in persisted message: %q", store.message)
+	}
+}
+
+func TestConfigureLiveTVRuntime_UsesTrustedPrivateSourcePolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "#EXTM3U\n#EXTINF:-1 tvg-id=\"fixture-1\",Fixture News\nhttp://stream.invalid/news\n")
+	}))
+	t.Cleanup(server.Close)
+	store := &liveTVSnapshotStore{}
+	deps := &api.Dependencies{}
+	configureLiveTVRuntime(deps, store, func() time.Time { return time.Unix(1700000000, 0).UTC() }, livetv.FetchConfig{
+		Resolver: privateLiveTVTestResolver{},
+		Dialer: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+		},
+	})
+
+	if deps.LiveTVRuntime == nil {
+		t.Fatal("LiveTVRuntime was not registered")
+	}
+	if _, err := deps.LiveTVRuntime.RefreshSource(context.Background(), livetv.Source{
+		ID:        42,
+		Kind:      livetv.SourceKindPlaylist,
+		SourceKey: "fixture-source",
+		Location:  "http://10.100.0.2:8080/playlist",
+	}, nil); err != nil {
+		t.Fatalf("RefreshSource for configured private source: %v", err)
+	}
+	if store.state != "ready" || len(store.snapshot.Channels) != 1 {
+		t.Fatalf("state = %q, channels = %d, want ready and one channel", store.state, len(store.snapshot.Channels))
+	}
+}
+
+type liveTVTestResolver struct{}
+
+func (liveTVTestResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("198.51.100.2")}}, nil
+}
+
+type privateLiveTVTestResolver struct{}
+
+func (privateLiveTVTestResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("10.100.0.2")}}, nil
+}
+
+type liveTVSnapshotStore struct {
+	snapshot livetv.SourceSnapshot
+	state    string
+	message  string
+}
+
+func (s *liveTVSnapshotStore) ApplySnapshot(_ context.Context, _ int64, snapshot livetv.SourceSnapshot, state, message string, _ *time.Time) error {
+	s.snapshot = snapshot
+	s.state = state
+	s.message = message
+	return nil
+}
 
 func TestConfigureS3Clients_SetsCORSOnPublicAssetsBucket(t *testing.T) {
 	publicServer := newS3BucketRecorder(t)

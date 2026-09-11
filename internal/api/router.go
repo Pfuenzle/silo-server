@@ -41,6 +41,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/invitations"
 	"github.com/Silo-Server/silo-server/internal/libraryingest"
 	"github.com/Silo-Server/silo-server/internal/literaryworks"
+	"github.com/Silo-Server/silo-server/internal/livetv"
 	"github.com/Silo-Server/silo-server/internal/logstream"
 	"github.com/Silo-Server/silo-server/internal/mail"
 	"github.com/Silo-Server/silo-server/internal/markers"
@@ -101,21 +102,24 @@ type Dependencies struct {
 	// graceful-shutdown deadline. Nil is valid in tests and embedded routers.
 	RegisterShutdownWork func(<-chan struct{})
 
-	DB                *pgxpool.Pool
-	SecretCipher      *secret.Cipher // at-rest credential cipher (required when DB is set)
-	FrontendFS        fs.FS
-	S3Public          *s3client.Client              // public assets bucket client (may be nil)
-	S3Private         *s3client.Client              // private internal bucket client (may be nil)
-	S3UserDB          *s3client.Client              // user-db bucket client (may be nil)
-	BrandingService   *branding.Service             // white-label branding (nil when DB unavailable)
-	FolderRepo        *catalog.FolderRepository     // media folder repository (may be nil)
-	FileRepo          *scanner.FileRepository       // media file repository (may be nil)
-	Scanner           *scanner.Scanner              // scanner instance (may be nil)
-	LibraryIngester   *libraryingest.Executor       // shared library ingest executor (may be nil)
-	ProbeEnsurer      handlers.PlaybackProbeEnsurer // on-demand probe repair for playback/detail (may be nil)
-	UserStoreProvider userstore.UserStoreProvider   // user store provider (may be nil)
-	SessionMgr        *playback.SessionManager      // playback session manager (may be nil)
-	StreamTelemetry   *streamtelemetry.Registry     // local observation-only stream telemetry (may be nil)
+	DB                 *pgxpool.Pool
+	LiveTVRuntime      *livetv.Runtime // explicit source refresh seam; construction performs no fetch
+	LivePlayback       *livetv.LivePlaybackService
+	LivePlaybackOrigin string
+	SecretCipher       *secret.Cipher // at-rest credential cipher (required when DB is set)
+	FrontendFS         fs.FS
+	S3Public           *s3client.Client              // public assets bucket client (may be nil)
+	S3Private          *s3client.Client              // private internal bucket client (may be nil)
+	S3UserDB           *s3client.Client              // user-db bucket client (may be nil)
+	BrandingService    *branding.Service             // white-label branding (nil when DB unavailable)
+	FolderRepo         *catalog.FolderRepository     // media folder repository (may be nil)
+	FileRepo           *scanner.FileRepository       // media file repository (may be nil)
+	Scanner            *scanner.Scanner              // scanner instance (may be nil)
+	LibraryIngester    *libraryingest.Executor       // shared library ingest executor (may be nil)
+	ProbeEnsurer       handlers.PlaybackProbeEnsurer // on-demand probe repair for playback/detail (may be nil)
+	UserStoreProvider  userstore.UserStoreProvider   // user store provider (may be nil)
+	SessionMgr         *playback.SessionManager      // playback session manager (may be nil)
+	StreamTelemetry    *streamtelemetry.Registry     // local observation-only stream telemetry (may be nil)
 	// StreamTelemetryViewCache serves the merged global view with bounded
 	// staleness so the admin parity endpoint never rebuilds it per request.
 	StreamTelemetryViewCache *streamtelemetry.ViewCache
@@ -535,6 +539,7 @@ func NewRouter(deps Dependencies) chi.Router {
 
 	// Build library handler if folder repo is available.
 	var libraryHandler *handlers.LibraryHandler
+	var liveTVHandler *handlers.LiveTVHandler
 	if deps.FolderRepo != nil {
 		libraryHandler = handlers.NewLibraryHandler(deps.FolderRepo, deps.LibraryIngester, userRepo, deps.DB, deps.Refresher, deps.AppContext)
 		if accessGroupStore != nil {
@@ -553,6 +558,9 @@ func NewRouter(deps Dependencies) chi.Router {
 		if deps.DB != nil {
 			libraryHandler.JobRepo = adminjob.NewRepository(deps.DB)
 		}
+		liveTVHandler = handlers.NewLiveTVHandler(deps.FolderRepo, deps.DB, deps.LiveTVRuntime)
+		liveTVHandler.SetPlaybackService(deps.LivePlayback)
+		liveTVHandler.SetPlaybackOrigin(deps.LivePlaybackOrigin)
 
 		// Library poster uploads are writable client-facing assets, so they
 		// belong in the public assets bucket.
@@ -2254,6 +2262,29 @@ func NewRouter(deps Dependencies) chi.Router {
 				if libraryHandler != nil {
 					r.Get("/user/libraries", libraryHandler.HandleListUserLibraries)
 				}
+				if liveTVHandler != nil {
+					r.Get("/livetv/capability", liveTVHandler.HandleCapability)
+					r.Delete("/livetv/playback/{grant_id}", liveTVHandler.HandleStopPlayback)
+					r.Route("/livetv/libraries/{library_id}", func(r chi.Router) {
+						r.Use(apimw.RequireProfile)
+						r.Get("/", liveTVHandler.HandleListLibrary)
+						r.Get("/channels", liveTVHandler.HandleListChannels)
+						r.Get("/channels/{channel_id}", liveTVHandler.HandleChannelDetail)
+						r.Get("/channels/{channel_id}/current-next", liveTVHandler.HandleCurrentNext)
+						r.Get("/channels/{channel_id}/playback", liveTVHandler.HandlePlaybackResolution)
+						r.Get("/guide", liveTVHandler.HandleGuide)
+						r.Get("/programmes/{programme_id}", liveTVHandler.HandleProgrammeDetail)
+						r.Get("/home-sections", liveTVHandler.HandleHomeSections)
+						r.Route("/favorites", func(r chi.Router) {
+							r.Get("/channels", liveTVHandler.HandleListFavoriteChannels)
+							r.Put("/channels/{channel_id}", liveTVHandler.HandleAddFavoriteChannel)
+							r.Delete("/channels/{channel_id}", liveTVHandler.HandleRemoveFavoriteChannel)
+							r.Get("/programmes", liveTVHandler.HandleListFavoriteProgrammes)
+							r.Put("/programmes/{programme_id}", liveTVHandler.HandleAddFavoriteProgramme)
+							r.Delete("/programmes/{programme_id}", liveTVHandler.HandleRemoveFavoriteProgramme)
+						})
+					})
+				}
 				if deps.EventsHub != nil {
 					eventsHandler := handlers.NewEventsHandler(
 						deps.EventsHub,
@@ -2379,9 +2410,14 @@ func NewRouter(deps Dependencies) chi.Router {
 							r.Put("/{id}/poster", libraryHandler.HandleUploadPoster)
 							r.Delete("/{id}/poster", libraryHandler.HandleDeletePoster)
 						})
-
 						r.Post("/scan", libraryHandler.HandleScan)
 						r.Post("/scan/cancel", libraryHandler.HandleScanCancel)
+					})
+				}
+				if liveTVHandler != nil {
+					r.Group(func(r chi.Router) {
+						r.Use(requireActingAdmin)
+						handlers.MountLiveTVAdminRoutes(r, liveTVHandler)
 					})
 				}
 

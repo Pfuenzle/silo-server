@@ -27,6 +27,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/libraryingest"
+	"github.com/Silo-Server/silo-server/internal/librarykind"
 	"github.com/Silo-Server/silo-server/internal/metadata"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/plugins"
@@ -573,8 +574,8 @@ func (h *LibraryHandler) HandleCreateLibrary(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if len(req.Paths) == 0 || req.Type == "" || req.Name == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "Paths, type, and name are required")
+	if req.Type == "" || req.Name == "" || (librarykind.IsLiveTV(req.Type) && len(req.Paths) > 0) || (!librarykind.IsLiveTV(req.Type) && len(req.Paths) == 0) {
+		writeError(w, http.StatusBadRequest, "bad_request", "type and name are required; filesystem paths are required for non-Live TV libraries")
 		return
 	}
 	if req.MetadataLanguage != "" && !validMetadataLanguages[req.MetadataLanguage] {
@@ -630,6 +631,12 @@ func (h *LibraryHandler) HandleCreateLibrary(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
+	// Filesystem scans do not apply to normalized Live TV libraries.
+	if librarykind.IsLiveTV(folder.Type) {
+		writeJSON(w, http.StatusCreated, h.toLibraryResponseWithPoster(r.Context(), folder))
+		return
+	}
+
 	// Kick off an initial scan so content appears immediately.
 	if h.ScanQueue != nil {
 		if _, err := h.ScanQueue.EnqueueLibraryScan(r.Context(), folder.ID, "library_created"); err != nil {
@@ -679,6 +686,18 @@ func (h *LibraryHandler) HandleUpdateLibrary(w http.ResponseWriter, r *http.Requ
 		}
 		slog.ErrorContext(r.Context(), "fetching library for update", "component", "api", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to fetch library")
+		return
+	}
+	effectiveType := oldFolder.Type
+	if req.Type != nil {
+		effectiveType = *req.Type
+	}
+	effectivePaths := oldFolder.Paths
+	if req.Paths != nil {
+		effectivePaths = *req.Paths
+	}
+	if (librarykind.IsLiveTV(effectiveType) && len(effectivePaths) > 0) || (!librarykind.IsLiveTV(effectiveType) && len(effectivePaths) == 0) {
+		writeError(w, http.StatusBadRequest, "bad_request", "Live TV libraries cannot have filesystem paths; other libraries require at least one path")
 		return
 	}
 
@@ -746,7 +765,7 @@ func (h *LibraryHandler) HandleUpdateLibrary(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Rescan when paths have changed (folders added or removed).
-	if req.Paths != nil && !slices.Equal(oldFolder.Paths, *req.Paths) {
+	if !librarykind.IsLiveTV(folder.Type) && req.Paths != nil && !slices.Equal(oldFolder.Paths, *req.Paths) {
 		if h.ScanQueue != nil {
 			if _, err := h.ScanQueue.EnqueueLibraryScan(r.Context(), folder.ID, "library_paths_changed"); err != nil {
 				slog.WarnContext(r.Context(), "queue library path-change scan failed", "component", "api", "library_id", folder.ID, "error", err)

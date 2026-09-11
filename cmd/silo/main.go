@@ -67,6 +67,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/jellycompat"
 	"github.com/Silo-Server/silo-server/internal/libraryingest"
 	"github.com/Silo-Server/silo-server/internal/literaryworks"
+	"github.com/Silo-Server/silo-server/internal/livetv"
 	"github.com/Silo-Server/silo-server/internal/logfilter"
 	"github.com/Silo-Server/silo-server/internal/logredact"
 	"github.com/Silo-Server/silo-server/internal/logstream"
@@ -126,6 +127,12 @@ import (
 	"github.com/Silo-Server/silo-server/migrations"
 	siloweb "github.com/Silo-Server/silo-server/web"
 )
+
+func newLivePlaybackStore(client *redis.Client, secret string) *livetv.RedisLivePlaybackStore {
+	store := livetv.NewRedisLivePlaybackStore(client, 12*time.Hour)
+	store.SetIntegrityKey(secret)
+	return store
+}
 
 // resolveNodeIdentity returns a stable node identifier used by the
 // heartbeat writer, reconciler, and shutdown cleanup. Resolution order:
@@ -631,7 +638,6 @@ func normalizeLoadedConfig(cfg *config.Config) {
 	cfg.Playback.FFmpegPath = playback.ResolveFFmpegPath(cfg.Playback.FFmpegPath)
 }
 
-// main starts the Silo server or a requested maintenance command.
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "compat-web" {
 		if err := runCompatWebCommand(context.Background(), os.Args[2:]); err != nil {
@@ -991,6 +997,14 @@ func main() {
 		var shutdownStandalone func(context.Context) error
 		if mode == "proxy" {
 			srv := proxy.NewServer(watcher, tracker)
+			livePlayback := livetv.NewLivePlaybackService(livetv.LivePlaybackConfig{
+				Fetch:       livetv.NewFetchService(livetv.FetchConfig{Policy: livetv.NetworkPolicy{AllowPrivateNetworks: true}}),
+				ProxyOrigin: nodeURL,
+				Authority:   livetv.NewPostgresRepository(pool),
+				Store:       newLivePlaybackStore(redisClient, cfg.Auth.JWTSecret),
+			})
+			livePlayback.StartSweeper(appCtx)
+			srv.SetLivePlayback(livePlayback)
 			proxyIPResolver, resolverErr := clientIPResolverFromConfig(watcher.Config())
 			if resolverErr != nil {
 				log.Fatalf("load trusted CIDRs: %v", resolverErr)
@@ -1172,6 +1186,18 @@ func main() {
 			configWatcher.RequestReload()
 		},
 	}
+	liveTVRepo := livetv.NewPostgresRepository(pool)
+	configureLiveTVRuntime(&deps, liveTVRepo, time.Now, livetv.FetchConfig{})
+	if apiRedisClient != nil {
+		livePlayback := livetv.NewLivePlaybackService(livetv.LivePlaybackConfig{
+			Fetch:       livetv.NewFetchService(livetv.FetchConfig{Policy: livetv.NetworkPolicy{AllowPrivateNetworks: true}}),
+			ProxyOrigin: "",
+			Authority:   liveTVRepo,
+			Store:       newLivePlaybackStore(apiRedisClient, cfg.Auth.JWTSecret),
+		})
+		livePlayback.StartSweeper(appCtx)
+		deps.LivePlayback = livePlayback
+	}
 	accessGroupStore := access.NewGroupStore(pool)
 	audiobooksService := audiobooks.New(&audiobooksSettingsAdapter{repo: settingsRepo})
 	absCompatEnabled, err := audiobooksService.ABSCompatEnabled(appCtx)
@@ -1258,10 +1284,26 @@ func main() {
 		}
 		proxyPool.SetNodes(proxyNodes)
 		transcodePool.SetNodes(transcodeNodes)
+		if deps.LivePlayback != nil {
+			proxyOrigin := ""
+			if proxyNode := proxyPool.Pick(); proxyNode != nil {
+				proxyOrigin = proxyNode.ClientURL()
+			}
+			deps.LivePlayback.SetProxyOrigin(proxyOrigin)
+			deps.LivePlaybackOrigin = proxyOrigin
+		}
 
 		deps.ProxyPool = proxyPool
 		deps.TranscodePool = transcodePool
 		deps.NodePlanner = nodepool.NewPlanner(proxyPool, transcodePool)
+		if deps.LivePlayback != nil {
+			proxyOrigin := deps.PublicURL
+			if proxyNode := proxyPool.Pick(); proxyNode != nil {
+				proxyOrigin = proxyNode.ClientURL()
+			}
+			deps.LivePlayback.SetProxyOrigin(proxyOrigin)
+			deps.LivePlaybackOrigin = proxyOrigin
+		}
 
 		healthChecker := nodepool.NewHealthChecker(proxyPool, transcodePool, nodeRepo)
 		capabilityBudget := nodeCapabilityProbeBudget(configWatcher.Config)
@@ -2429,13 +2471,20 @@ func main() {
 	if needsWorkers && deps.DB != nil {
 		triggerRepo := taskrepository.NewPgTriggerRepository(deps.DB)
 		historyRepo := taskrepository.NewPgExecutionRepository(deps.DB)
-		taskMgr := taskmanager.New(triggerRepo, historyRepo, triggers.New, slog.Default())
+		taskMgr := taskmanager.New(triggerRepo, historyRepo, func(cfg taskmanager.TriggerConfig) taskmanager.Trigger {
+			return triggers.NewWithClock(cfg, time.Now)
+		}, slog.Default())
 		if deps.EventsHub != nil {
 			taskMgr.AddObserver(evt.NewTaskObserver(deps.EventsHub))
 		}
 
 		if deps.FolderRepo != nil && deps.LibraryScanQueue != nil {
 			taskMgr.Register(tasks.NewScanLibrariesTask(deps.FolderRepo, deps.LibraryScanQueue, deps.EventBus))
+		}
+		if deps.FolderRepo != nil && deps.LiveTVRuntime != nil && liveTVRepo != nil {
+			taskMgr.Register(tasks.NewRefreshLiveTVEPGTask(tasks.RefreshLiveTVEPGTaskConfig{
+				Folders: deps.FolderRepo, Sources: liveTVRepo, Refresher: deps.LiveTVRuntime, Now: time.Now,
+			}))
 		}
 		taskMgr.Register(tasks.NewCleanupOrphanedMediaItemsTask(catalog.NewOrphanedProvisionalCleaner(deps.DB)))
 		taskMgr.Register(tasks.NewBackfillMediaItemAliasesTask(catalog.NewItemAliasRepository(deps.DB)))
@@ -3463,6 +3512,11 @@ func configureS3Clients(cfg *config.Config, deps *api.Dependencies) {
 		deps.S3UserDB = s3UserDB
 		slog.Info("S3 user-db client configured", "bucket", s3UserDB.Bucket())
 	}
+}
+
+func configureLiveTVRuntime(deps *api.Dependencies, store livetv.SnapshotStore, now func() time.Time, fetchConfig livetv.FetchConfig) {
+	fetchConfig.Policy.AllowPrivateNetworks = true
+	deps.LiveTVRuntime = livetv.NewRuntimeWithClock(store, now, fetchConfig)
 }
 
 type pluginImageResolverCapabilityStore interface {
