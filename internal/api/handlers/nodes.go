@@ -70,7 +70,8 @@ type NodeHandler struct {
 	// afterNodeUpdate fires once the post-commit work an update kicks off has
 	// finished. Tests wait on it rather than on a sleep; production leaves it
 	// nil.
-	afterNodeUpdate func()
+	afterNodeUpdate          func()
+	updateLivePlaybackOrigin func(string)
 	// clusterPlayback reports the cluster-wide acceleration policy, which is
 	// what a node without an override of its own runs. Read live rather than
 	// snapshotted, because it is hot-reloadable. nil where nothing wired it, and
@@ -117,6 +118,13 @@ func (h *NodeHandler) SetCapabilityRefresher(refresher NodeCapabilityRefresher) 
 		return
 	}
 	h.capabilities = refresher
+}
+
+func (h *NodeHandler) SetLivePlaybackOriginUpdater(updater func(string)) {
+	if h == nil {
+		return
+	}
+	h.updateLivePlaybackOrigin = updater
 }
 
 // NewNodeHandler creates a new NodeHandler.
@@ -497,6 +505,9 @@ func (h *NodeHandler) applyHealthToPools(
 	case nodepool.NodeTypeProxy:
 		if h.proxyPool != nil {
 			h.proxyPool.ApplyHealth(node.ID, node.URL, healthy, activeJobs, egressKbps, capabilitiesHash, lastStats, checkedAt)
+			if h.updateLivePlaybackOrigin != nil {
+				h.updateLivePlaybackOrigin(h.proxyPool.LivePlaybackOrigin())
+			}
 		}
 	case nodepool.NodeTypeTranscode:
 		if h.transcodePool != nil {
@@ -931,6 +942,9 @@ func (h *NodeHandler) reloadPools(ctx context.Context) {
 	}
 	if h.proxyPool != nil {
 		h.proxyPool.SetNodes(proxyNodes)
+		if h.updateLivePlaybackOrigin != nil {
+			h.updateLivePlaybackOrigin(h.proxyPool.LivePlaybackOrigin())
+		}
 	}
 	if h.transcodePool != nil {
 		h.transcodePool.SetNodes(transcodeNodes)

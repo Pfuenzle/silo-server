@@ -525,6 +525,44 @@ func TestReloadPoolsSurvivesRequestCancellation(t *testing.T) {
 	}
 }
 
+func TestReloadPoolsUpdatesLivePlaybackOrigin(t *testing.T) {
+	proxyPool := nodepool.NewProxyPool()
+	originUpdates := make([]string, 0, 2)
+	lister := &ctxAwareLister{nodes: []*nodepool.Node{{ID: 1, URL: "http://proxy:8080", Enabled: true, Healthy: true}}}
+	handler := NewNodeHandler(&stubNodeRepository{}, proxyPool, nodepool.NewTranscodePool(), lister, nil, nil, "secret")
+	handler.SetLivePlaybackOriginUpdater(func(origin string) {
+		originUpdates = append(originUpdates, origin)
+	})
+
+	handler.reloadPools(context.Background())
+
+	if len(originUpdates) != 1 || originUpdates[0] != "http://proxy:8080" {
+		t.Fatalf("origin updates = %#v, want registered proxy origin", originUpdates)
+	}
+
+	lister.nodes = nil
+	handler.reloadPools(context.Background())
+	if len(originUpdates) != 2 || originUpdates[1] != "" {
+		t.Fatalf("origin updates after proxy removal = %#v, want empty", originUpdates)
+	}
+}
+
+func TestApplyHealthToPoolsUpdatesLivePlaybackOrigin(t *testing.T) {
+	proxyPool := nodepool.NewProxyPool()
+	proxyPool.SetNodes([]*nodepool.Node{{ID: 1, Type: nodepool.NodeTypeProxy, URL: "http://proxy:8080", Enabled: true}})
+	var origin string
+	handler := NewNodeHandler(&stubNodeRepository{}, proxyPool, nil, nil, nil, nil, "secret")
+	handler.SetLivePlaybackOriginUpdater(func(updated string) {
+		origin = updated
+	})
+
+	handler.applyHealthToPools(proxyPool.Nodes()[0], true, 0, 0, "", nil)
+
+	if origin != "http://proxy:8080" {
+		t.Fatalf("origin after healthy check = %q, want proxy origin", origin)
+	}
+}
+
 // Repointing a row at a different worker changes which machine those overrides
 // apply to, even when the values are byte-identical. reloadPools publishes the
 // new URL at once, so between that and the replacement's own 60s config poll

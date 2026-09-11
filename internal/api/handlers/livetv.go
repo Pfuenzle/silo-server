@@ -76,7 +76,7 @@ func (h *LiveTVHandler) HandleCapability(w http.ResponseWriter, _ *http.Request)
 	writeJSON(w, http.StatusOK, liveTVCapabilityResponse{
 		SchemaVersion:     1,
 		Enabled:           h != nil && h.repo != nil,
-		PlaybackAvailable: h != nil && h.playback != nil && h.playbackOrigin != "",
+		PlaybackAvailable: h != nil && h.playback != nil && h.playback.ProxyOrigin() != "",
 		LibraryTypes:      []string{"livetv"},
 		Features: []string{
 			"library_sources", "channels", "programme_details", "guide_window", "profile_favorites", "home_sections",
