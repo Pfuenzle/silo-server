@@ -51,7 +51,7 @@ func TestLiveTVFavoriteRoutes_areProfileScopedAndTyped(t *testing.T) {
 
 	// When the route contract is enumerated.
 	seen := make(map[string]bool)
-	if err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...string) error {
+	if err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 		seen[method+" "+route] = true
 		return nil
 	}); err != nil {

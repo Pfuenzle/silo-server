@@ -25,7 +25,7 @@ func (h *LiveTVHandler) HandleListLibrary(w http.ResponseWriter, r *http.Request
 	}
 	response := liveTVLibraryResponse{ID: library.ID, Name: library.Name, Type: library.Type, Enabled: library.Enabled, Sources: make([]liveTVSourceResponse, 0, len(sources))}
 	for _, source := range sources {
-		response.Sources = append(response.Sources, sourceResponse(source))
+		response.Sources = append(response.Sources, mapLiveTVSource(source))
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -43,7 +43,7 @@ func (h *LiveTVHandler) HandleListSources(w http.ResponseWriter, r *http.Request
 	}
 	items := make([]liveTVSourceResponse, 0, len(sources))
 	for _, source := range sources {
-		items = append(items, sourceResponse(source))
+		items = append(items, mapLiveTVSource(source))
 	}
 	writeJSON(w, http.StatusOK, liveTVSourcesResponse{Items: items, Total: len(items)})
 }
@@ -71,7 +71,7 @@ func (h *LiveTVHandler) HandleCreateSource(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create Live TV source")
 		return
 	}
-	writeJSON(w, http.StatusCreated, sourceResponse(source))
+	writeJSON(w, http.StatusCreated, mapLiveTVSource(source))
 }
 
 func (h *LiveTVHandler) HandleUpdateSource(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +128,7 @@ func (h *LiveTVHandler) HandleUpdateSource(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to update Live TV source")
 		return
 	}
-	writeJSON(w, http.StatusOK, sourceResponse(source))
+	writeJSON(w, http.StatusOK, mapLiveTVSource(source))
 }
 
 func (h *LiveTVHandler) HandleDeleteSource(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +176,7 @@ func (h *LiveTVHandler) HandleRefreshSource(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load refreshed source")
 		return
 	}
-	writeJSON(w, http.StatusOK, sourceResponse(updated))
+	writeJSON(w, http.StatusOK, mapLiveTVSource(updated))
 }
 
 func decodeSourceRequest(w http.ResponseWriter, r *http.Request) (liveTVSourceRequest, bool) {
@@ -195,7 +195,7 @@ func decodeSourceRequest(w http.ResponseWriter, r *http.Request) (liveTVSourceRe
 	return request, true
 }
 
-func sourceResponse(source livetv.Source) liveTVSourceResponse {
+func mapLiveTVSource(source livetv.Source) liveTVSourceResponse {
 	refreshError := ""
 	if source.RefreshState == "stale" || source.RefreshState == "error" {
 		refreshError = "Live TV source refresh failed"

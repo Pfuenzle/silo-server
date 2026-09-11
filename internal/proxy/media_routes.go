@@ -18,6 +18,8 @@ var proxyMediaRoutes = []streamtelemetry.MediaRoute{
 	proxyRoute(http.MethodGet, "/stream/transcode/{token}/master.m3u8", streamtelemetry.ClassManifest, true),
 	proxyRoute(http.MethodHead, "/stream/transcode/{token}/master.m3u8", streamtelemetry.ClassManifest, true),
 	proxyRoute(http.MethodGet, "/stream/transcode/{token}/segment/{name}", streamtelemetry.ClassPlayback, true),
+	proxyRoute(http.MethodGet, "/stream/live/{grant_id}/manifest", streamtelemetry.ClassManifest, true),
+	proxyRoute(http.MethodGet, "/stream/live/{grant_id}/segment/{name}", streamtelemetry.ClassPlayback, true),
 	// authorized_media_origins_v1: same viewer egress, different proof of
 	// entitlement — a Redis grant plus the caller's own bearer token, never a
 	// stream token — so these carry their own canonical session key.
@@ -44,9 +46,11 @@ func grantRoute(method, pattern string, class streamtelemetry.Class, capRelevant
 }
 
 func proxyRouteWithKey(method, pattern string, class streamtelemetry.Class, capRelevant bool, sessionKey string) streamtelemetry.MediaRoute {
-	return streamtelemetry.MediaRoute{Family: streamtelemetry.FamilyProxy, Method: method, Pattern: pattern,
+	return streamtelemetry.MediaRoute{
+		Family: streamtelemetry.FamilyProxy, Method: method, Pattern: pattern,
 		Class: class, Role: streamtelemetry.RoleViewerEgress, CanonicalSessionKey: sessionKey,
-		CapRelevant: capRelevant, Enrolled: true, Capture: proxyCapture(pattern)}
+		CapRelevant: capRelevant, Enrolled: true, Capture: proxyCapture(pattern),
+	}
 }
 
 func declareProxyMediaRoutes() { streamtelemetry.DeclareRoutes(proxyMediaRoutes...) }

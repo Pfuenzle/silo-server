@@ -10,6 +10,8 @@ GET /metrics	non-media
 GET /status	non-media
 GET /stream/direct/{token}	media	playback	viewer_egress	true	true
 HEAD /stream/direct/{token}	media	playback	viewer_egress	true	true
+GET /stream/live/{grant_id}/manifest	media	manifest	viewer_egress	true	true
+GET /stream/live/{grant_id}/segment/{name}	media	playback	viewer_egress	true	true
 GET /stream/remux/audio-v2/{token}	media	playback	viewer_egress	true	true
 HEAD /stream/remux/audio-v2/{token}	media	playback	viewer_egress	true	true
 GET /stream/remux/{token}	media	playback	viewer_egress	true	true
@@ -36,6 +38,8 @@ GET /metrics	non-media
 GET /status	non-media
 GET /stream/direct/{token}	media	playback	viewer_egress	true	true
 HEAD /stream/direct/{token}	media	playback	viewer_egress	true	true
+GET /stream/live/{grant_id}/manifest	media	manifest	viewer_egress	true	true
+GET /stream/live/{grant_id}/segment/{name}	media	playback	viewer_egress	true	true
 GET /stream/remux/audio-v2/{token}	media	playback	viewer_egress	true	true
 HEAD /stream/remux/audio-v2/{token}	media	playback	viewer_egress	true	true
 GET /stream/remux/{token}	media	playback	viewer_egress	true	true

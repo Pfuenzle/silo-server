@@ -86,7 +86,7 @@ func TestLiveTVAdminRoutes_mountExactTopLevelPathsAndMethods(t *testing.T) {
 	seen := make(map[string]bool)
 
 	// When the registered production paths are enumerated.
-	if err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...string) error {
+	if err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 		seen[method+" "+route] = true
 		return nil
 	}); err != nil {
@@ -166,16 +166,16 @@ func TestLiveTVGuideWindow_rejectsWindowsLongerThanOneDay(t *testing.T) {
 
 func TestLiveTVSourceResponse_redactsConfiguredLocationAndConfig(t *testing.T) {
 	// Given a source containing private configuration fields.
-	source := livetv.Source{ID: 3, LibraryID: 7, Kind: livetv.SourceKindPlaylist, SourceKey: "main", Name: "Main", Location: "https://user:secret@example.invalid/list.m3u", Config: []byte(`{"token":"secret"}`), Enabled: true, LastRefreshAt: time.Now().UTC()}
+	lastRefreshAt := time.Now().UTC()
+	source := livetv.Source{ID: 3, LibraryID: 7, Kind: livetv.SourceKindPlaylist, SourceKey: "main", Name: "Main", Location: "https://user:secret@example.invalid/list.m3u", Config: []byte(`{"token":"secret"}`), Enabled: true, LastRefreshAt: &lastRefreshAt}
 
 	// When the source is mapped to the public response.
-	encoded, err := json.Marshal(sourceResponse(source))
-
+	encoded, err := json.Marshal(mapLiveTVSource(source))
 	// Then provider location and credentials are absent.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(encoded) == "" || containsAny(string(encoded), "example.invalid", "secret", "location", "config") {
+	if string(encoded) == "" || containsAny(string(encoded), []string{"example.invalid", "secret", "location", "config"}) {
 		t.Fatalf("redacted source response leaked private fields: %s", encoded)
 	}
 }
@@ -185,8 +185,7 @@ func TestLiveTVSourceResponse_redactsRefreshDiagnostic(t *testing.T) {
 	source := livetv.Source{RefreshState: "stale", RefreshError: "https://user:secret@example.invalid/feed"}
 
 	// When the source is mapped to the public response.
-	encoded, err := json.Marshal(sourceResponse(source))
-
+	encoded, err := json.Marshal(mapLiveTVSource(source))
 	// Then only a generic refresh diagnostic is exposed.
 	if err != nil {
 		t.Fatal(err)
@@ -194,13 +193,4 @@ func TestLiveTVSourceResponse_redactsRefreshDiagnostic(t *testing.T) {
 	if strings.Contains(string(encoded), "example.invalid") || strings.Contains(string(encoded), "secret") {
 		t.Fatalf("refresh diagnostic leaked provider details: %s", encoded)
 	}
-}
-
-func containsAny(value string, needles ...string) bool {
-	for _, needle := range needles {
-		if strings.Contains(value, needle) {
-			return true
-		}
-	}
-	return false
 }
