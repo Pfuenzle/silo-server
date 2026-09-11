@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/downloadprepare"
 	"github.com/Silo-Server/silo-server/internal/downloads"
@@ -51,6 +52,7 @@ type Server struct {
 	// mode, which is why those routes answer 503 rather than assuming either.
 	grants        proxyGrantLookup
 	loginSessions loginSessionValidator
+	profileTokens *access.ProfileTokenService
 	livePlayback  *livetv.LivePlaybackService
 	egress        *egressMeter
 	clientIP      *clientip.Resolver
@@ -126,6 +128,14 @@ func (s *Server) SetMediaGrantAuthority(grants proxyGrantLookup, sessions loginS
 	s.loginSessions = sessions
 }
 
+// SetProfileTokenService wires the signer used to verify the profile proof
+// presented with Live TV playback requests. The proof is checked against the
+// access token and the server-side playback grant; X-Profile-Id alone is never
+// treated as an identity assertion.
+func (s *Server) SetProfileTokenService(tokens *access.ProfileTokenService) {
+	s.profileTokens = tokens
+}
+
 func (s *Server) SetLivePlayback(service *livetv.LivePlaybackService) {
 	s.livePlayback = service
 }
@@ -177,6 +187,7 @@ func (s *Server) Handler() http.Handler {
 		AllowedMethods: []string{"GET", "HEAD", "OPTIONS"},
 		AllowedHeaders: []string{
 			"Accept", "Authorization", "Content-Type", "Range",
+			"X-Profile-Id", "X-Profile-Token",
 			"If-Match", "If-Modified-Since", "If-None-Match", "If-Range", "If-Unmodified-Since",
 		},
 		// direct_stream_resume_v1 has the client re-request a byte range with

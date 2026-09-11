@@ -1005,6 +1005,7 @@ func main() {
 			})
 			livePlayback.StartSweeper(appCtx)
 			srv.SetLivePlayback(livePlayback)
+			srv.SetProfileTokenService(access.NewProfileTokenService(cfg.Auth.JWTSecret, 0))
 			proxyIPResolver, resolverErr := clientIPResolverFromConfig(watcher.Config())
 			if resolverErr != nil {
 				log.Fatalf("load trusted CIDRs: %v", resolverErr)
