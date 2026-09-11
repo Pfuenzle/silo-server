@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # Stage 1: Build frontend
 FROM node:22-slim AS frontend
 RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
@@ -14,8 +16,8 @@ RUN pnpm run build
 FROM scratch AS frontend_dist
 COPY --from=frontend /app/web/dist/. /
 
-# Stage 2: Build Go binary
-FROM golang:1.26 AS build
+# Stage 2: Prepare Go build workspace
+FROM golang:1.26 AS build-base
 ENV CGO_ENABLED=1
 ENV GOPROXY=https://proxy.golang.org,direct
 ENV GOPRIVATE=github.com/Silo-Server/*
@@ -24,9 +26,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends libvips-dev && 
 WORKDIR /app
 COPY go.mod go.sum ./
 COPY internal/compat/zishang520-webtransport-go/ internal/compat/zishang520-webtransport-go/
+# Apply the local SDK replacement before downloading modules. Copy its module
+# metadata first so SDK source edits do not invalidate the dependency layer.
+COPY --from=silo_plugin_sdk go.mod go.sum silo-plugin-sdk/
+RUN test -f silo-plugin-sdk/go.mod
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
+    go mod edit -replace=github.com/Silo-Server/silo-plugin-sdk=./silo-plugin-sdk && \
     go mod download
+COPY --from=silo_plugin_sdk pkg/ silo-plugin-sdk/pkg/
 COPY web/embed.go web/embed.go
 COPY --from=frontend_dist / web/dist
 COPY cmd/ cmd/
@@ -36,6 +44,9 @@ COPY migrations/ migrations/
 # manifest, so the binary carries the exact bytes it was built from. It lives
 # outside internal/ because clients vendor these files.
 COPY contracts/ contracts/
+# Stage 3: Build Go binary using a local plugin SDK checkout passed via
+# BuildKit named context `silo_plugin_sdk`.
+FROM build-base AS build
 ARG BUILD_REVISION
 ARG BUILD_DIRTY=false
 ARG BUILD_NUMBER
