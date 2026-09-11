@@ -10,24 +10,55 @@ import (
 
 // DailyTrigger fires at a specific time each day in server-local time.
 type DailyTrigger struct {
-	cfg     taskmanager.TriggerConfig
-	hour    int
-	minute  int
-	ch      chan struct{}
-	nextRun time.Time
-	timer   *time.Timer
-	stopCh  chan struct{}
-	mu      sync.Mutex
+	cfg      taskmanager.TriggerConfig
+	hour     int
+	minute   int
+	ch       chan struct{}
+	nextRun  time.Time
+	timer    timer
+	stopCh   chan struct{}
+	now      func() time.Time
+	newTimer func(time.Duration) timer
+	mu       sync.Mutex
 }
 
+type timer interface {
+	Stop() bool
+	Chan() <-chan time.Time
+}
+
+type timeTimer struct{ *time.Timer }
+
+func (t timeTimer) Chan() <-chan time.Time { return t.C }
+
 func NewDailyTrigger(cfg taskmanager.TriggerConfig) *DailyTrigger {
+	return NewDailyTriggerWithClockAndTimer(cfg, time.Now, func(delay time.Duration) timer {
+		return timeTimer{time.NewTimer(delay)}
+	})
+}
+
+func NewDailyTriggerWithClock(cfg taskmanager.TriggerConfig, now func() time.Time) *DailyTrigger {
+	return NewDailyTriggerWithClockAndTimer(cfg, now, func(delay time.Duration) timer {
+		return timeTimer{time.NewTimer(delay)}
+	})
+}
+
+func NewDailyTriggerWithClockAndTimer(cfg taskmanager.TriggerConfig, now func() time.Time, newTimer func(time.Duration) timer) *DailyTrigger {
 	var h, m int
 	fmt.Sscanf(cfg.TimeOfDay, "%d:%d", &h, &m)
+	if now == nil {
+		now = time.Now
+	}
+	if newTimer == nil {
+		newTimer = func(delay time.Duration) timer { return timeTimer{time.NewTimer(delay)} }
+	}
 	return &DailyTrigger{
-		cfg:    cfg,
-		hour:   h,
-		minute: m,
-		ch:     make(chan struct{}, 1),
+		cfg:      cfg,
+		hour:     h,
+		minute:   m,
+		ch:       make(chan struct{}, 1),
+		now:      now,
+		newTimer: newTimer,
 	}
 }
 
@@ -50,22 +81,18 @@ func (d *DailyTrigger) Start(_ *taskmanager.ExecutionResult) {
 	}
 
 	stopCh := make(chan struct{})
-	d.nextRun = d.calcNextRun(time.Now())
-	timer := time.NewTimer(time.Until(d.nextRun))
+	now := d.now()
+	d.nextRun = d.calcNextRun(now)
+	timer := d.newTimer(d.nextRun.Sub(now))
 	d.stopCh = stopCh
 	d.timer = timer
 
 	go func() {
 		select {
 		case <-stopCh:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
+			timer.Stop()
 			return
-		case <-timer.C:
+		case <-timer.Chan():
 			select {
 			case d.ch <- struct{}{}:
 			default:
