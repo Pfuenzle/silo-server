@@ -1199,6 +1199,13 @@ func main() {
 		livePlayback.StartSweeper(appCtx)
 		deps.LivePlayback = livePlayback
 	}
+	updateLivePlaybackOrigin := func(origin string) {
+		if deps.LivePlayback != nil {
+			deps.LivePlayback.SetProxyOrigin(origin)
+		}
+		deps.LivePlaybackOrigin = origin
+	}
+	deps.LivePlaybackOriginUpdater = updateLivePlaybackOrigin
 	accessGroupStore := access.NewGroupStore(pool)
 	audiobooksService := audiobooks.New(&audiobooksSettingsAdapter{repo: settingsRepo})
 	absCompatEnabled, err := audiobooksService.ABSCompatEnabled(appCtx)
@@ -1286,25 +1293,13 @@ func main() {
 		proxyPool.SetNodes(proxyNodes)
 		transcodePool.SetNodes(transcodeNodes)
 		if deps.LivePlayback != nil {
-			proxyOrigin := ""
-			if proxyNode := proxyPool.Pick(); proxyNode != nil {
-				proxyOrigin = proxyNode.ClientURL()
-			}
-			deps.LivePlayback.SetProxyOrigin(proxyOrigin)
-			deps.LivePlaybackOrigin = proxyOrigin
+			proxyOrigin := proxyPool.LivePlaybackOrigin()
+			updateLivePlaybackOrigin(proxyOrigin)
 		}
 
 		deps.ProxyPool = proxyPool
 		deps.TranscodePool = transcodePool
 		deps.NodePlanner = nodepool.NewPlanner(proxyPool, transcodePool)
-		if deps.LivePlayback != nil {
-			proxyOrigin := deps.PublicURL
-			if proxyNode := proxyPool.Pick(); proxyNode != nil {
-				proxyOrigin = proxyNode.ClientURL()
-			}
-			deps.LivePlayback.SetProxyOrigin(proxyOrigin)
-			deps.LivePlaybackOrigin = proxyOrigin
-		}
 
 		healthChecker := nodepool.NewHealthChecker(proxyPool, transcodePool, nodeRepo)
 		capabilityBudget := nodeCapabilityProbeBudget(configWatcher.Config)
@@ -1352,6 +1347,7 @@ func main() {
 				}
 				proxyPool.SetNodes(pNodes)
 				transcodePool.SetNodes(tNodes)
+				updateLivePlaybackOrigin(proxyPool.LivePlaybackOrigin())
 				slog.Info("node pools reloaded from event", "proxy", len(pNodes), "transcode", len(tNodes))
 			}
 		})

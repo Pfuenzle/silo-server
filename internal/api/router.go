@@ -102,24 +102,25 @@ type Dependencies struct {
 	// graceful-shutdown deadline. Nil is valid in tests and embedded routers.
 	RegisterShutdownWork func(<-chan struct{})
 
-	DB                 *pgxpool.Pool
-	LiveTVRuntime      *livetv.Runtime // explicit source refresh seam; construction performs no fetch
-	LivePlayback       *livetv.LivePlaybackService
-	LivePlaybackOrigin string
-	SecretCipher       *secret.Cipher // at-rest credential cipher (required when DB is set)
-	FrontendFS         fs.FS
-	S3Public           *s3client.Client              // public assets bucket client (may be nil)
-	S3Private          *s3client.Client              // private internal bucket client (may be nil)
-	S3UserDB           *s3client.Client              // user-db bucket client (may be nil)
-	BrandingService    *branding.Service             // white-label branding (nil when DB unavailable)
-	FolderRepo         *catalog.FolderRepository     // media folder repository (may be nil)
-	FileRepo           *scanner.FileRepository       // media file repository (may be nil)
-	Scanner            *scanner.Scanner              // scanner instance (may be nil)
-	LibraryIngester    *libraryingest.Executor       // shared library ingest executor (may be nil)
-	ProbeEnsurer       handlers.PlaybackProbeEnsurer // on-demand probe repair for playback/detail (may be nil)
-	UserStoreProvider  userstore.UserStoreProvider   // user store provider (may be nil)
-	SessionMgr         *playback.SessionManager      // playback session manager (may be nil)
-	StreamTelemetry    *streamtelemetry.Registry     // local observation-only stream telemetry (may be nil)
+	DB                        *pgxpool.Pool
+	LiveTVRuntime             *livetv.Runtime // explicit source refresh seam; construction performs no fetch
+	LivePlayback              *livetv.LivePlaybackService
+	LivePlaybackOrigin        string
+	LivePlaybackOriginUpdater func(string)
+	SecretCipher              *secret.Cipher // at-rest credential cipher (required when DB is set)
+	FrontendFS                fs.FS
+	S3Public                  *s3client.Client              // public assets bucket client (may be nil)
+	S3Private                 *s3client.Client              // private internal bucket client (may be nil)
+	S3UserDB                  *s3client.Client              // user-db bucket client (may be nil)
+	BrandingService           *branding.Service             // white-label branding (nil when DB unavailable)
+	FolderRepo                *catalog.FolderRepository     // media folder repository (may be nil)
+	FileRepo                  *scanner.FileRepository       // media file repository (may be nil)
+	Scanner                   *scanner.Scanner              // scanner instance (may be nil)
+	LibraryIngester           *libraryingest.Executor       // shared library ingest executor (may be nil)
+	ProbeEnsurer              handlers.PlaybackProbeEnsurer // on-demand probe repair for playback/detail (may be nil)
+	UserStoreProvider         userstore.UserStoreProvider   // user store provider (may be nil)
+	SessionMgr                *playback.SessionManager      // playback session manager (may be nil)
+	StreamTelemetry           *streamtelemetry.Registry     // local observation-only stream telemetry (may be nil)
 	// StreamTelemetryViewCache serves the merged global view with bounded
 	// staleness so the admin parity endpoint never rebuilds it per request.
 	StreamTelemetryViewCache *streamtelemetry.ViewCache
@@ -3410,6 +3411,12 @@ func NewRouter(deps Dependencies) chi.Router {
 									jwtSecret = deps.Config.Auth.JWTSecret
 								}
 								nodeHandler := handlers.NewNodeHandler(deps.NodeRepo, deps.ProxyPool, deps.TranscodePool, deps.NodeRepo, deps.EventBus, deps.RedisClient, jwtSecret)
+								nodeHandler.SetLivePlaybackOriginUpdater(func(origin string) {
+									if deps.LivePlaybackOriginUpdater != nil {
+										deps.LivePlaybackOriginUpdater(origin)
+									}
+									liveTVHandler.SetPlaybackOrigin(origin)
+								})
 								// A re-probe stores the node's new inventory through the
 								// sweep's own refresh, so the drift and persist rules have
 								// one implementation. Without a health checker the node
