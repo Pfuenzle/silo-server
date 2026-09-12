@@ -121,6 +121,12 @@ describe("LiveTVLibraryPage", () => {
     await act(async () => watchButton?.click());
 
     expect(mocks.toastError).toHaveBeenCalledWith("This channel is currently unavailable.");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "This channel is currently unavailable.",
+    );
+    expect(
+      Array.from(container.querySelectorAll("button")).some((button) => button.textContent === "Try again"),
+    ).toBe(true);
     expect(container.querySelector('[data-testid="player"]')).toBeNull();
   });
 
@@ -159,6 +165,7 @@ describe("LiveTVLibraryPage", () => {
     });
 
     expect(mocks.toastError).toHaveBeenCalledWith("Live playback could not be started.");
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="player"]')).toBeNull();
   });
 

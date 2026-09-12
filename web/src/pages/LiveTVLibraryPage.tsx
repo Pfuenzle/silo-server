@@ -280,6 +280,11 @@ export function LiveTVLibraryPage({
     readonly streamUrl: string;
     readonly grantId: string;
   } | null>(null);
+  const [playbackFailure, setPlaybackFailure] = useState<{
+    readonly channelId: string;
+    readonly title: string;
+    readonly message: string;
+  } | null>(null);
   const [{ from, to }] = useState(() => {
     const now = Date.now();
     return {
@@ -310,19 +315,23 @@ export function LiveTVLibraryPage({
       { replace: true },
     );
   const playChannel = async (channelId: string, title: string) => {
+    setPlaybackFailure(null);
     try {
       const outcome = liveTVPlaybackOutcome(await resolveLiveTVPlayback(libraryId, channelId));
       if (outcome.kind === "playable") {
         setLive({ title, channelId, streamUrl: outcome.url, grantId: outcome.grantId });
         return;
       }
-      toast.error(
+      const message =
         outcome.kind === "unavailable"
           ? liveTVT("playbackUnavailable", locale)
-          : liveTVT("playbackError", locale),
-      );
+          : liveTVT("playbackError", locale);
+      setPlaybackFailure({ channelId, title, message });
+      toast.error(message);
     } catch {
-      toast.error(liveTVT("playbackError", locale));
+      const message = liveTVT("playbackError", locale);
+      setPlaybackFailure({ channelId, title, message });
+      toast.error(message);
     }
   };
   const playProgramme = (item: LiveTVProgramme) => void playChannel(item.channel_id, item.title);
@@ -420,6 +429,18 @@ export function LiveTVLibraryPage({
             >
               {liveTVT("stale", locale)}
               {guideQuery.data.refresh_error ? ` ${guideQuery.data.refresh_error}` : ""}
+            </div>
+          ) : null}
+          {playbackFailure ? (
+            <div className="border-destructive/30 bg-destructive/10 rounded-xl border p-4" role="alert">
+              <p className="font-semibold">{playbackFailure.message}</p>
+              <Button
+                type="button"
+                className="mt-3"
+                onClick={() => void playChannel(playbackFailure.channelId, playbackFailure.title)}
+              >
+                {liveTVT("retry", locale)}
+              </Button>
             </div>
           ) : null}
           {tab === "program" && guideQuery.isLoading ? (
