@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { useSearchParams } from "react-router";
 import { Search, Sparkles, X } from "lucide-react";
+import { ApiClientError } from "@/api/client";
 import BrandCarousel from "@/components/BrandCarousel";
 import MediaCarousel from "@/components/MediaCarousel";
 import RequestPosterCard from "@/components/RequestPosterCard";
@@ -285,6 +286,7 @@ export default function Requests() {
               onPageChange={setSearchPageParam}
               isLoading={search.isLoading || search.isFetching}
               isError={search.isError}
+              errorMessage={requestErrorMessage(search.error)}
               totalPages={search.data?.total_pages ?? 0}
               totalResults={search.data?.total_results ?? 0}
               results={search.data?.results ?? []}
@@ -297,7 +299,10 @@ export default function Requests() {
           ) : discovery.isError ? (
             <EmptyPanel
               title="Discovery is offline"
-              detail="TMDB couldn't be reached. Try the search bar above, or refresh in a moment."
+              detail={
+                requestErrorMessage(discovery.error) ??
+                "TMDB couldn't be reached. Try the search bar above, or refresh in a moment."
+              }
             />
           ) : (
             <div className="space-y-10">
@@ -596,6 +601,7 @@ function SearchResultsView({
   onPageChange,
   isLoading,
   isError,
+  errorMessage,
   totalPages,
   totalResults,
   results,
@@ -609,6 +615,7 @@ function SearchResultsView({
   onPageChange: (page: number) => void;
   isLoading: boolean;
   isError: boolean;
+  errorMessage?: string;
   totalPages: number;
   totalResults: number;
   results: RequestMediaResult[];
@@ -681,7 +688,7 @@ function SearchResultsView({
       {isError ? (
         <EmptyPanel
           title="Search failed"
-          detail="TMDB search couldn't be loaded. Try again in a moment."
+          detail={errorMessage ?? "TMDB search couldn't be loaded. Try again in a moment."}
         />
       ) : isLoading ? (
         <SearchGridSkeleton />
@@ -740,6 +747,10 @@ function SearchResultsView({
       )}
     </div>
   );
+}
+
+function requestErrorMessage(error: unknown): string | undefined {
+  return error instanceof ApiClientError ? error.message : undefined;
 }
 
 function MineSummary({
