@@ -680,7 +680,7 @@ export function LiveTVLibraryPage({
                 ))}
             </div>
           ) : null}
-          {tab === "program" ? (
+          {tab !== "channels" ? (
             <ProgrammeRow
               title={liveTVT("now", locale)}
               items={programmes}

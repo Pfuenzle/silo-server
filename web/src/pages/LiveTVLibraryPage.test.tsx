@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   playback: vi.fn(),
   toastError: vi.fn(),
   channels: [{ id: "source|one", name: "One", category: "News", artwork: { url: "/api/artwork/one" } }],
+  favoriteProgrammes: [] as readonly LiveTVProgramme[],
   guide: {
     data: undefined as { items: readonly LiveTVProgramme[]; stale: boolean } | undefined,
     isLoading: false,
@@ -37,7 +38,9 @@ vi.mock("@/hooks/queries/livetv", () => ({
     isError: false,
   }),
   useLiveTVGuide: () => mocks.guide,
-  useLiveTVFavorites: () => ({ data: [] }),
+  useLiveTVFavorites: (_libraryId: number, kind: string) => ({
+    data: kind === "programmes" ? mocks.favoriteProgrammes : [],
+  }),
   useToggleLiveTVFavorite: () => ({ mutate: vi.fn() }),
 }));
 vi.mock("@/components/LibraryHeader", () => ({
@@ -79,6 +82,7 @@ describe("LiveTVLibraryPage", () => {
     mocks.playback.mockReset();
     mocks.toastError.mockReset();
     mocks.channels = [{ id: "source|one", name: "One", category: "News", artwork: { url: "/api/artwork/one" } }];
+    mocks.favoriteProgrammes = [];
     mocks.guide = {
       data: { items: [], stale: false },
       isLoading: false,
@@ -110,6 +114,30 @@ describe("LiveTVLibraryPage", () => {
     ) => URLSearchParams;
     const next = updater(new URLSearchParams("tab=program&view=grid"));
     expect(next.toString()).toBe("tab=program&view=list");
+  });
+
+  it("renders a favorite programme in the Favorites tab", async () => {
+    const programme = {
+      id: "programme-1",
+      channel_id: "source|one",
+      channel_name: "One",
+      title: "Morning News",
+      description: "The latest headlines.",
+      starts_at: new Date(Date.now() - 60_000).toISOString(),
+      ends_at: new Date(Date.now() + 60_000).toISOString(),
+      artwork: { url: "/api/artwork/programme" },
+      rating: 4.5,
+    } satisfies LiveTVProgramme;
+    mocks.favoriteProgrammes = [programme];
+    mocks.guide = {
+      data: { items: [programme], stale: false },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    };
+    await renderPage();
+
+    expect(container.textContent).toContain("Morning News");
   });
 
   it("shows a localized error when playback is unavailable", async () => {
