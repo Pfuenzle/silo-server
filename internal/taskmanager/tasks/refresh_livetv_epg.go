@@ -24,6 +24,7 @@ type liveTVFolderSource interface {
 type liveTVSourceLister interface {
 	ListSources(context.Context, int) ([]livetv.Source, error)
 	GetSource(context.Context, int, string) (livetv.Source, error)
+	ListEPGChannelMappings(context.Context, int, int64) (map[string]livetv.ChannelMapping, error)
 }
 
 type liveTVSourceRefresher interface {
@@ -122,7 +123,18 @@ func (t *RefreshLiveTVEPGTask) Execute(ctx context.Context, progress taskmanager
 		}
 		result.Attempted++
 		progress.Report(float64(index)/float64(len(targets))*100, fmt.Sprintf("Refreshing %s", source.Name))
-		_, refreshErr := t.refresher.RefreshSource(ctx, source, nil)
+		mappings := map[string]livetv.ChannelMapping(nil)
+		var refreshErr error
+		if source.Kind == livetv.SourceKindEPG {
+			mappings, refreshErr = t.sources.ListEPGChannelMappings(ctx, source.LibraryID, source.ID)
+			if refreshErr != nil {
+				result.Failed++
+				result.Stale++
+				result.Sources = append(result.Sources, liveTVSourceResult{LibraryID: source.LibraryID, SourceKey: source.SourceKey, Status: "stale", Error: refreshErr.Error()})
+				continue
+			}
+		}
+		_, refreshErr = t.refresher.RefreshSource(ctx, source, mappings)
 		if refreshErr != nil {
 			result.Failed++
 			result.Stale++

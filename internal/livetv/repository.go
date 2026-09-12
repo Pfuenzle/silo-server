@@ -48,6 +48,7 @@ type ProgrammeRepository interface {
 type ChannelEPGMappingRepository interface {
 	UpsertChannelEPGMapping(ctx context.Context, mapping ChannelEPGMapping) error
 	ListChannelEPGMappings(ctx context.Context, libraryID int, channelID int64) ([]ChannelEPGMapping, error)
+	ListEPGChannelMappings(ctx context.Context, libraryID int, epgSourceID int64) (map[string]ChannelMapping, error)
 }
 
 type PostgresRepository struct{ pool *pgxpool.Pool }
@@ -202,12 +203,12 @@ FROM live_tv_channels WHERE library_id = $1 AND stable_id = $2`
 func (r *PostgresRepository) ListChannels(ctx context.Context, libraryID, limit, offset int) ([]Channel, int, error) {
 	rows, err := r.pool.Query(ctx, `SELECT id, library_id, source_id, external_id, stable_id, name, channel_number, category, stream_url, artwork, rating
 	FROM live_tv_channels WHERE library_id = $1
-	-- Numeric-only values sort by value; compound and nonnumeric labels keep text fallback ordering.
-	ORDER BY CASE
-		WHEN channel_number ~ '^[0-9]+$' THEN channel_number::numeric
-		ELSE NULL
-	END NULLS LAST,
-	channel_number NULLS LAST, name, stable_id LIMIT $2 OFFSET $3`, libraryID, limit, offset)
+		-- Numeric-only values sort by value; compound and nonnumeric labels keep text fallback ordering.
+		ORDER BY CASE
+			WHEN channel_number ~ '^[0-9]+$' THEN channel_number::numeric
+			ELSE NULL
+		END NULLS LAST,
+		channel_number NULLS LAST, name, stable_id LIMIT $2 OFFSET $3`, libraryID, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing Live TV channels: %w", err)
 	}
@@ -228,6 +229,30 @@ func (r *PostgresRepository) ListChannels(ctx context.Context, libraryID, limit,
 		return nil, 0, fmt.Errorf("counting Live TV channels: %w", err)
 	}
 	return channels, total, nil
+}
+
+func (r *PostgresRepository) ListEPGChannelMappings(ctx context.Context, libraryID int, epgSourceID int64) (map[string]ChannelMapping, error) {
+	rows, err := r.pool.Query(ctx, `SELECT c.external_id, m.epg_channel_id, c.name
+	FROM live_tv_channel_epg_mappings m
+	JOIN live_tv_channels c ON c.id = m.channel_id AND c.library_id = m.library_id
+	WHERE m.library_id = $1 AND m.epg_source_id = $2
+	ORDER BY c.external_id`, libraryID, epgSourceID)
+	if err != nil {
+		return nil, fmt.Errorf("listing Live TV EPG channel mappings: %w", err)
+	}
+	defer rows.Close()
+	mappings := make(map[string]ChannelMapping)
+	for rows.Next() {
+		var externalID, epgChannelID, name string
+		if err := rows.Scan(&externalID, &epgChannelID, &name); err != nil {
+			return nil, fmt.Errorf("scanning Live TV EPG channel mapping: %w", err)
+		}
+		mappings[externalID] = ChannelMapping{ProviderID: epgChannelID, DisplayName: name}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating Live TV EPG channel mappings: %w", err)
+	}
+	return mappings, nil
 }
 
 func (r *PostgresRepository) CreateProgramme(ctx context.Context, programme Programme) (Programme, error) {

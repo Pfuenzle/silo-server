@@ -90,6 +90,38 @@ func TestPostgresRepository_ListChannelsOrdersNumericChannelNumbers(t *testing.T
 	}
 }
 
+func TestPostgresRepository_ListChannelsUsesDeterministicFallbackOrdering(t *testing.T) {
+	// Given numeric, compound, and nonnumeric channel labels.
+	pool := liveTVTestPool(t)
+	ctx := context.Background()
+	libraryID, sourceID, _ := seedLiveTVFixtures(t, pool)
+	repo := NewPostgresRepository(pool)
+	for _, number := range []string{"10-1", "News", "2A", "10-2"} {
+		if _, err := repo.CreateChannel(ctx, Channel{
+			LibraryID: libraryID, SourceID: sourceID, ExternalID: "fallback-" + number,
+			StableID: SourceQualifiedID("playlist-a|fallback-" + number), Name: "Channel " + number, Number: number,
+		}); err != nil {
+			t.Fatalf("create channel %s: %v", number, err)
+		}
+	}
+
+	// When channels are listed for the library.
+	channels, _, err := repo.ListChannels(ctx, libraryID, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Then fallback labels are ordered by label, with stable name and ID ties.
+	got := make([]string, 0, len(channels))
+	for _, channel := range channels {
+		got = append(got, channel.Number)
+	}
+	want := []string{"10-1", "10-2", "2A", "News"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("channel numbers = %v, want %v", got, want)
+	}
+}
+
 func TestPostgresRepository_CreateSourceDefaultsOmittedConfig(t *testing.T) {
 	// Given a valid source request with no optional config payload.
 	pool := liveTVTestPool(t)

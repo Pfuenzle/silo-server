@@ -103,6 +103,32 @@ func TestRefreshLiveTVEPGTask_refreshesPlaylistsBeforeEPG(t *testing.T) {
 	}
 }
 
+func TestRefreshLiveTVEPGTask_passesPersistedMappingsToEPGRefresh(t *testing.T) {
+	// Given an EPG source with a persisted playlist-to-provider mapping.
+	sources := &epgSourceRepoStub{sources: map[int][]livetv.Source{10: {
+		{ID: 1, LibraryID: 10, Kind: livetv.SourceKindPlaylist, SourceKey: "playlist", Enabled: true},
+		{ID: 2, LibraryID: 10, Kind: livetv.SourceKindEPG, SourceKey: "epg", Enabled: true},
+	}}}
+	sources.mappings = map[int64]map[string]livetv.ChannelMapping{
+		2: {"playlist-news": {ProviderID: "xml-news", DisplayName: "News"}},
+	}
+	refresher := &epgRefresherStub{}
+	task := NewRefreshLiveTVEPGTask(RefreshLiveTVEPGTaskConfig{
+		Folders: &epgFolderRepoStub{folders: []*models.MediaFolder{{ID: 10, Type: "livetv", Enabled: true}}},
+		Sources: sources, Refresher: refresher, Now: time.Now,
+	})
+
+	// When the scheduled refresh executes.
+	if err := task.Execute(context.Background(), &recordingProgress{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Then the persisted mapping reaches the EPG parser boundary.
+	if got := refresher.mapping["playlist-news"]; got.ProviderID != "xml-news" {
+		t.Fatalf("EPG mapping = %#v, want provider xml-news", refresher.mapping)
+	}
+}
+
 func TestRefreshLiveTVEPGTask_resultUsesInjectedClock(t *testing.T) {
 	// Given a task with a deterministic server clock and no configured sources.
 	when := time.Date(2026, 9, 10, 2, 0, 0, 0, time.FixedZone("fixture", 2*60*60))
@@ -289,7 +315,12 @@ func (r *epgFolderRepoStub) GetEnabled(context.Context) ([]*models.MediaFolder, 
 }
 
 type epgSourceRepoStub struct {
-	sources map[int][]livetv.Source
+	sources  map[int][]livetv.Source
+	mappings map[int64]map[string]livetv.ChannelMapping
+}
+
+func (r *epgSourceRepoStub) ListEPGChannelMappings(_ context.Context, _ int, sourceID int64) (map[string]livetv.ChannelMapping, error) {
+	return r.mappings[sourceID], nil
 }
 
 func (r *epgSourceRepoStub) ListSources(_ context.Context, libraryID int) ([]livetv.Source, error) {
@@ -312,9 +343,10 @@ type epgRefresherStub struct {
 	errors  map[int64]error
 	started chan struct{}
 	release chan struct{}
+	mapping map[string]livetv.ChannelMapping
 }
 
-func (r *epgRefresherStub) RefreshSource(ctx context.Context, source livetv.Source, _ map[string]livetv.ChannelMapping) (livetv.Diagnostics, error) {
+func (r *epgRefresherStub) RefreshSource(ctx context.Context, source livetv.Source, mapping map[string]livetv.ChannelMapping) (livetv.Diagnostics, error) {
 	r.mu.Lock()
 	r.count++
 	r.order = append(r.order, source.ID)
@@ -327,6 +359,9 @@ func (r *epgRefresherStub) RefreshSource(ctx context.Context, source livetv.Sour
 	}
 	release := r.release
 	err := r.errors[source.ID]
+	if source.Kind == livetv.SourceKindEPG {
+		r.mapping = mapping
+	}
 	r.mu.Unlock()
 	if release != nil {
 		select {
