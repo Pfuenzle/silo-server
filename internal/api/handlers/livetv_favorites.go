@@ -148,7 +148,7 @@ func (h *LiveTVHandler) HandleListFavoriteProgrammes(w http.ResponseWriter, r *h
 		if getErr != nil {
 			continue
 		}
-		response.Programmes = append(response.Programmes, h.programmeResponse(r.Context(), programme, ""))
+		response.Programmes = append(response.Programmes, h.programmeResponse(r.Context(), programme, nil))
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -170,6 +170,15 @@ func (h *LiveTVHandler) HandleHomeSections(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load Live TV sections")
 		return
 	}
+	channelsForCurrent, _, err := h.repo.ListChannels(r.Context(), favorite.LibraryID, liveTVMaxPageSize, 0)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load Live TV sections")
+		return
+	}
+	channelsByID := make(map[int64]*livetv.Channel, len(channelsForCurrent))
+	for index := range channelsForCurrent {
+		channelsByID[channelsForCurrent[index].ID] = &channelsForCurrent[index]
+	}
 	current, err := h.repo.ListFavoriteProgrammesNow(r.Context(), favorite.UserID, favorite.ProfileID, favorite.LibraryID, now, liveTVDefaultPageSize)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load Live TV sections")
@@ -187,19 +196,19 @@ func (h *LiveTVHandler) HandleHomeSections(w http.ResponseWriter, r *http.Reques
 	}
 	response := liveTVHomeSectionsResponse{CurrentlyAiring: make([]liveTVProgrammeResponse, 0, len(allCurrent)), FavoriteChannelsAiring: make([]liveTVChannelResponse, 0, len(channels)), FavoriteProgrammesAiring: make([]liveTVProgrammeResponse, 0, len(current)), TopRatedFavoriteProgrammes: make([]liveTVProgrammeResponse, 0, len(topRated)), UpcomingFavoriteProgrammes: make([]liveTVProgrammeResponse, 0, len(upcoming))}
 	for _, programme := range allCurrent {
-		response.CurrentlyAiring = append(response.CurrentlyAiring, h.programmeResponse(r.Context(), programme, ""))
+		response.CurrentlyAiring = append(response.CurrentlyAiring, h.programmeResponse(r.Context(), programme, channelsByID[programme.ChannelID]))
 	}
 	for _, channel := range channels {
 		response.FavoriteChannelsAiring = append(response.FavoriteChannelsAiring, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: h.authorizeArtwork(r.Context(), channel.Artwork), Rating: channel.Rating})
 	}
 	for _, programme := range current {
-		response.FavoriteProgrammesAiring = append(response.FavoriteProgrammesAiring, h.programmeResponse(r.Context(), programme, ""))
+		response.FavoriteProgrammesAiring = append(response.FavoriteProgrammesAiring, h.programmeResponse(r.Context(), programme, nil))
 	}
 	for _, programme := range topRated {
-		response.TopRatedFavoriteProgrammes = append(response.TopRatedFavoriteProgrammes, h.programmeResponse(r.Context(), programme, ""))
+		response.TopRatedFavoriteProgrammes = append(response.TopRatedFavoriteProgrammes, h.programmeResponse(r.Context(), programme, nil))
 	}
 	for _, programme := range upcoming {
-		response.UpcomingFavoriteProgrammes = append(response.UpcomingFavoriteProgrammes, h.programmeResponse(r.Context(), programme, ""))
+		response.UpcomingFavoriteProgrammes = append(response.UpcomingFavoriteProgrammes, h.programmeResponse(r.Context(), programme, nil))
 	}
 	writeJSON(w, http.StatusOK, response)
 }

@@ -74,6 +74,7 @@ type liveTVChannelResponse struct {
 type liveTVProgrammeResponse struct {
 	ID          string          `json:"id"`
 	ChannelID   string          `json:"channel_id"`
+	ChannelName string          `json:"channel_name"`
 	Title       string          `json:"title"`
 	Description string          `json:"description,omitempty"`
 	StartsAt    time.Time       `json:"starts_at"`
