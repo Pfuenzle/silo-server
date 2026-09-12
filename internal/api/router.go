@@ -2275,6 +2275,13 @@ func NewRouter(deps Dependencies) chi.Router {
 					r.Get("/user/libraries", libraryHandler.HandleListUserLibraries)
 				}
 				if liveTVHandler != nil {
+					if deps.LivePlayback != nil && deps.LivePlaybackOrigin == "/api/v1" {
+						r.Group(func(r chi.Router) {
+							r.Use(apimw.RequireProfile)
+							r.Get("/stream/live/{grant_id}/manifest", liveTVHandler.HandlePlaybackStream)
+							r.Get("/stream/live/{grant_id}/segment/{name}", liveTVHandler.HandlePlaybackStream)
+						})
+					}
 					r.Get("/livetv/capability", liveTVHandler.HandleCapability)
 					r.Delete("/livetv/playback/{grant_id}", liveTVHandler.HandleStopPlayback)
 					r.Route("/livetv/libraries/{library_id}", func(r chi.Router) {
@@ -3679,6 +3686,10 @@ func skipNativeMediaCompression(r *http.Request) bool {
 	}
 	switch {
 	case len(p) == 4 && p[2] == "stream" && p[3] != "":
+		return true
+	case len(p) == 6 && p[2] == "stream" && p[3] == "live" && p[4] != "" && p[5] == "manifest":
+		return true
+	case len(p) == 7 && p[2] == "stream" && p[3] == "live" && p[4] != "" && p[5] == "segment" && p[6] != "":
 		return true
 	case len(p) == 7 && p[2] == "playback" && p[3] == "transcode" && p[4] != "" && p[5] == "segment" && p[6] != "":
 		return true

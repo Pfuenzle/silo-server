@@ -15,6 +15,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/livetv"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/scanner"
 	"github.com/Silo-Server/silo-server/internal/streamtelemetry"
@@ -73,13 +74,21 @@ func TestNewRouter_mountsLiveTVSourcesAtTopLevelNativePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	router := NewRouter(Dependencies{DB: pool, Config: cfg, FolderRepo: catalog.NewFolderRepository(pool)})
+	router := NewRouter(Dependencies{
+		DB:                 pool,
+		Config:             cfg,
+		FolderRepo:         catalog.NewFolderRepository(pool),
+		LivePlayback:       livetv.NewLivePlaybackService(livetv.LivePlaybackConfig{}),
+		LivePlaybackOrigin: "/api/v1",
+	})
 	wanted := map[string]bool{
 		"GET /api/v1/livetv/libraries/{library_id}/sources/":                      true,
 		"POST /api/v1/livetv/libraries/{library_id}/sources/":                     true,
 		"PUT /api/v1/livetv/libraries/{library_id}/sources/{source_key}":          true,
 		"DELETE /api/v1/livetv/libraries/{library_id}/sources/{source_key}":       true,
 		"POST /api/v1/livetv/libraries/{library_id}/sources/{source_key}/refresh": true,
+		"GET /api/v1/stream/live/{grant_id}/manifest":                             true,
+		"GET /api/v1/stream/live/{grant_id}/segment/{name}":                       true,
 	}
 	seen := make(map[string]bool)
 
