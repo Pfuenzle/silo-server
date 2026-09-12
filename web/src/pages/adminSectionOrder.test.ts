@@ -54,4 +54,20 @@ describe("adminSectionOrder", () => {
       "random",
     ]);
   });
+
+  it("persists a reordered currently airing row with the surrounding home sections", () => {
+    const sections = [
+      makeSection("continue", 0),
+      { ...makeSection("live-tv", 1), section_type: "currently_airing" },
+      makeSection("recent", 2),
+    ];
+
+    const reordered = moveSectionBeforeTarget(sections, "live-tv", "continue");
+
+    expect(buildSectionReorderEntries(reordered)).toEqual([
+      { id: "live-tv", position: 0 },
+      { id: "continue", position: 1 },
+      { id: "recent", position: 2 },
+    ]);
+  });
 });

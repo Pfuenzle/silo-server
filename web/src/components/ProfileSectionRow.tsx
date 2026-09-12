@@ -7,6 +7,10 @@ interface Props {
   onShow: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
 }
 
 export default function ProfileSectionRow({
@@ -18,12 +22,33 @@ export default function ProfileSectionRow({
   onShow,
   onEdit,
   onDelete,
+  onMoveUp,
+  onMoveDown,
+  canMoveUp,
+  canMoveDown,
 }: Props) {
   return (
     <div
       className={`grid grid-cols-[24px_1fr_120px_80px_80px] items-center gap-3 border-b border-white/5 px-2 py-2 text-sm ${hidden ? "opacity-55" : ""}`}
     >
-      <span className="cursor-grab text-white/30">⋮⋮</span>
+      <div className="flex flex-col items-center gap-0.5 text-white/50">
+        <button
+          type="button"
+          onClick={onMoveUp}
+          disabled={!canMoveUp}
+          aria-label={`Move ${title} up`}
+        >
+          ↑
+        </button>
+        <button
+          type="button"
+          onClick={onMoveDown}
+          disabled={!canMoveDown}
+          aria-label={`Move ${title} down`}
+        >
+          ↓
+        </button>
+      </div>
       <div>
         <div className="font-semibold">{title}</div>
         <div className="font-mono text-[10px] opacity-55">· {sectionType}</div>

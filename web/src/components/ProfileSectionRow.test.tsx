@@ -16,6 +16,10 @@ describe("ProfileSectionRow", () => {
         onShow={() => {}}
         onEdit={() => {}}
         onDelete={() => {}}
+        onMoveUp={() => {}}
+        onMoveDown={() => {}}
+        canMoveUp={false}
+        canMoveDown={true}
       />,
     );
     expect(screen.getByText(/server default/i)).toBeInTheDocument();
@@ -35,6 +39,10 @@ describe("ProfileSectionRow", () => {
         onShow={() => {}}
         onEdit={() => {}}
         onDelete={onDelete}
+        onMoveUp={() => {}}
+        onMoveDown={() => {}}
+        canMoveUp={true}
+        canMoveDown={false}
       />,
     );
     expect(screen.getByText(/yours/i)).toBeInTheDocument();

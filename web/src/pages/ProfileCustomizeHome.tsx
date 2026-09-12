@@ -5,13 +5,30 @@ import RecipeGalleryModal from "@/components/RecipeGallery/RecipeGalleryModal";
 import RecipeConfigDrawer from "@/components/RecipeGallery/RecipeConfigDrawer";
 import { api } from "@/api/client";
 import type { GalleryPreset, RecipeDefinition } from "@/lib/recipes";
+import { useUserLibraries } from "@/hooks/queries/libraries";
 
-interface ProfileSection {
+export interface ProfileSection {
   id: string;
   is_custom: boolean;
   section_type: string;
   title: string;
   hidden: boolean;
+}
+
+export function reorderProfileSections(
+  sections: readonly ProfileSection[],
+  id: string,
+  direction: -1 | 1,
+): ProfileSection[] {
+  const index = sections.findIndex((section) => section.id === id);
+  const targetIndex = index + direction;
+  if (index < 0 || targetIndex < 0 || targetIndex >= sections.length) return [...sections];
+
+  const nextSections = [...sections];
+  const [moved] = nextSections.splice(index, 1);
+  if (!moved) return [...sections];
+  nextSections.splice(targetIndex, 0, moved);
+  return nextSections;
 }
 
 interface SectionsSettingsResponse {
@@ -88,6 +105,7 @@ function rawToWire(o: RawOverride) {
 }
 
 export default function ProfileCustomizeHome() {
+  const { data: libraries = [] } = useUserLibraries();
   const [sections, setSections] = useState<ProfileSection[]>([]);
   const [rawOverrides, setRawOverrides] = useState<RawOverride[]>([]);
   const [galleryOpen, setGalleryOpen] = useState(false);
@@ -139,7 +157,7 @@ export default function ProfileCustomizeHome() {
   }, []);
 
   async function saveOverrides(
-    updates: Array<{ id: string; hidden?: boolean; removed?: boolean }>,
+    updates: Array<{ id: string; hidden?: boolean; removed?: boolean; position?: number }>,
   ) {
     // PUT /profile/sections is a full-replacement save for this profile+scope.
     // Start from the existing stored overrides so unrelated customizations
@@ -156,6 +174,7 @@ export default function ProfileCustomizeHome() {
         ...o,
         Hidden: u.hidden ?? o.Hidden,
         Removed: u.removed ?? o.Removed,
+        Position: u.position ?? o.Position,
       };
     });
 
@@ -168,7 +187,7 @@ export default function ProfileCustomizeHome() {
       merged.push({
         ID: "",
         SectionID: u.id,
-        Position: null,
+        Position: u.position ?? null,
         Hidden: u.hidden ?? false,
         Removed: u.removed ?? false,
         SectionType: "",
@@ -196,6 +215,13 @@ export default function ProfileCustomizeHome() {
       console.error("save overrides failed:", err);
     }
     void load();
+  }
+
+  function moveSection(id: string, direction: -1 | 1) {
+    const nextSections = reorderProfileSections(sections, id, direction);
+    if (nextSections.every((section, index) => section.id === sections[index]?.id)) return;
+    setSections(nextSections);
+    void saveOverrides(nextSections.map((section, position) => ({ id: section.id, position })));
   }
 
   async function reset() {
@@ -248,6 +274,10 @@ export default function ProfileCustomizeHome() {
               // TODO: open the edit drawer for user-added recipes; out of scope here.
             }}
             onDelete={() => void saveOverrides([{ id: s.id, removed: true }])}
+            onMoveUp={() => moveSection(s.id, -1)}
+            onMoveDown={() => moveSection(s.id, 1)}
+            canMoveUp={sections[0]?.id !== s.id}
+            canMoveDown={sections[sections.length - 1]?.id !== s.id}
           />
         ))}
       </div>
@@ -255,6 +285,7 @@ export default function ProfileCustomizeHome() {
       <RecipeGalleryModal
         open={galleryOpen}
         onClose={() => setGalleryOpen(false)}
+        libraries={libraries}
         hideAdminOnly
         onPick={(def, preset) => {
           setGalleryOpen(false);
