@@ -1,5 +1,21 @@
 package tmdb
 
+import "fmt"
+
+// APIError describes a rejected TMDB HTTP response without retaining its URL.
+type APIError struct {
+	HTTPStatus int
+	StatusCode int
+	Message    string
+}
+
+func (e *APIError) Error() string {
+	if e.Message == "" {
+		return fmt.Sprintf("tmdb: HTTP %d", e.HTTPStatus)
+	}
+	return fmt.Sprintf("tmdb: HTTP %d: %s", e.HTTPStatus, e.Message)
+}
+
 // paginatedResponse is a generic TMDB collection/list response.
 type paginatedResponse[T any] struct {
 	Page         int `json:"page"`

@@ -30,6 +30,32 @@ func TestNewClientUsesProjectAPIKeyWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestSearchMediaReturnsSafeAPIError(t *testing.T) {
+	// Given a TMDB response that rejects the configured credential.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"status_code":7,"status_message":"Invalid API key"}`, http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", 1000)
+	client.SetBaseURL(server.URL)
+
+	// When Requests searches through the configured TMDB client.
+	_, err := client.SearchMedia(context.Background(), "all", "dune", 1)
+
+	// Then the typed error preserves only safe status metadata.
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v, want *APIError", err)
+	}
+	if apiErr.HTTPStatus != http.StatusUnauthorized || apiErr.StatusCode != 7 || apiErr.Message != "Invalid API key" {
+		t.Fatalf("api error = %+v", apiErr)
+	}
+	if strings.Contains(err.Error(), "api_key=test-key") {
+		t.Fatalf("error exposed credential-bearing URL: %v", err)
+	}
+}
+
 func TestGetCollectionPresetTrending(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/trending/all/day" {

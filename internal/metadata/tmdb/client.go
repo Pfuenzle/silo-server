@@ -151,9 +151,13 @@ func (c *Client) doGet(ctx context.Context, path string, dest any) error {
 			resp.Body.Close()
 			var apiErr apiError
 			if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.StatusMessage != "" {
-				return fmt.Errorf("tmdb: HTTP %d: %s", resp.StatusCode, apiErr.StatusMessage)
+				return &APIError{
+					HTTPStatus: resp.StatusCode,
+					StatusCode: apiErr.StatusCode,
+					Message:    apiErr.StatusMessage,
+				}
 			}
-			return fmt.Errorf("tmdb: HTTP %d", resp.StatusCode)
+			return &APIError{HTTPStatus: resp.StatusCode}
 		}
 
 		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBody)).Decode(dest)
