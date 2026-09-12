@@ -25,6 +25,7 @@ export type LiveTVChannel = z.infer<typeof liveTVChannelSchema>;
 export const liveTVProgrammeSchema = z.object({
   id: z.string(),
   channel_id: z.string(),
+  channel_name: z.string().optional(),
   title: z.string(),
   description: z.string().optional(),
   starts_at: z.string(),

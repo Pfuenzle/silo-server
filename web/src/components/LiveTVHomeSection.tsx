@@ -1,5 +1,6 @@
 import { Radio, Star } from "lucide-react";
 import type { UseQueryResult } from "@tanstack/react-query";
+import { Link } from "react-router";
 
 import type { LiveTVChannel, LiveTVHomeSections, LiveTVProgramme } from "@/api/livetv";
 import { Button } from "@/components/ui/button";
@@ -7,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useLiveTVHomeSections } from "@/hooks/queries/livetv";
 import { formatTime } from "@/lib/datetime";
 import { liveTVT, type LiveTVLocale } from "@/lib/i18n";
+import MediaCarousel from "@/components/MediaCarousel";
 
 type LiveTVHomeQuery = Pick<
   UseQueryResult<LiveTVHomeSections>,
@@ -17,12 +19,14 @@ type LiveTVHomeSectionProps = {
   readonly libraryId?: number;
   readonly locale?: LiveTVLocale;
   readonly query?: LiveTVHomeQuery;
+  readonly currentOnly?: boolean;
 };
 
 export function LiveTVHomeSection({
   libraryId,
   locale = "en",
   query: providedQuery,
+  currentOnly = false,
 }: LiveTVHomeSectionProps) {
   const liveQuery = useLiveTVHomeSections(libraryId ?? 0, libraryId !== undefined);
   const query = providedQuery ?? liveQuery;
@@ -64,24 +68,76 @@ export function LiveTVHomeSection({
           {liveTVT("homeStale", locale)}
         </p>
       ) : null}
-      <HomeRail title={liveTVT("homeCurrent", locale)} programmes={sections.currently_airing} />
-      <ChannelRail
-        title={liveTVT("homeFavoriteChannels", locale)}
-        channels={sections.favorite_channels_currently_airing}
+      <CurrentlyAiringRail
+        title={liveTVT("homeCurrent", locale)}
+        programmes={sections.currently_airing}
+        libraryId={libraryId}
       />
-      <HomeRail
-        title={liveTVT("homeFavoriteProgrammes", locale)}
-        programmes={sections.favorite_programmes_currently_airing}
-      />
-      <HomeRail
-        title={liveTVT("homeTopRated", locale)}
-        programmes={sections.top_rated_favorite_programmes}
-      />
-      <HomeRail
-        title={liveTVT("homeUpcoming", locale)}
-        programmes={sections.upcoming_favorite_programmes}
-      />
+      {currentOnly ? null : (
+        <>
+          <ChannelRail
+            title={liveTVT("homeFavoriteChannels", locale)}
+            channels={sections.favorite_channels_currently_airing}
+          />
+          <HomeRail
+            title={liveTVT("homeFavoriteProgrammes", locale)}
+            programmes={sections.favorite_programmes_currently_airing}
+          />
+          <HomeRail
+            title={liveTVT("homeTopRated", locale)}
+            programmes={sections.top_rated_favorite_programmes}
+          />
+          <HomeRail
+            title={liveTVT("homeUpcoming", locale)}
+            programmes={sections.upcoming_favorite_programmes}
+          />
+        </>
+      )}
     </section>
+  );
+}
+
+function CurrentlyAiringRail({
+  title,
+  programmes,
+  libraryId,
+}: {
+  readonly title: string;
+  readonly programmes: readonly LiveTVProgramme[];
+  readonly libraryId?: number;
+}) {
+  if (programmes.length === 0) return null;
+
+  return (
+    <div data-testid="live-tv-currently-airing-row">
+      <MediaCarousel title={title}>
+        {programmes.map((programme) => (
+          <article
+            key={programme.id}
+            className="border-border bg-surface flex w-[260px] shrink-0 flex-col gap-3 rounded-xl border p-4 sm:w-[315px]"
+          >
+            <div className="min-w-0">
+              <h3 className="truncate text-sm font-semibold">{programme.title}</h3>
+              <p className="text-muted-foreground mt-1 truncate text-xs">
+                {programme.channel_name ?? programme.channel_id}
+              </p>
+              <p className="text-muted-foreground mt-2 text-xs">
+                {formatTime(programme.starts_at)} – {formatTime(programme.ends_at)}
+              </p>
+            </div>
+            {libraryId !== undefined ? (
+              <Link
+                to={`/library/${libraryId}?tab=program`}
+                aria-label={`${liveTVT("watchLive")}: ${programme.title}`}
+                className="text-primary focus-visible:ring-ring mt-auto inline-flex min-h-11 items-center text-xs font-semibold uppercase focus-visible:ring-2 focus-visible:outline-none"
+              >
+                {liveTVT("watchLive")}
+              </Link>
+            ) : null}
+          </article>
+        ))}
+      </MediaCarousel>
+    </div>
   );
 }
 
