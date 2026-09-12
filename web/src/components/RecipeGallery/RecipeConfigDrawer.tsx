@@ -38,7 +38,13 @@ export default function RecipeConfigDrawer({
   showBulkApply = true,
   showEnabled = true,
 }: Props) {
-  const [title, setTitle] = useState(preset.display_name);
+  const locale = typeof navigator === "undefined" ? "en" : navigator.language.slice(0, 2);
+  const displayName = preset.display_name_localized?.[locale] ?? preset.display_name;
+  const description =
+    preset.description_long ??
+    preset.description_short_localized?.[locale] ??
+    preset.description_short;
+  const [title, setTitle] = useState(displayName);
   const [params, setParams] = useState<Record<string, unknown>>({ ...preset.default_params });
   const [limit, setLimit] = useState<number>(20);
   const [featured, setFeatured] = useState(false);
@@ -86,7 +92,7 @@ export default function RecipeConfigDrawer({
     <div className="max-w-[540px] rounded-xl border border-white/10 bg-zinc-900 p-6">
       <div className="flex items-center justify-between border-b border-white/10 pb-3">
         <h3 className="text-base font-semibold">
-          {preset.icon} {preset.display_name}
+          {preset.icon} {displayName}
         </h3>
         <button
           type="button"
@@ -98,7 +104,7 @@ export default function RecipeConfigDrawer({
       </div>
 
       <div className="mt-4 rounded border-l-2 border-indigo-500 bg-indigo-500/10 px-3 py-2 text-sm">
-        {preset.description_long ?? preset.description_short}
+        {description}
       </div>
 
       <div className="mt-4">

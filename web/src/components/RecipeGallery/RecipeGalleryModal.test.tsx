@@ -7,6 +7,11 @@ import * as api from "@/lib/recipes";
 vi.mock("@/lib/recipes");
 
 beforeEach(() => {
+  vi.mocked(api.recipeAvailableForLibraries).mockImplementation(
+    (definition, libraries) =>
+      definition.required_library_type === undefined ||
+      libraries.some((library) => library.type === definition.required_library_type),
+  );
   vi.mocked(api.fetchRecipeCatalog).mockResolvedValue({
     categories: {
       library_staples: [
@@ -50,6 +55,51 @@ beforeEach(() => {
 });
 
 describe("RecipeGalleryModal", () => {
+  it("shows currently airing only when a Live TV library exists", async () => {
+    vi.mocked(api.fetchRecipeCatalog).mockResolvedValueOnce({
+      categories: {
+        library_staples: [
+          {
+            type: "currently_airing",
+            category: "library_staples",
+            required_library_type: "livetv",
+            avoid_duplicates: false,
+            supports_rotation: false,
+            admin_only: false,
+            presets: [
+              {
+                key: "currently_airing_default",
+                display_name: "Currently airing",
+                icon: "Live",
+                description_short: "Live TV programmes airing now.",
+                default_params: {},
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const { rerender } = render(
+      <RecipeGalleryModal
+        open
+        onClose={() => {}}
+        onPick={() => {}}
+        libraries={[{ type: "movies" }]}
+      />,
+    );
+    await waitFor(() => expect(screen.queryByText("Currently airing")).not.toBeInTheDocument());
+
+    rerender(
+      <RecipeGalleryModal
+        open
+        onClose={() => {}}
+        onPick={() => {}}
+        libraries={[{ type: "livetv" }]}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("Currently airing")).toBeInTheDocument());
+  });
+
   it("renders all category chips and recipe cards", async () => {
     render(<RecipeGalleryModal open onClose={() => {}} onPick={() => {}} />);
     await waitFor(() => expect(screen.getByText("Recently Added")).toBeInTheDocument());

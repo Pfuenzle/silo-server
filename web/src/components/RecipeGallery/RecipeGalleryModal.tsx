@@ -6,6 +6,7 @@ import {
   type GalleryPreset,
   type RecipeDefinition,
 } from "@/lib/recipes";
+import { recipeAvailableForLibraries } from "@/lib/recipes";
 
 function score(query: string, preset: GalleryPreset): number {
   const q = query.toLowerCase();
@@ -40,9 +41,16 @@ interface Props {
    * everything.
    */
   hideAdminOnly?: boolean;
+  libraries?: readonly { readonly type: string }[];
 }
 
-export default function RecipeGalleryModal({ open, onClose, onPick, hideAdminOnly }: Props) {
+export default function RecipeGalleryModal({
+  open,
+  onClose,
+  onPick,
+  hideAdminOnly,
+  libraries = [],
+}: Props) {
   const [catalog, setCatalog] = useState<Partial<Record<Category, RecipeDefinition[]>>>({});
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState<Category | "all">("all");
@@ -61,6 +69,7 @@ export default function RecipeGalleryModal({ open, onClose, onPick, hideAdminOnl
       if (activeCategory !== "all" && activeCategory !== cat) continue;
       for (const def of catalog[cat] ?? []) {
         if (hideAdminOnly && def.admin_only) continue;
+        if (!recipeAvailableForLibraries(def, libraries)) continue;
         for (const preset of def.presets ?? []) {
           const s = search.trim() ? score(search.trim(), preset) : 1;
           if (s === 0) continue;
@@ -72,7 +81,7 @@ export default function RecipeGalleryModal({ open, onClose, onPick, hideAdminOnl
       rows.sort((a, b) => b.score - a.score);
     }
     return rows;
-  }, [catalog, search, activeCategory, hideAdminOnly]);
+  }, [catalog, search, activeCategory, hideAdminOnly, libraries]);
 
   if (!open) return null;
 

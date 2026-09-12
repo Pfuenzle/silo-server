@@ -1,11 +1,65 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fetchRecipeCatalog, fetchCandidates, previewSection } from "./recipes";
+import {
+  fetchRecipeCatalog,
+  fetchCandidates,
+  previewSection,
+  recipeAvailableForLibraries,
+  filterRecipeCatalog,
+} from "./recipes";
 
 beforeEach(() => {
   vi.spyOn(globalThis, "fetch").mockReset();
 });
 
 describe("recipes API client", () => {
+  it("omits a Live TV recipe when no Live TV library is available", () => {
+    const definition = {
+      type: "currently_airing",
+      category: "library_staples" as const,
+      required_library_type: "livetv",
+      presets: [],
+      avoid_duplicates: false,
+      supports_rotation: false,
+      admin_only: false,
+    };
+
+    expect(recipeAvailableForLibraries(definition, [{ type: "movies" }])).toBe(false);
+    expect(recipeAvailableForLibraries(definition, [{ type: "livetv" }])).toBe(true);
+  });
+
+  it("filters recipe catalogs by required library type", () => {
+    const catalog = {
+      categories: {
+        library_staples: [
+        {
+          type: "currently_airing",
+          category: "library_staples" as const,
+          required_library_type: "livetv",
+          presets: [],
+          avoid_duplicates: false,
+          supports_rotation: false,
+          admin_only: false,
+        },
+        {
+          type: "recently_added",
+          category: "library_staples" as const,
+          presets: [],
+          avoid_duplicates: false,
+          supports_rotation: false,
+          admin_only: false,
+        },
+        ],
+      },
+    };
+
+    expect(
+      filterRecipeCatalog(catalog, [{ type: "movies" }]).categories.library_staples,
+    ).toHaveLength(1);
+    expect(
+      filterRecipeCatalog(catalog, [{ type: "livetv" }]).categories.library_staples,
+    ).toHaveLength(2);
+  });
+
   it("fetchRecipeCatalog returns categories", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,

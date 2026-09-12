@@ -4,6 +4,29 @@ import { describe, it, expect, vi } from "vitest";
 import RecipeCard from "./RecipeCard";
 
 describe("RecipeCard", () => {
+  it("uses the localized preset labels for the browser language", () => {
+    vi.spyOn(window.navigator, "language", "get").mockReturnValue("de-DE");
+    render(
+      <RecipeCard
+        preset={{
+          key: "currently_airing_default",
+          display_name: "Currently airing",
+          display_name_localized: { de: "Gerade läuft" },
+          icon: "Live",
+          description_short: "Live TV programmes airing right now.",
+          description_short_localized: { de: "Live-TV-Programme, die gerade laufen." },
+          default_params: {},
+        }}
+        category="library_staples"
+        onPick={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Gerade läuft" })).toBeInTheDocument();
+    expect(screen.getByText("Live-TV-Programme, die gerade laufen.")).toBeInTheDocument();
+    expect(screen.queryByText("Currently airing")).not.toBeInTheDocument();
+  });
+
   it("renders preset name, icon, description, and category tag", () => {
     render(
       <RecipeCard
