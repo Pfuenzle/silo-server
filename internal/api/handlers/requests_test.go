@@ -13,10 +13,12 @@ import (
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/auth"
+	"github.com/Silo-Server/silo-server/internal/metadata/tmdb"
 	mediarequests "github.com/Silo-Server/silo-server/internal/requests"
 )
 
 type fakeRequestService struct {
+	searchFn       func() (*mediarequests.MediaPage, error)
 	listStudiosFn  func() ([]mediarequests.DiscoverBrandCard, error)
 	listNetworksFn func() ([]mediarequests.DiscoverBrandCard, error)
 	listGenresFn   func() ([]mediarequests.DiscoverBrandCard, error)
@@ -59,6 +61,9 @@ func (f *fakeRequestService) BrowseGenre(_ context.Context, _ mediarequests.View
 }
 
 func (f *fakeRequestService) Search(context.Context, mediarequests.Viewer, string, mediarequests.MediaType, int) (*mediarequests.MediaPage, error) {
+	if f.searchFn != nil {
+		return f.searchFn()
+	}
 	return nil, nil
 }
 
@@ -188,6 +193,33 @@ func TestHandleListStudiosReturnsJSON(t *testing.T) {
 	}
 	if len(body.Studios) != 1 || body.Studios[0].Slug != "marvel-studios" {
 		t.Errorf("studios = %+v", body.Studios)
+	}
+}
+
+func TestHandleSearchReturnsSafeTMDBProviderError(t *testing.T) {
+	// Given a TMDB failure whose detail must not be exposed as an internal error.
+	svc := &fakeRequestService{searchFn: func() (*mediarequests.MediaPage, error) {
+		return nil, &tmdb.APIError{HTTPStatus: http.StatusUnauthorized, StatusCode: 7, Message: "Invalid API key"}
+	}}
+	h := NewRequestsHandler(svc)
+
+	// When the Requests search endpoint calls the provider.
+	rec := httptest.NewRecorder()
+	h.HandleSearch(rec, authedRequest("GET", "/api/v1/requests/search?q=dune&media_type=all"))
+
+	// Then the response identifies a safe provider failure without credentials.
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["error"] != "tmdb_provider_error" || body["message"] != "TMDB rejected the request (HTTP 401). Check the TMDB provider configuration." {
+		t.Fatalf("body = %#v", body)
+	}
+	if strings.Contains(rec.Body.String(), "api_key") || strings.Contains(rec.Body.String(), "Invalid API key") {
+		t.Fatalf("response exposed provider detail: %s", rec.Body.String())
 	}
 }
 

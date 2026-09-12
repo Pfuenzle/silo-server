@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/metadata/tmdb"
 	mediarequests "github.com/Silo-Server/silo-server/internal/requests"
 )
 
@@ -680,7 +681,10 @@ func writeRequestServiceError(w http.ResponseWriter, err error) {
 		return
 	}
 	var quota mediarequests.QuotaError
+	var tmdbErr *tmdb.APIError
 	switch {
+	case errors.As(err, &tmdbErr):
+		writeError(w, http.StatusBadGateway, "tmdb_provider_error", tmdbProviderErrorMessage(tmdbErr.HTTPStatus))
 	case errors.As(err, &quota):
 		writeJSON(w, http.StatusTooManyRequests, struct {
 			Error      string `json:"error"`
@@ -713,5 +717,16 @@ func writeRequestServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "invalid_state", "Request is not in a valid state for this action")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal_error", "Request operation failed")
+	}
+}
+
+func tmdbProviderErrorMessage(status int) string {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return "TMDB rejected the request (HTTP " + strconv.Itoa(status) + "). Check the TMDB provider configuration."
+	case http.StatusTooManyRequests:
+		return "TMDB is rate limiting requests (HTTP 429). Try again later."
+	default:
+		return "TMDB could not complete the request (HTTP " + strconv.Itoa(status) + "). Try again later."
 	}
 }
