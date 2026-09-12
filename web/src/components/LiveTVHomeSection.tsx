@@ -9,6 +9,7 @@ import { useLiveTVHomeSections } from "@/hooks/queries/livetv";
 import { formatTime } from "@/lib/datetime";
 import { liveTVT, type LiveTVLocale } from "@/lib/i18n";
 import MediaCarousel from "@/components/MediaCarousel";
+import { liveTVArtwork } from "@/pages/liveTVArtwork";
 
 type LiveTVHomeQuery = Pick<
   UseQueryResult<LiveTVHomeSections>,
@@ -116,6 +117,13 @@ function CurrentlyAiringRail({
             key={programme.id}
             className="border-border bg-surface flex w-[260px] shrink-0 flex-col gap-3 rounded-xl border p-4 sm:w-[315px]"
           >
+            {liveTVArtwork(programme.artwork) ? (
+              <img
+                src={liveTVArtwork(programme.artwork) ?? undefined}
+                alt=""
+                className="h-28 w-full rounded-lg object-cover"
+              />
+            ) : null}
             <div className="min-w-0">
               <h3 className="truncate text-sm font-semibold">{programme.title}</h3>
               <p className="text-muted-foreground mt-1 truncate text-xs">
@@ -159,6 +167,13 @@ function HomeRail({
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {programmes.map((programme) => (
           <article key={programme.id} className="border-border bg-surface rounded-xl border p-3">
+            {liveTVArtwork(programme.artwork) ? (
+              <img
+                src={liveTVArtwork(programme.artwork) ?? undefined}
+                alt=""
+                className="mb-3 h-24 w-full rounded-lg object-cover"
+              />
+            ) : null}
             <h3 className="truncate text-sm font-medium">{programme.title}</h3>
             <p className="text-muted-foreground mt-1 text-xs">
               {formatTime(programme.starts_at)} – {formatTime(programme.ends_at)}
@@ -193,7 +208,14 @@ function ChannelRail({
             key={channel.id}
             className="border-border bg-surface flex items-center gap-3 rounded-xl border p-3"
           >
-            <Radio className="text-primary size-5 shrink-0" />
+            {liveTVArtwork(channel.artwork) ? (
+              <img
+                src={liveTVArtwork(channel.artwork) ?? undefined}
+                alt=""
+                className="size-10 rounded-md object-contain"
+              />
+            ) : null}
+            {!liveTVArtwork(channel.artwork) ? <Radio className="text-primary size-5 shrink-0" /> : null}
             <div className="min-w-0">
               <h3 className="truncate text-sm font-medium">{channel.name}</h3>
               <p className="text-muted-foreground text-xs">{channel.number ?? ""}</p>

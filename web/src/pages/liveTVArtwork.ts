@@ -16,7 +16,9 @@ function isRenderableImageURL(value: unknown): value is string {
     const parsed = new URL(candidate);
     return (
       parsed.protocol === "https:" &&
-      (parsed.searchParams.has("X-Amz-Signature") || parsed.searchParams.has("X-Goog-Signature"))
+      (parsed.searchParams.has("X-Amz-Signature") ||
+        parsed.searchParams.has("X-Goog-Signature") ||
+        parsed.searchParams.has("verify"))
     );
   } catch {
     return false;
