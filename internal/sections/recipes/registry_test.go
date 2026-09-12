@@ -64,6 +64,20 @@ func TestListByCategoryReturnsStableOrder(t *testing.T) {
 	}
 }
 
+func TestListByCategoryIncludesLiveTVCurrentlyAiringRecipe(t *testing.T) {
+	recipes := ListByCategory(CategoryLibraryStaples)
+	for _, recipe := range recipes {
+		if recipe.Type() != "currently_airing" {
+			continue
+		}
+		if got := recipe.Definition().RequiredLibraryType; got != "livetv" {
+			t.Fatalf("currently_airing required library type = %q, want livetv", got)
+		}
+		return
+	}
+	t.Fatal("currently_airing recipe missing from library staples")
+}
+
 func TestListReturnsAllRegistered(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&stubRecipe{t: "x"})
