@@ -9,6 +9,11 @@ describe("Live TV URL state", () => {
     expect(state).toEqual({ tab: "program", view: "list" });
   });
 
+  it("defaults only an invalid tab to All Channels", () => {
+    expect(parseLiveTVSearchParams(new URLSearchParams("tab=unknown")).tab).toBe("channels");
+    expect(parseLiveTVSearchParams(new URLSearchParams("tab=favorites")).tab).toBe("favorites");
+  });
+
   it("preserves unrelated parameters while persisting tab and view", () => {
     const current = new URLSearchParams("source=guide");
     const next = updateLiveTVSearchParams(current, { tab: "favorites", view: "list" });

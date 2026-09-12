@@ -84,6 +84,7 @@ export default function LibraryPage() {
     hydratedLibrarySearch.search === currentLibrarySearch;
   const hasUnhydratedLibraryState =
     Boolean(libraryType) &&
+    libraryType !== "livetv" &&
     Number.isFinite(id) &&
     id > 0 &&
     savedStateHydratedKey !== libraryPageStateKey;
@@ -191,7 +192,7 @@ export default function LibraryPage() {
   /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
-    if (!libraryType || shouldApplySavedLibrarySearch) {
+    if (!libraryType || libraryType === "livetv" || shouldApplySavedLibrarySearch) {
       return;
     }
 
