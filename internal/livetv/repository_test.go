@@ -51,6 +51,45 @@ func TestPostgresRepository_roundTripsChannelsProgrammesAndMappings(t *testing.T
 	}
 }
 
+func TestPostgresRepository_ListChannelsOrdersNumericChannelNumbers(t *testing.T) {
+	// Given channels whose numeric values sort differently from their text values.
+	pool := liveTVTestPool(t)
+	ctx := context.Background()
+	libraryID, sourceID, _ := seedLiveTVFixtures(t, pool)
+	repo := NewPostgresRepository(pool)
+	for _, number := range []string{"1", "2", "10", "100", "101"} {
+		if _, err := repo.CreateChannel(ctx, Channel{
+			LibraryID:  libraryID,
+			SourceID:   sourceID,
+			ExternalID: "numeric-" + number,
+			StableID:   SourceQualifiedID("playlist-a|numeric-" + number),
+			Name:       "Numeric " + number,
+			Number:     number,
+		}); err != nil {
+			t.Fatalf("create channel %s: %v", number, err)
+		}
+	}
+
+	// When channels are listed for the library.
+	channels, total, err := repo.ListChannels(ctx, libraryID, 10, 0)
+
+	// Then numeric channel numbers are ordered by value, not lexicographically.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 5 {
+		t.Fatalf("total = %d, want 5", total)
+	}
+	got := make([]string, 0, len(channels))
+	for _, channel := range channels {
+		got = append(got, channel.Number)
+	}
+	want := []string{"1", "2", "10", "100", "101"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("channel numbers = %v, want %v", got, want)
+	}
+}
+
 func TestPostgresRepository_CreateSourceDefaultsOmittedConfig(t *testing.T) {
 	// Given a valid source request with no optional config payload.
 	pool := liveTVTestPool(t)

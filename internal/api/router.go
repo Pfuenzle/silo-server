@@ -683,6 +683,10 @@ func NewRouter(deps Dependencies) chi.Router {
 		literaryRepo := literaryworks.NewRepository(deps.DB)
 		literaryWorkHandler = &handlers.LiteraryWorkHandler{Service: literaryworks.NewService(literaryRepo)}
 		detailSvc = catalog.NewDetailService(itemRepo, episodeRepo, seasonRepo, deps.PersonRepo, fileFetcher)
+		if liveTVHandler != nil {
+			liveTVHandler.SetArtworkResolver(detailSvc)
+			liveTVHandler.SetArtworkStore(deps.S3Public)
+		}
 		detailSvc.SetFolderRepository(folderRepo)
 		detailSvc.SetRootClaimRepository(rootClaimRepo)
 		detailSvc.SetGroupClaimRepository(groupClaimRepo)

@@ -148,7 +148,7 @@ func (h *LiveTVHandler) HandleListFavoriteProgrammes(w http.ResponseWriter, r *h
 		if getErr != nil {
 			continue
 		}
-		response.Programmes = append(response.Programmes, programmeResponse(programme, ""))
+		response.Programmes = append(response.Programmes, h.programmeResponse(r.Context(), programme, ""))
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -187,19 +187,19 @@ func (h *LiveTVHandler) HandleHomeSections(w http.ResponseWriter, r *http.Reques
 	}
 	response := liveTVHomeSectionsResponse{CurrentlyAiring: make([]liveTVProgrammeResponse, 0, len(allCurrent)), FavoriteChannelsAiring: make([]liveTVChannelResponse, 0, len(channels)), FavoriteProgrammesAiring: make([]liveTVProgrammeResponse, 0, len(current)), TopRatedFavoriteProgrammes: make([]liveTVProgrammeResponse, 0, len(topRated)), UpcomingFavoriteProgrammes: make([]liveTVProgrammeResponse, 0, len(upcoming))}
 	for _, programme := range allCurrent {
-		response.CurrentlyAiring = append(response.CurrentlyAiring, programmeResponse(programme, ""))
+		response.CurrentlyAiring = append(response.CurrentlyAiring, h.programmeResponse(r.Context(), programme, ""))
 	}
 	for _, channel := range channels {
-		response.FavoriteChannelsAiring = append(response.FavoriteChannelsAiring, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: channel.Artwork, Rating: channel.Rating})
+		response.FavoriteChannelsAiring = append(response.FavoriteChannelsAiring, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: h.authorizeArtwork(r.Context(), channel.Artwork), Rating: channel.Rating})
 	}
 	for _, programme := range current {
-		response.FavoriteProgrammesAiring = append(response.FavoriteProgrammesAiring, programmeResponse(programme, ""))
+		response.FavoriteProgrammesAiring = append(response.FavoriteProgrammesAiring, h.programmeResponse(r.Context(), programme, ""))
 	}
 	for _, programme := range topRated {
-		response.TopRatedFavoriteProgrammes = append(response.TopRatedFavoriteProgrammes, programmeResponse(programme, ""))
+		response.TopRatedFavoriteProgrammes = append(response.TopRatedFavoriteProgrammes, h.programmeResponse(r.Context(), programme, ""))
 	}
 	for _, programme := range upcoming {
-		response.UpcomingFavoriteProgrammes = append(response.UpcomingFavoriteProgrammes, programmeResponse(programme, ""))
+		response.UpcomingFavoriteProgrammes = append(response.UpcomingFavoriteProgrammes, h.programmeResponse(r.Context(), programme, ""))
 	}
 	writeJSON(w, http.StatusOK, response)
 }

@@ -194,3 +194,51 @@ func TestLiveTVSourceResponse_redactsRefreshDiagnostic(t *testing.T) {
 		t.Fatalf("refresh diagnostic leaked provider details: %s", encoded)
 	}
 }
+
+func TestLiveTVResponses_preserveStructuredArtwork(t *testing.T) {
+	// Given channel and programme artwork produced by the M3U/XMLTV parsers.
+	artwork := json.RawMessage(`{"logo":"https://provider.example/logo.png"}`)
+	channel := liveTVChannelResponse{ID: "playlist-a|news-1", Name: "News", Artwork: artwork}
+	programme := liveTVProgrammeResponse{ID: "epg-a|news-1:morning", Title: "Morning", Artwork: artwork}
+
+	// When the native API response objects are encoded.
+	channelJSON, err := json.Marshal(channel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	programmeJSON, err := json.Marshal(programme)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Then artwork remains structured metadata for the authorized image pipeline.
+	if !strings.Contains(string(channelJSON), `"artwork":{"logo":"https://provider.example/logo.png"}`) {
+		t.Fatalf("channel response = %s", channelJSON)
+	}
+	if !strings.Contains(string(programmeJSON), `"artwork":{"logo":"https://provider.example/logo.png"}`) {
+		t.Fatalf("programme response = %s", programmeJSON)
+	}
+}
+
+func TestAuthorizeArtwork_acceptsOnlyAuthorizedResolverResults(t *testing.T) {
+	// Given a handler with an image resolver returning an internal API URL.
+	handler := &LiveTVHandler{artwork: fakeLiveTVArtworkResolver{url: "/api/v1/images/livetv/logo"}}
+
+	// When stored artwork is authorized for the response.
+	got := handler.authorizeArtwork(context.Background(), json.RawMessage(`{"logo":"livetv/channels/x/logo/original.webp"}`))
+
+	// Then the provider path is replaced by the authorized URL.
+	if string(got) != `{"logo":"/api/v1/images/livetv/logo"}` {
+		t.Fatalf("artwork = %s", got)
+	}
+
+	// And an unsigned provider URL is removed instead of being exposed.
+	handler.artwork = fakeLiveTVArtworkResolver{url: "https://provider.example/logo.png"}
+	if got = handler.authorizeArtwork(context.Background(), json.RawMessage(`{"logo":"https://provider.example/logo.png"}`)); len(got) != 0 {
+		t.Fatalf("provider artwork = %s, want empty", got)
+	}
+}
+
+type fakeLiveTVArtworkResolver struct{ url string }
+
+func (f fakeLiveTVArtworkResolver) PresignURL(context.Context, string, string) string { return f.url }

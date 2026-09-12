@@ -2,6 +2,7 @@ package livetv
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -14,6 +15,7 @@ type Reconciler struct {
 	store    SnapshotStore
 	now      func() time.Time
 	ingestor SourceIngestor
+	artwork  ArtworkCacher
 }
 
 var ErrEmptySnapshot = fmt.Errorf("Live TV source returned an empty snapshot")
@@ -38,6 +40,12 @@ func NewReconcilerWithIngestorAndClock(store SnapshotStore, now func() time.Time
 		now = time.Now
 	}
 	return &Reconciler{store: store, now: now, ingestor: ingestor}
+}
+
+func (r *Reconciler) SetArtworkCacher(cacher ArtworkCacher) {
+	if r != nil {
+		r.artwork = cacher
+	}
 }
 
 func (r *Reconciler) RefreshSource(ctx context.Context, source Source, mappings map[string]ChannelMapping) (Diagnostics, error) {
@@ -69,9 +77,42 @@ func (r *Reconciler) Reconcile(ctx context.Context, source Source, snapshot Sour
 		}
 		return nil
 	}
+	if r.artwork != nil {
+		r.cacheArtwork(ctx, source, &snapshot)
+	}
 	refreshedAt := r.now()
 	if err := r.store.ApplySnapshot(ctx, source.ID, snapshot, "ready", "", &refreshedAt); err != nil {
 		return fmt.Errorf("apply Live TV snapshot: %w", err)
 	}
 	return nil
+}
+
+func (r *Reconciler) cacheArtwork(ctx context.Context, source Source, snapshot *SourceSnapshot) {
+	for index := range snapshot.Channels {
+		channel := &snapshot.Channels[index]
+		channel.Artwork = r.cacheArtworkValue(ctx, source, channel.Artwork, "channels", fmt.Sprintf("%d|%s", source.LibraryID, channel.StableID))
+	}
+	for index := range snapshot.Programmes {
+		programme := &snapshot.Programmes[index].Programme
+		programme.Artwork = r.cacheArtworkValue(ctx, source, programme.Artwork, "programmes", fmt.Sprintf("%d|%s", source.LibraryID, programme.StableID))
+	}
+}
+
+func (r *Reconciler) cacheArtworkValue(ctx context.Context, source Source, raw []byte, kind, identity string) []byte {
+	var value map[string]string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil
+	}
+	for key, url := range value {
+		cached, err := r.artwork.CacheLiveTVArtwork(ctx, url, kind, source.SourceKey+"|"+identity+"|"+key)
+		if err != nil || cached == "" {
+			return nil
+		}
+		value[key] = cached
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return encoded
 }

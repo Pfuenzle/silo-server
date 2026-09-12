@@ -81,6 +81,51 @@ func TestReconciler_preservesLastKnownGoodOnFailure(t *testing.T) {
 	}
 }
 
+func TestReconciler_cachesArtworkAndDropsProviderURLOnFailure(t *testing.T) {
+	// Given a parsed snapshot with provider artwork and a cacher that fails.
+	store := newMemorySnapshotStore()
+	reconciler := NewReconciler(store, time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC))
+	reconciler.SetArtworkCacher(fakeArtworkCacher{err: errors.New("provider unavailable")})
+	snapshot := SourceSnapshot{Channels: []Channel{{StableID: "playlist-a|news", Artwork: []byte(`{"logo":"https://provider.example/logo.png"}`)}}}
+
+	// When the snapshot is reconciled.
+	if err := reconciler.Reconcile(context.Background(), Source{ID: 7, SourceKey: "playlist-a"}, snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Then the persisted artwork is absent rather than leaking the provider URL.
+	if got := store.snapshot(7).Channels[0].Artwork; len(got) != 0 {
+		t.Fatalf("artwork = %s, want empty fallback", got)
+	}
+}
+
+func TestReconciler_persistsCachedArtworkPath(t *testing.T) {
+	// Given provider artwork and a cacher that returns an internal object path.
+	store := newMemorySnapshotStore()
+	reconciler := NewReconciler(store, time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC))
+	reconciler.SetArtworkCacher(fakeArtworkCacher{path: "livetv/channels/abc/logo/original.webp"})
+	snapshot := SourceSnapshot{Channels: []Channel{{StableID: "playlist-a|news", Artwork: []byte(`{"logo":"https://provider.example/logo.png"}`)}}}
+
+	// When the snapshot is reconciled.
+	if err := reconciler.Reconcile(context.Background(), Source{ID: 7, SourceKey: "playlist-a"}, snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Then only the internal path is persisted.
+	if got := string(store.snapshot(7).Channels[0].Artwork); got != `{"logo":"livetv/channels/abc/logo/original.webp"}` {
+		t.Fatalf("artwork = %s", got)
+	}
+}
+
+type fakeArtworkCacher struct {
+	path string
+	err  error
+}
+
+func (f fakeArtworkCacher) CacheLiveTVArtwork(context.Context, string, string, string) (string, error) {
+	return f.path, f.err
+}
+
 type memorySnapshotStore struct {
 	snapshots map[int64]SourceSnapshot
 	states    map[int64]string

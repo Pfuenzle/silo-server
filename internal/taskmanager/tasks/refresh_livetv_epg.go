@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -112,6 +113,9 @@ func (t *RefreshLiveTVEPGTask) Execute(ctx context.Context, progress taskmanager
 			targets = append(targets, source)
 		}
 	}
+	sort.SliceStable(targets, func(i, j int) bool {
+		return refreshPriority(targets[i].Kind) < refreshPriority(targets[j].Kind)
+	})
 	for index, source := range targets {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -153,6 +157,13 @@ func (t *RefreshLiveTVEPGTask) Execute(ctx context.Context, progress taskmanager
 		progress.Report(100, fmt.Sprintf("Live TV EPG refresh completed with %d stale sources", result.Stale))
 	}
 	return nil
+}
+
+func refreshPriority(kind livetv.SourceKind) int {
+	if kind == livetv.SourceKindPlaylist {
+		return 0
+	}
+	return 1
 }
 
 func (t *RefreshLiveTVEPGTask) tryStart() bool {

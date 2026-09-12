@@ -80,6 +80,29 @@ func TestRefreshLiveTVEPGTask_refreshesEnabledSourcesAndContinuesAfterFailure(t 
 	}
 }
 
+func TestRefreshLiveTVEPGTask_refreshesPlaylistsBeforeEPG(t *testing.T) {
+	// Given repository ordering that places EPG sources before playlist sources.
+	sources := &epgSourceRepoStub{sources: map[int][]livetv.Source{10: {
+		{ID: 2, LibraryID: 10, Kind: livetv.SourceKindEPG, SourceKey: "epg", Enabled: true},
+		{ID: 1, LibraryID: 10, Kind: livetv.SourceKindPlaylist, SourceKey: "playlist", Enabled: true},
+	}}}
+	refresher := &epgRefresherStub{}
+	task := NewRefreshLiveTVEPGTask(RefreshLiveTVEPGTaskConfig{
+		Folders: &epgFolderRepoStub{folders: []*models.MediaFolder{{ID: 10, Type: "livetv", Enabled: true}}},
+		Sources: sources, Refresher: refresher, Now: time.Now,
+	})
+
+	// When the scheduled task refreshes all enabled sources.
+	if err := task.Execute(context.Background(), &recordingProgress{}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	// Then playlist channels exist before EPG rows are inserted and remain mapped.
+	if got := refresher.order; len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("refresh order = %v, want playlist 1 before EPG 2", got)
+	}
+}
+
 func TestRefreshLiveTVEPGTask_resultUsesInjectedClock(t *testing.T) {
 	// Given a task with a deterministic server clock and no configured sources.
 	when := time.Date(2026, 9, 10, 2, 0, 0, 0, time.FixedZone("fixture", 2*60*60))
@@ -255,6 +278,12 @@ func (r *recordingExecutionRepository) List(_ context.Context, key string, _ int
 	return results, nil
 }
 
+func (r *recordingExecutionRepository) insertCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.inserts)
+}
+
 func (r *epgFolderRepoStub) GetEnabled(context.Context) ([]*models.MediaFolder, error) {
 	return r.folders, nil
 }
@@ -279,6 +308,7 @@ func (r *epgSourceRepoStub) GetSource(_ context.Context, libraryID int, sourceKe
 type epgRefresherStub struct {
 	mu      sync.Mutex
 	count   int
+	order   []int64
 	errors  map[int64]error
 	started chan struct{}
 	release chan struct{}
@@ -287,6 +317,7 @@ type epgRefresherStub struct {
 func (r *epgRefresherStub) RefreshSource(ctx context.Context, source livetv.Source, _ map[string]livetv.ChannelMapping) (livetv.Diagnostics, error) {
 	r.mu.Lock()
 	r.count++
+	r.order = append(r.order, source.ID)
 	if r.started != nil {
 		select {
 		case <-r.started:

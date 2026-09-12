@@ -15,4 +15,20 @@ describe("Live TV URL state", () => {
 
     expect(next.toString()).toBe("source=guide&tab=favorites&view=list");
   });
+
+  it("keeps the selected tab when a later view update is based on a fresh URL", () => {
+    const current = new URLSearchParams("tab=program&view=grid");
+
+    expect(updateLiveTVSearchParams(current, { tab: "program", view: "list" }).toString()).toBe(
+      "tab=program&view=list",
+    );
+  });
+
+  it("preserves the latest tab when a stale view update is applied", () => {
+    const current = new URLSearchParams("tab=favorites&view=grid");
+
+    expect(updateLiveTVSearchParams(current, { tab: "favorites", view: "list" }).toString()).toBe(
+      "tab=favorites&view=list",
+    );
+  });
 });

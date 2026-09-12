@@ -14,7 +14,8 @@ interface LibraryHeaderProps {
    * and switches to a glass surface once the user scrolls past a threshold.
    */
   overlay?: boolean;
-  availableTabs?: readonly LibraryTab[];
+  availableTabs?: readonly string[];
+  tabLabels?: Readonly<Record<string, string>>;
 }
 
 const DEFAULT_TABS: readonly LibraryTab[] = ["recommended", "library", "collections"];
@@ -40,8 +41,10 @@ export default function LibraryHeader({
   libraryType = "",
   overlay = false,
   availableTabs = DEFAULT_TABS,
+  tabLabels: customTabLabels,
 }: LibraryHeaderProps) {
-  const tabLabels = isAudiobookLibraryType(libraryType) ? AUDIOBOOK_TAB_LABELS : TAB_LABELS;
+  const tabLabels: Readonly<Record<string, string>> =
+    customTabLabels ?? (isAudiobookLibraryType(libraryType) ? AUDIOBOOK_TAB_LABELS : TAB_LABELS);
   const [pastThreshold, setPastThreshold] = useState(false);
 
   useEffect(() => {
@@ -74,7 +77,7 @@ export default function LibraryHeader({
       <TabsPrimitive.List className="marquee-tab-bar" aria-label="Library view">
         {availableTabs.map((tab) => (
           <TabsPrimitive.Trigger key={tab} value={tab} className="marquee-tab-trigger">
-            {tabLabels[tab]}
+            {tabLabels[tab] ?? tab}
           </TabsPrimitive.Trigger>
         ))}
       </TabsPrimitive.List>

@@ -201,7 +201,13 @@ FROM live_tv_channels WHERE library_id = $1 AND stable_id = $2`
 
 func (r *PostgresRepository) ListChannels(ctx context.Context, libraryID, limit, offset int) ([]Channel, int, error) {
 	rows, err := r.pool.Query(ctx, `SELECT id, library_id, source_id, external_id, stable_id, name, channel_number, category, stream_url, artwork, rating
-FROM live_tv_channels WHERE library_id = $1 ORDER BY channel_number NULLS LAST, name, stable_id LIMIT $2 OFFSET $3`, libraryID, limit, offset)
+	FROM live_tv_channels WHERE library_id = $1
+	-- Numeric-only values sort by value; compound and nonnumeric labels keep text fallback ordering.
+	ORDER BY CASE
+		WHEN channel_number ~ '^[0-9]+$' THEN channel_number::numeric
+		ELSE NULL
+	END NULLS LAST,
+	channel_number NULLS LAST, name, stable_id LIMIT $2 OFFSET $3`, libraryID, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing Live TV channels: %w", err)
 	}

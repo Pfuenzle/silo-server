@@ -27,3 +27,9 @@ func (r *Runtime) RefreshSource(ctx context.Context, source Source, mappings map
 	}
 	return r.reconciler.RefreshSource(ctx, source, mappings)
 }
+
+func (r *Runtime) SetArtworkCacher(cacher ArtworkCacher) {
+	if r != nil && r.reconciler != nil {
+		r.reconciler.SetArtworkCacher(cacher)
+	}
+}

@@ -1795,6 +1795,7 @@ func main() {
 		// admin image applies can succeed even if automatic metadata caching is off.
 		if deps.S3Public != nil {
 			imageCacher := imagecache.New(deps.S3Public)
+			deps.LiveTVRuntime.SetArtworkCacher(imageCacher)
 			imageCacher.SetArtworkRevisionTracker(catalog.NewArtworkRevisionTracker(deps.DB))
 			metadataService.SetImageCacher(imageCacher)
 			imageCacheJobs := metadata.NewImageCacheJobRepository(deps.DB)

@@ -194,6 +194,31 @@ func (c *Cacher) CacheEbookCover(ctx context.Context, data []byte, contentID str
 	return res.OriginalPath, res.Thumbhash, nil
 }
 
+// CacheLiveTVArtwork stores channel or programme artwork under a stable,
+// source-scoped key. The identity is supplied by Live TV and the URL digest
+// rotates the immutable revision when a provider changes its artwork.
+func (c *Cacher) CacheLiveTVArtwork(ctx context.Context, sourceURL, kind, identity string) (string, error) {
+	imageType := metadata.ImageLogo
+	if kind == "programmes" {
+		imageType = metadata.ImageStill
+	}
+	urlDigest := sha256.Sum256([]byte(sourceURL))
+	identityDigest := sha256.Sum256([]byte(identity))
+	request := CacheRequest{
+		SourceURL:        sourceURL,
+		ProviderID:       "livetv",
+		ContentType:      kind,
+		ContentID:        hex.EncodeToString(identityDigest[:]),
+		ImageType:        imageType,
+		KeyDiscriminator: hex.EncodeToString(urlDigest[:8]),
+	}
+	result, err := c.Cache(ctx, request)
+	if err != nil {
+		return "", err
+	}
+	return result.OriginalPath, nil
+}
+
 // validateCacheRequest checks the required identity fields and the
 // episode/season invariant shared by Cache and CacheBytes. Keeping it in one
 // place prevents the season/episode guard from drifting between the two paths:

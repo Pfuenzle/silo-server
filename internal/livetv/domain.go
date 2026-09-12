@@ -1,6 +1,7 @@
 package livetv
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -73,6 +74,12 @@ type Source struct {
 	LastRefreshAt *time.Time
 	RefreshState  string
 	RefreshError  string
+}
+
+// ArtworkCacher stores provider artwork and returns an internal object path.
+// Implementations must reject unsafe provider URLs and never return them.
+type ArtworkCacher interface {
+	CacheLiveTVArtwork(context.Context, string, string, string) (string, error)
 }
 
 type Channel struct {

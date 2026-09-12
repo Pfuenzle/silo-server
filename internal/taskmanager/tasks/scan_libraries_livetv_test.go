@@ -25,7 +25,7 @@ func TestScanLibrariesTask_skipsLiveTVLibrary(t *testing.T) {
 	task := NewScanLibrariesTask(folders, queue, nil)
 
 	// When the scheduled filesystem scan task executes.
-	if err := task.Execute(context.Background(), noopProgressReporter{}); err != nil {
+	if err := task.Execute(context.Background(), noopLiveTVProgressReporter{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -35,10 +35,10 @@ func TestScanLibrariesTask_skipsLiveTVLibrary(t *testing.T) {
 	}
 }
 
-type noopProgressReporter struct{}
+type noopLiveTVProgressReporter struct{}
 
-func (noopProgressReporter) Report(float64, string)        {}
-func (noopProgressReporter) SetResultData(json.RawMessage) {}
+func (noopLiveTVProgressReporter) Report(float64, string)        {}
+func (noopLiveTVProgressReporter) SetResultData(json.RawMessage) {}
 
 type scanFolderRepoStub struct{ folders []*models.MediaFolder }
 

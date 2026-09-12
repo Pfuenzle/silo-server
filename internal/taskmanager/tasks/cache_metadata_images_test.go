@@ -47,17 +47,17 @@ func (f *fakeMetadataImageCacheRunner) RunUntilIdle(_ context.Context, workerID 
 	return f.run(claimLimit, concurrency, maxRuntime, reportProgress)
 }
 
-type recordingProgress struct {
+type metadataRecordingProgress struct {
 	percents []float64
 	messages []string
 }
 
-func (r *recordingProgress) Report(percent float64, message string) {
+func (r *metadataRecordingProgress) Report(percent float64, message string) {
 	r.percents = append(r.percents, percent)
 	r.messages = append(r.messages, message)
 }
 
-func (r *recordingProgress) SetResultData(json.RawMessage) {}
+func (r *metadataRecordingProgress) SetResultData(json.RawMessage) {}
 
 func TestCacheMetadataImagesTaskProperties(t *testing.T) {
 	task := NewCacheMetadataImagesTask(&fakeMetadataImageCacheRunner{})
@@ -111,7 +111,7 @@ func TestCacheMetadataImagesTaskReportsStats(t *testing.T) {
 		},
 	}
 	task := NewCacheMetadataImagesTask(runner)
-	progress := &recordingProgress{}
+	progress := &metadataRecordingProgress{}
 	if err := task.Execute(context.Background(), progress); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -151,7 +151,7 @@ func TestBackfillMetadataImagesTaskReportsDiscovery(t *testing.T) {
 		Claimed:          5,
 		Succeeded:        5,
 	}}
-	progress := &recordingProgress{}
+	progress := &metadataRecordingProgress{}
 	if err := NewBackfillMetadataImagesTask(runner).Execute(context.Background(), progress); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -178,7 +178,7 @@ func TestBackfillMetadataImagesTaskReportsDiscovery(t *testing.T) {
 
 func TestMetadataImageTasksUseDistinctExecutionLeaseOwners(t *testing.T) {
 	runner := &fakeMetadataImageCacheRunner{}
-	progress := &recordingProgress{}
+	progress := &metadataRecordingProgress{}
 	cacheTask := NewCacheMetadataImagesTask(runner)
 	backfillTask := NewBackfillMetadataImagesTask(runner)
 	for i := 0; i < 2; i++ {
@@ -310,7 +310,7 @@ func TestBackfillMetadataImagesTaskProgressDoesNotFallWhenDiscoveryWidensTheRun(
 		},
 	}
 	task := NewBackfillMetadataImagesTask(runner)
-	progress := &recordingProgress{}
+	progress := &metadataRecordingProgress{}
 	if err := task.Execute(context.Background(), progress); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}

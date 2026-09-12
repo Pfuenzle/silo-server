@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/api/client";
 import { isSiloPlaybackUrl } from "@/api/livetv";
+import { liveTVT } from "@/lib/i18n";
+import { useCurrentProfile } from "@/hooks/useCurrentProfile";
 
 interface LiveTVPlayerProps {
   readonly channelId: string;
@@ -24,6 +26,8 @@ export function LiveTVPlayer({
   const videoRef = useRef<HTMLVideoElement>(null);
   const stoppedRef = useRef(false);
   const [state, setState] = useState<"starting" | "playing" | "error" | "reconnecting">("starting");
+  const { profile } = useCurrentProfile();
+  const locale = profile?.language?.startsWith("de") ? "de" : "en";
   const streamIsSafe = isSiloPlaybackUrl(streamUrl);
 
   const revokePlayback = useCallback(() => {
@@ -118,26 +122,26 @@ export function LiveTVPlayer({
           <p className="truncate text-sm font-semibold">{title}</p>
           <p
             role="status"
-            aria-label="Live"
+            aria-label={liveTVT("playerPlaying", locale)}
             className="text-primary text-xs font-semibold tracking-wide uppercase"
           >
             {!streamIsSafe || state === "error"
-              ? "Live playback could not start"
+              ? liveTVT("playerError", locale)
               : state === "playing"
-                ? "Live"
+                ? liveTVT("playerPlaying", locale)
                 : state === "reconnecting"
-                  ? "Reconnecting…"
-                  : "Starting live playback…"}
+                  ? liveTVT("playerReconnecting", locale)
+                  : liveTVT("playerStarting", locale)}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {!streamIsSafe || state === "error" ? (
             <button type="button" onClick={retry}>
-              Retry live playback
+              {liveTVT("playerRetry", locale)}
             </button>
           ) : null}
-          <button type="button" onClick={stop} aria-label="Stop live playback">
-            Stop
+          <button type="button" onClick={stop} aria-label={liveTVT("playerStop", locale)}>
+            {liveTVT("playerStop", locale)}
           </button>
         </div>
       </div>

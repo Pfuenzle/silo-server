@@ -3,12 +3,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { LiveTVPlayer } from "./LiveTVPlayer";
 
 const apiMock = vi.hoisted(() => vi.fn());
+const profileMock = vi.hoisted(() => ({ profile: null as { language?: string } | null }));
 vi.mock("@/api/client", () => ({ api: apiMock }));
+vi.mock("@/hooks/useCurrentProfile", () => ({ useCurrentProfile: () => profileMock }));
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   apiMock.mockReset();
+  profileMock.profile = null;
 });
 
 describe("LiveTVPlayer", () => {
@@ -70,5 +73,21 @@ describe("LiveTVPlayer", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("localizes player status and controls for German profiles", () => {
+    profileMock.profile = { language: "de-DE" };
+
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Live-Wiedergabe beenden" })).toBeInTheDocument();
+    expect(screen.getByText("Live-Wiedergabe wird gestartet…")).toBeInTheDocument();
   });
 });

@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,6 +20,30 @@ type LiveTVHandler struct {
 	runtime        *livetv.Runtime
 	playback       *livetv.LivePlaybackService
 	playbackOrigin string
+	artwork        interface {
+		PresignURL(context.Context, string, string) string
+	}
+	objectStore interface {
+		Bucket() string
+		PresignGetURL(context.Context, string, string, time.Duration) (string, error)
+	}
+}
+
+func (h *LiveTVHandler) SetArtworkResolver(resolver interface {
+	PresignURL(context.Context, string, string) string
+}) {
+	if h != nil {
+		h.artwork = resolver
+	}
+}
+
+func (h *LiveTVHandler) SetArtworkStore(store interface {
+	Bucket() string
+	PresignGetURL(context.Context, string, string, time.Duration) (string, error)
+}) {
+	if h != nil {
+		h.objectStore = store
+	}
 }
 
 func (h *LiveTVHandler) HandleStopPlayback(w http.ResponseWriter, r *http.Request) {

@@ -1,9 +1,13 @@
 package handlers
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -32,7 +36,7 @@ func (h *LiveTVHandler) HandleListChannels(w http.ResponseWriter, r *http.Reques
 	items := make([]liveTVChannelResponse, 0, len(channels))
 	stale := h.libraryStale(r, library.ID)
 	for _, channel := range channels {
-		items = append(items, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: channel.Artwork, Rating: channel.Rating, Stale: stale})
+		items = append(items, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: h.authorizeArtwork(r.Context(), channel.Artwork), Rating: channel.Rating, Stale: stale})
 	}
 	writeJSON(w, http.StatusOK, liveTVPage[liveTVChannelResponse]{Items: items, Total: total, Limit: limit, Offset: offset})
 }
@@ -52,7 +56,7 @@ func (h *LiveTVHandler) HandleChannelDetail(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load Live TV channel")
 		return
 	}
-	writeJSON(w, http.StatusOK, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: channel.Artwork, Rating: channel.Rating, Stale: h.libraryStale(r, library.ID)})
+	writeJSON(w, http.StatusOK, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: h.authorizeArtwork(r.Context(), channel.Artwork), Rating: channel.Rating, Stale: h.libraryStale(r, library.ID)})
 }
 
 func (h *LiveTVHandler) HandleGuide(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +84,7 @@ func (h *LiveTVHandler) HandleGuide(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, programme := range programmes {
-			items = append(items, programmeResponse(programme, channel.StableID.String()))
+			items = append(items, h.programmeResponse(r.Context(), programme, channel.StableID.String()))
 		}
 	}
 	response := liveTVGuideResponse{LibraryID: library.ID, From: from, To: to, Stale: h.libraryStale(r, library.ID), Items: items}
@@ -105,7 +109,7 @@ func (h *LiveTVHandler) HandleProgrammeDetail(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load Live TV programme")
 		return
 	}
-	writeJSON(w, http.StatusOK, programmeResponse(programme, ""))
+	writeJSON(w, http.StatusOK, h.programmeResponse(r.Context(), programme, ""))
 }
 
 func (h *LiveTVHandler) HandleCurrentNext(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +139,7 @@ func (h *LiveTVHandler) HandleCurrentNext(w http.ResponseWriter, r *http.Request
 		if index == 2 {
 			break
 		}
-		guide.Items = append(guide.Items, programmeResponse(programme, channel.StableID.String()))
+		guide.Items = append(guide.Items, h.programmeResponse(r.Context(), programme, channel.StableID.String()))
 	}
 	writeJSON(w, http.StatusOK, guide)
 }
@@ -247,8 +251,48 @@ func (h *LiveTVHandler) libraryRefreshError(r *http.Request, libraryID int) stri
 	return ""
 }
 
-func programmeResponse(programme livetv.Programme, channelID string) liveTVProgrammeResponse {
-	return liveTVProgrammeResponse{ID: programme.StableID.String(), ChannelID: channelID, Title: programme.Title, Description: programme.Description, StartsAt: programme.StartsAt, EndsAt: programme.EndsAt, Artwork: programme.Artwork, Rating: programme.Rating}
+func (h *LiveTVHandler) programmeResponse(ctx context.Context, programme livetv.Programme, channelID string) liveTVProgrammeResponse {
+	return liveTVProgrammeResponse{ID: programme.StableID.String(), ChannelID: channelID, Title: programme.Title, Description: programme.Description, StartsAt: programme.StartsAt, EndsAt: programme.EndsAt, Artwork: h.authorizeArtwork(ctx, programme.Artwork), Rating: programme.Rating}
+}
+
+func (h *LiveTVHandler) authorizeArtwork(ctx context.Context, raw []byte) json.RawMessage {
+	var value map[string]string
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil || h == nil || h.artwork == nil {
+		return nil
+	}
+	for key, path := range value {
+		resolved := ""
+		if h.objectStore != nil && !strings.Contains(path, "://") && !strings.HasPrefix(path, "/") {
+			resolved, _ = h.objectStore.PresignGetURL(ctx, h.objectStore.Bucket(), path, 15*time.Minute)
+		} else if h.artwork != nil {
+			resolved = h.artwork.PresignURL(ctx, path, "card")
+		}
+		if !isAuthorizedArtworkURL(resolved) {
+			delete(value, key)
+			continue
+		}
+		value[key] = resolved
+	}
+	if len(value) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+func isAuthorizedArtworkURL(raw string) bool {
+	if strings.HasPrefix(raw, "/api/") {
+		return true
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return false
+	}
+	query := parsed.Query()
+	return query.Get("X-Amz-Signature") != "" || query.Get("X-Goog-Signature") != ""
 }
 
 func parseLiveTVPage(r *http.Request) (int, int) {

@@ -2,7 +2,10 @@ import { useMemo, useState } from "react";
 import { Heart, LayoutGrid, List, Radio, Star } from "lucide-react";
 import { useSearchParams } from "react-router";
 import { Button } from "@/components/ui/button";
+import { Tabs } from "@/components/ui/tabs";
+import LibraryHeader from "@/components/LibraryHeader";
 import { Skeleton } from "@/components/ui/skeleton";
+import { toast } from "sonner";
 import {
   resolveLiveTVPlayback,
   useLiveTVChannels,
@@ -21,16 +24,8 @@ import {
   type LiveTVTab,
   type LiveTVView,
 } from "./liveTVSearchParams";
-
-function artwork(value: unknown): string | null {
-  if (typeof value !== "object" || value === null) return null;
-  const candidate = value as { url?: unknown; path?: unknown };
-  return typeof candidate.url === "string"
-    ? candidate.url
-    : typeof candidate.path === "string"
-      ? candidate.path
-      : null;
-}
+import { liveTVArtwork } from "./liveTVArtwork";
+import { liveTVPlaybackOutcome } from "./liveTVPlayback";
 
 function Rating({ value }: { readonly value: unknown }) {
   const label =
@@ -51,14 +46,16 @@ function ChannelCard({
   onToggle,
   view,
   onPlay,
+  watchLabel,
 }: {
   readonly channel: LiveTVChannel;
   readonly favorite: boolean;
   readonly onToggle: () => void;
   readonly view: LiveTVView;
   readonly onPlay: () => void;
+  readonly watchLabel: string;
 }) {
-  const image = artwork(channel.artwork);
+  const image = liveTVArtwork(channel.artwork);
   return (
     <article
       className={
@@ -113,7 +110,7 @@ function ChannelCard({
         <div className="mt-2 flex items-center justify-between gap-2">
           <Rating value={channel.rating} />
           <Button type="button" size="sm" onClick={onPlay}>
-            Watch live
+            {watchLabel}
           </Button>
         </div>
       </div>
@@ -127,12 +124,14 @@ function ProgrammeRow({
   favoriteIds,
   onToggle,
   onPlay,
+  watchLabel,
 }: {
   readonly title: string;
   readonly items: readonly LiveTVProgramme[];
   readonly favoriteIds?: ReadonlySet<string>;
   readonly onToggle?: (id: string, favorite: boolean) => void;
   readonly onPlay: (item: LiveTVProgramme) => void;
+  readonly watchLabel: string;
 }) {
   if (items.length === 0) return null;
   return (
@@ -141,6 +140,15 @@ function ProgrammeRow({
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {items.map((item) => (
           <article key={item.id} className="border-border bg-surface rounded-xl border p-3">
+            {liveTVArtwork(item.artwork) ? (
+              <img
+                src={liveTVArtwork(item.artwork) ?? undefined}
+                alt=""
+                className="mb-3 aspect-video w-full rounded-lg object-cover"
+                width="320"
+                height="180"
+              />
+            ) : null}
             <div className="flex items-center justify-between gap-3">
               <h3 className="truncate text-sm font-medium">{item.title}</h3>
               <div className="flex items-center gap-2">
@@ -175,7 +183,7 @@ function ProgrammeRow({
               {item.description ?? ""}
             </p>
             <Button type="button" size="sm" className="mt-3" onClick={() => onPlay(item)}>
-              Watch live
+              {watchLabel}
             </Button>
           </article>
         ))}
@@ -188,10 +196,14 @@ function Guide({
   programmes,
   stale,
   onPlay,
+  watchLabel,
+  locale,
 }: {
   readonly programmes: readonly LiveTVProgramme[];
   readonly stale: boolean;
   readonly onPlay: (item: LiveTVProgramme) => void;
+  readonly watchLabel: string;
+  readonly locale: "en" | "de";
 }) {
   const channels = useMemo(
     () => Array.from(new Set(programmes.map((item) => item.channel_id))),
@@ -203,45 +215,52 @@ function Guide({
         <h2 className="text-lg font-semibold">{liveTVT("program")}</h2>
         {stale ? <p className="text-warning text-xs">{liveTVT("stale")}</p> : null}
       </div>
-      <div className="border-border overflow-x-auto rounded-xl border">
-        <div className="bg-surface-raised text-muted-foreground grid min-w-[42rem] grid-cols-[8rem_1fr] border-b text-xs">
-          <div className="p-3">{liveTVT("channels")}</div>
-          <div className="grid grid-cols-4">
-            <span className="border-border border-l p-3">{liveTVT("now")}</span>
-            <span className="border-border border-l p-3">{liveTVT("hours3")}</span>
-            <span className="border-border border-l p-3">{liveTVT("hours6")}</span>
-            <span className="border-border border-l p-3">{liveTVT("hours9")}</span>
-          </div>
+      {programmes.length === 0 ? (
+        <div className="text-muted-foreground rounded-xl border border-dashed p-12 text-center">
+          {liveTVT("guideEmpty", locale)}
         </div>
-        {channels.map((channelId) => (
-          <div
-            key={channelId}
-            className="grid min-w-[42rem] grid-cols-[8rem_1fr] border-b last:border-b-0"
-          >
-            <div className="text-muted-foreground truncate p-3 text-xs">{channelId}</div>
+      ) : null}
+      {programmes.length > 0 ? (
+        <div className="border-border overflow-x-auto rounded-xl border">
+          <div className="bg-surface-raised text-muted-foreground grid min-w-[42rem] grid-cols-[8rem_1fr] border-b text-xs">
+            <div className="p-3">{liveTVT("channels")}</div>
             <div className="grid grid-cols-4">
-              {programmes
-                .filter((item) => item.channel_id === channelId)
-                .slice(0, 4)
-                .map((item) => (
-                  <div key={item.id} className="border-border min-h-16 border-l p-3 text-xs">
-                    <p className="truncate font-medium">{item.title}</p>
-                    <p className="text-muted-foreground mt-1">{formatTime(item.starts_at)}</p>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="mt-1"
-                      onClick={() => onPlay(item)}
-                    >
-                      Watch live
-                    </Button>
-                  </div>
-                ))}
+              <span className="border-border border-l p-3">{liveTVT("now")}</span>
+              <span className="border-border border-l p-3">{liveTVT("hours3")}</span>
+              <span className="border-border border-l p-3">{liveTVT("hours6")}</span>
+              <span className="border-border border-l p-3">{liveTVT("hours9")}</span>
             </div>
           </div>
-        ))}
-      </div>
+          {channels.map((channelId) => (
+            <div
+              key={channelId}
+              className="grid min-w-[42rem] grid-cols-[8rem_1fr] border-b last:border-b-0"
+            >
+              <div className="text-muted-foreground truncate p-3 text-xs">{channelId}</div>
+              <div className="grid grid-cols-4">
+                {programmes
+                  .filter((item) => item.channel_id === channelId)
+                  .slice(0, 4)
+                  .map((item) => (
+                    <div key={item.id} className="border-border min-h-16 border-l p-3 text-xs">
+                      <p className="truncate font-medium">{item.title}</p>
+                      <p className="text-muted-foreground mt-1">{formatTime(item.starts_at)}</p>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="mt-1"
+                        onClick={() => onPlay(item)}
+                      >
+                        {watchLabel}
+                      </Button>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -261,9 +280,13 @@ export function LiveTVLibraryPage({
     readonly streamUrl: string;
     readonly grantId: string;
   } | null>(null);
-  const now = new Date();
-  const from = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
-  const to = new Date(now.getTime() + 23 * 60 * 60 * 1000).toISOString();
+  const [{ from, to }] = useState(() => {
+    const now = Date.now();
+    return {
+      from: new Date(now - 60 * 60 * 1000).toISOString(),
+      to: new Date(now + 23 * 60 * 60 * 1000).toISOString(),
+    };
+  });
   const channelsQuery = useLiveTVChannels(libraryId);
   const guideQuery = useLiveTVGuide(libraryId, from, to);
   const favoriteChannelsQuery = useLiveTVFavorites(libraryId, "channels");
@@ -277,13 +300,30 @@ export function LiveTVLibraryPage({
   const favoriteProgrammeIds = new Set((favoriteProgrammesQuery.data ?? []).map((item) => item.id));
   const updateState = (next: Partial<{ readonly tab: LiveTVTab; readonly view: LiveTVView }>) =>
     setSearchParams(
-      updateLiveTVSearchParams(searchParams, { tab: next.tab ?? tab, view: next.view ?? view }),
+      (current) => {
+        const currentState = parseLiveTVSearchParams(current);
+        return updateLiveTVSearchParams(current, {
+          tab: next.tab ?? currentState.tab,
+          view: next.view ?? currentState.view,
+        });
+      },
       { replace: true },
     );
   const playChannel = async (channelId: string, title: string) => {
-    const response = await resolveLiveTVPlayback(libraryId, channelId);
-    if (response.playable && response.url && response.grant_id)
-      setLive({ title, channelId, streamUrl: response.url, grantId: response.grant_id });
+    try {
+      const outcome = liveTVPlaybackOutcome(await resolveLiveTVPlayback(libraryId, channelId));
+      if (outcome.kind === "playable") {
+        setLive({ title, channelId, streamUrl: outcome.url, grantId: outcome.grantId });
+        return;
+      }
+      toast.error(
+        outcome.kind === "unavailable"
+          ? liveTVT("playbackUnavailable", locale)
+          : liveTVT("playbackError", locale),
+      );
+    } catch {
+      toast.error(liveTVT("playbackError", locale));
+    }
   };
   const playProgramme = (item: LiveTVProgramme) => void playChannel(item.channel_id, item.title);
   if (live) return <LiveTVPlayer {...live} onStop={() => setLive(null)} />;
@@ -347,72 +387,104 @@ export function LiveTVLibraryPage({
           </Button>
         </div>
       </header>
-      <nav
-        className="border-border flex gap-1 border-b"
-        aria-label={liveTVT("liveTV", locale)}
-        data-testid="live-tv-tabs"
-      >
-        {(["favorites", "program", "channels"] as const).map((candidate) => (
-          <button
-            key={candidate}
-            type="button"
-            className={`border-b-2 px-3 py-2 text-sm font-medium transition-colors ${tab === candidate ? "border-primary text-foreground" : "text-muted-foreground hover:text-foreground border-transparent"}`}
-            aria-current={tab === candidate ? "page" : undefined}
-            onClick={() => updateState({ tab: candidate })}
-          >
-            {liveTVT(candidate, locale)}
-          </button>
-        ))}
-      </nav>
-      {channels.length === 0 ? (
-        <div
-          className="border-border text-muted-foreground rounded-xl border border-dashed p-12 text-center"
-          data-testid="live-tv-empty"
-        >
-          {liveTVT("empty", locale)}
-        </div>
-      ) : null}
-      {guideQuery.data?.stale ? (
-        <div
-          className="border-warning/30 bg-warning/10 text-warning rounded-xl border p-3 text-sm"
-          role="status"
-        >
-          {liveTVT("stale", locale)}
-          {guideQuery.data.refresh_error ? ` ${guideQuery.data.refresh_error}` : ""}
-        </div>
-      ) : null}
-      {tab === "program" ? (
-        <Guide programmes={guide} stale={guideQuery.data?.stale ?? false} onPlay={playProgramme} />
-      ) : null}
-      {tab !== "program" ? (
-        <div
-          className={
-            view === "grid" ? "grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-6" : "space-y-3"
+      <Tabs
+        value={tab}
+        onValueChange={(value) => {
+          if (value === "favorites" || value === "program" || value === "channels") {
+            updateState({ tab: value });
           }
-        >
-          {channels
-            .filter((channel) => tab !== "favorites" || favoriteIds.has(channel.id))
-            .map((channel) => (
-              <ChannelCard
-                key={channel.id}
-                channel={channel}
-                favorite={favoriteIds.has(channel.id)}
-                onToggle={() =>
-                  toggle.mutate({ id: channel.id, favorite: !favoriteIds.has(channel.id) })
-                }
-                view={view}
-                onPlay={() => void playChannel(channel.id, channel.name)}
-              />
-            ))}
+        }}
+      >
+        <LibraryHeader
+          libraryName={libraryName}
+          availableTabs={["favorites", "program", "channels"]}
+          tabLabels={{
+            favorites: liveTVT("favorites", locale),
+            program: liveTVT("program", locale),
+            channels: liveTVT("channels", locale),
+          }}
+        />
+        <div data-testid="live-tv-tabs">
+          {channels.length === 0 ? (
+            <div
+              className="border-border text-muted-foreground rounded-xl border border-dashed p-12 text-center"
+              data-testid="live-tv-empty"
+            >
+              {liveTVT("empty", locale)}
+            </div>
+          ) : null}
+          {guideQuery.data?.stale ? (
+            <div
+              className="border-warning/30 bg-warning/10 text-warning rounded-xl border p-3 text-sm"
+              role="status"
+            >
+              {liveTVT("stale", locale)}
+              {guideQuery.data.refresh_error ? ` ${guideQuery.data.refresh_error}` : ""}
+            </div>
+          ) : null}
+          {tab === "program" && guideQuery.isLoading ? (
+            <div
+              className="text-muted-foreground rounded-xl border border-dashed p-12 text-center"
+              data-testid="live-tv-guide-loading"
+            >
+              {liveTVT("guideLoading", locale)}
+            </div>
+          ) : null}
+          {tab === "program" && guideQuery.isError ? (
+            <div
+              className="border-border rounded-xl border border-dashed p-12 text-center"
+              data-testid="live-tv-guide-error"
+            >
+              <p className="font-semibold">{liveTVT("guideError", locale)}</p>
+              <Button className="mt-4" onClick={() => void guideQuery.refetch()}>
+                {liveTVT("guideRetry", locale)}
+              </Button>
+            </div>
+          ) : null}
+          {tab === "program" && !guideQuery.isLoading && !guideQuery.isError ? (
+            <Guide
+              programmes={guide}
+              stale={guideQuery.data?.stale ?? false}
+              onPlay={playProgramme}
+              watchLabel={liveTVT("watchLive", locale)}
+              locale={locale}
+            />
+          ) : null}
+          {tab !== "program" ? (
+            <div
+              className={
+                view === "grid"
+                  ? "grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-6"
+                  : "space-y-3"
+              }
+            >
+              {channels
+                .filter((channel) => tab !== "favorites" || favoriteIds.has(channel.id))
+                .map((channel) => (
+                  <ChannelCard
+                    key={channel.id}
+                    channel={channel}
+                    favorite={favoriteIds.has(channel.id)}
+                    onToggle={() =>
+                      toggle.mutate({ id: channel.id, favorite: !favoriteIds.has(channel.id) })
+                    }
+                    view={view}
+                    onPlay={() => void playChannel(channel.id, channel.name)}
+                    watchLabel={liveTVT("watchLive", locale)}
+                  />
+                ))}
+            </div>
+          ) : null}
+          <ProgrammeRow
+            title={liveTVT("now", locale)}
+            items={programmes}
+            favoriteIds={favoriteProgrammeIds}
+            onToggle={(id, favorite) => toggleProgrammes.mutate({ id, favorite })}
+            onPlay={playProgramme}
+            watchLabel={liveTVT("watchLive", locale)}
+          />
         </div>
-      ) : null}
-      <ProgrammeRow
-        title={liveTVT("now", locale)}
-        items={programmes}
-        favoriteIds={favoriteProgrammeIds}
-        onToggle={(id, favorite) => toggleProgrammes.mutate({ id, favorite })}
-        onPlay={playProgramme}
-      />
+      </Tabs>
     </div>
   );
 }

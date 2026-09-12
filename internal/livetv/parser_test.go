@@ -119,6 +119,22 @@ func TestParseXMLTV_mapsByProviderIDBeforeDisplayNameAndParsesMetadata(t *testin
 	}
 }
 
+func TestParseXMLTV_preservesIconArtworkAsSourceMetadata(t *testing.T) {
+	// Given an XMLTV programme with provider artwork.
+	xml := `<tv><channel id="xml-news"><display-name>News</display-name></channel><programme channel="xml-news" start="20260910100000 +0000" stop="20260910110000 +0000"><title>Morning</title><icon src="https://img.invalid/morning.png"/></programme></tv>`
+
+	// When the XMLTV feed is parsed against the channel mapping.
+	snapshot, _, err := ParseXMLTV(context.Background(), "epg-a", strings.NewReader(xml), 4096, map[string]ChannelMapping{"news-1": {ProviderID: "xml-news"}})
+
+	// Then artwork remains structured source metadata for downstream authorization.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(snapshot.Programmes[0].Artwork); got != `{"url":"https://img.invalid/morning.png"}` {
+		t.Fatalf("artwork = %s", got)
+	}
+}
+
 func TestParseXMLTV_reportsInvalidTimesAndAmbiguousFallback(t *testing.T) {
 	// Given an invalid time and a display-name matching multiple channels.
 	xml := `<tv><channel id="xml"><display-name>xml</display-name></channel><programme channel="xml" start="bad" stop="also-bad"><title>Bad</title></programme></tv>`

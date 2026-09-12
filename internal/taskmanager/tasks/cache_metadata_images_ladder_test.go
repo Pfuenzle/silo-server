@@ -65,11 +65,11 @@ func (s *fakeLadderState) ConfirmBackfilled(_ context.Context, version int) (boo
 	return true, nil
 }
 
-func runLadderTask(t *testing.T, runner *ladderRunner, state *fakeLadderState, target int) *recordingProgress {
+func runLadderTask(t *testing.T, runner *ladderRunner, state *fakeLadderState, target int) *metadataRecordingProgress {
 	t.Helper()
 	task := NewCacheMetadataImagesTask(runner)
 	task.SetLadderBackfill(state, target)
-	progress := &recordingProgress{}
+	progress := &metadataRecordingProgress{}
 	if err := task.Execute(context.Background(), progress); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -269,7 +269,7 @@ func TestCacheTaskWithoutLadderBackfillOnlyDrains(t *testing.T) {
 	runner := &ladderRunner{complete: true}
 	task := NewCacheMetadataImagesTask(runner)
 
-	if err := task.Execute(context.Background(), &recordingProgress{}); err != nil {
+	if err := task.Execute(context.Background(), &metadataRecordingProgress{}); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	if runner.drainCalls != 1 || runner.ladderCalls != 0 {
