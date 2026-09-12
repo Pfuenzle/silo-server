@@ -783,6 +783,7 @@ export default function AdminSections() {
       <RecipeGalleryModal
         open={galleryOpen}
         onClose={() => setGalleryOpen(false)}
+        libraries={librariesList}
         onPick={(def, preset) => {
           setGalleryOpen(false);
           setPickedRecipe({ def, preset });

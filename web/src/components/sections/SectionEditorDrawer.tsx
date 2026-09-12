@@ -26,7 +26,12 @@ import LibraryMultiSelect from "@/components/LibraryMultiSelect";
 import { CollectionSearchableSelect } from "@/components/CollectionSearchableSelect";
 import RecipeParamFields from "@/components/RecipeGallery/RecipeParamFields";
 import { SECTION_TYPES, FILTER_SECTION_TYPES, sectionTypeLabel } from "@/lib/sectionTypes";
-import type { Category, RecipeCatalogResponse, RecipeDefinition } from "@/lib/recipes";
+import {
+  filterRecipeCatalog,
+  type Category,
+  type RecipeCatalogResponse,
+  type RecipeDefinition,
+} from "@/lib/recipes";
 import {
   queryDefinitionFromSectionConfig,
   queryDefinitionToSectionConfig,
@@ -73,6 +78,22 @@ function lookupRecipe(
     if (found) return found;
   }
   return undefined;
+}
+
+export function filterSectionRecipeCatalog(
+  catalog: RecipeCatalogResponse | undefined,
+  libraries: readonly { readonly type?: string }[],
+): RecipeCatalogResponse {
+  return catalog ? filterRecipeCatalog(catalog, libraries) : { categories: {} };
+}
+
+export function sectionTypeAvailable(
+  sectionType: string,
+  libraries: readonly { readonly type?: string }[],
+): boolean {
+  return (
+    sectionType !== "currently_airing" || libraries.some((library) => library.type === "livetv")
+  );
 }
 
 function parseRecipeParams(config: unknown): Record<string, unknown> {
@@ -218,7 +239,7 @@ type ProfileDrawerProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   section: SettingsSectionEntry | null;
-  libraries: Array<{ id: number; name: string }>;
+  libraries: Array<{ id: number; name: string; type?: string }>;
   recipeCatalog?: RecipeCatalogResponse;
   onSave: (section: SettingsSectionEntry) => void;
 };
@@ -230,7 +251,7 @@ type AdminDrawerProps = {
   section: PageSectionConfig | null;
   scope: string;
   currentLibraryId: number | null;
-  libraries: Array<{ id: number; name: string }>;
+  libraries: Array<{ id: number; name: string; type?: string }>;
   recipeCatalog?: RecipeCatalogResponse;
   isSubmitting?: boolean;
   onSave: (section: Partial<PageSectionConfig> & { id?: string }) => void;
@@ -256,17 +277,25 @@ export default function SectionEditorDrawer(props: SectionEditorDrawerProps) {
   const [filterMode, setFilterMode] = useState<"easy" | "advanced">("easy");
   const { collections, isLoading: collectionsLoading } = useAllUserCollections();
 
+  const availableRecipeCatalog = useMemo(
+    () => filterSectionRecipeCatalog(props.recipeCatalog, props.libraries),
+    [props.recipeCatalog, props.libraries],
+  );
   const catalogCategories = useMemo(
     () =>
-      props.recipeCatalog
-        ? (Object.keys(props.recipeCatalog.categories) as Category[]).filter(
-            (category) => (props.recipeCatalog?.categories[category]?.length ?? 0) > 0,
+      availableRecipeCatalog
+        ? (Object.keys(availableRecipeCatalog.categories) as Category[]).filter(
+            (category) => (availableRecipeCatalog.categories[category]?.length ?? 0) > 0,
           )
         : [],
-    [props.recipeCatalog],
+    [availableRecipeCatalog],
+  );
+  const availableSectionTypes = useMemo(
+    () => SECTION_TYPES.filter((type) => sectionTypeAvailable(type.value, props.libraries)),
+    [props.libraries],
   );
   const recipeDef = !isLegacyFilterType(sectionType)
-    ? lookupRecipe(props.recipeCatalog, sectionType)
+    ? lookupRecipe(availableRecipeCatalog, sectionType)
     : undefined;
   const isKnownRecipe = Boolean(recipeDef);
   const showCollectionPicker = sectionType === "collection";
@@ -353,6 +382,7 @@ export default function SectionEditorDrawer(props: SectionEditorDrawerProps) {
 
   const saveDisabled =
     (showCollectionPicker && !selectedCollectionId) ||
+    !sectionTypeAvailable(sectionType, props.libraries) ||
     (props.mode === "admin" && props.scope === "library" && props.currentLibraryId == null);
 
   return (
@@ -384,7 +414,7 @@ export default function SectionEditorDrawer(props: SectionEditorDrawerProps) {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {!lookupRecipe(props.recipeCatalog, sectionType) &&
+                  {!lookupRecipe(availableRecipeCatalog, sectionType) &&
                   sectionType &&
                   (catalogCategories.length > 0 ||
                     !SECTION_TYPES.some((type) => type.value === sectionType)) ? (
@@ -394,7 +424,7 @@ export default function SectionEditorDrawer(props: SectionEditorDrawerProps) {
                     ? catalogCategories.map((category) => (
                         <SelectGroup key={category}>
                           <SelectLabel>{CATEGORY_LABELS[category] ?? category}</SelectLabel>
-                          {(props.recipeCatalog?.categories[category] ?? []).map((definition) => {
+                          {(availableRecipeCatalog.categories[category] ?? []).map((definition) => {
                             const label = definition.presets[0]?.display_name ?? definition.type;
                             const icon = definition.presets[0]?.icon;
                             return (
@@ -405,7 +435,7 @@ export default function SectionEditorDrawer(props: SectionEditorDrawerProps) {
                           })}
                         </SelectGroup>
                       ))
-                    : SECTION_TYPES.map((type) => (
+                    : availableSectionTypes.map((type) => (
                         <SelectItem key={type.value} value={type.value}>
                           {type.label}
                         </SelectItem>

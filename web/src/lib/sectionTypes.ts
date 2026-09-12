@@ -5,6 +5,7 @@ export const SECTION_TYPES = [
   { value: "custom_filter", label: "Custom Filter" },
   { value: "random", label: "Random" },
   { value: "continue_watching", label: "Continue Watching" },
+  { value: "currently_airing", label: "Currently airing" },
   { value: "recommended_for_you", label: "Recommended For You" },
   { value: "because_you_watched", label: "Because You Watched" },
   { value: "similar_users_liked", label: "Profiles Like You Enjoyed" },
