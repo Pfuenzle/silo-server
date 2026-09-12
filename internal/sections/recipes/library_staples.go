@@ -56,11 +56,15 @@ func (l *libStaple) Definition() RecipeDefinition {
 			},
 		}
 	}
-	return RecipeDefinition{
+	definition := RecipeDefinition{
 		Type:     l.typ,
 		Category: CategoryLibraryStaples,
 		Presets:  presets,
 	}
+	if l.typ == "currently_airing" {
+		definition.RequiredLibraryType = "livetv"
+	}
+	return definition
 }
 
 // Resolve delegates to the bridge installed by package sections (see Task 1.8).
@@ -69,6 +73,24 @@ func (l *libStaple) Resolve(rc ResolverContext) (ResolvedItems, error) {
 }
 
 func init() {
+	Register(&libStaple{
+		typ:         "currently_airing",
+		displayName: "Currently airing",
+		icon:        "Live",
+		descShort:   "Live TV programmes airing right now.",
+		cacheTTL:    time.Minute,
+		presets: []GalleryPreset{
+			{
+				Key:                       "currently_airing_default",
+				DisplayName:               "Currently airing",
+				DisplayNameLocalized:      map[string]string{"de": "Gerade läuft"},
+				Icon:                      "Live",
+				DescriptionShort:          "Live TV programmes airing right now.",
+				DescriptionShortLocalized: map[string]string{"de": "Live-TV-Programme, die gerade laufen."},
+				DefaultParams:             json.RawMessage(`{}`),
+			},
+		},
+	})
 	Register(&libStaple{typ: "recently_added", displayName: "Recently Added", icon: "🆕", descShort: "Latest additions to your library.", cacheTTL: 5 * time.Minute})
 	Register(&libStaple{typ: "recently_released", displayName: "New Releases", icon: "🎬", descShort: "Recently released titles.", cacheTTL: 30 * time.Minute})
 	Register(&libStaple{

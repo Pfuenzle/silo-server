@@ -31,22 +31,25 @@ const (
 // GalleryPreset is a UI-facing preset that maps to a Recipe + DefaultParams.
 // Many presets can share one resolver via parameterization (editorial, seasonal, mood).
 type GalleryPreset struct {
-	Key              string          `json:"key"`
-	DisplayName      string          `json:"display_name"`
-	Icon             string          `json:"icon"`
-	DescriptionShort string          `json:"description_short"`
-	DescriptionLong  string          `json:"description_long,omitempty"`
-	DefaultParams    json.RawMessage `json:"default_params"`
+	Key                       string            `json:"key"`
+	DisplayName               string            `json:"display_name"`
+	DisplayNameLocalized      map[string]string `json:"display_name_localized,omitempty"`
+	Icon                      string            `json:"icon"`
+	DescriptionShort          string            `json:"description_short"`
+	DescriptionShortLocalized map[string]string `json:"description_short_localized,omitempty"`
+	DescriptionLong           string            `json:"description_long,omitempty"`
+	DefaultParams             json.RawMessage   `json:"default_params"`
 }
 
 // RecipeDefinition is the metadata side of a Recipe — what shows up in the gallery.
 type RecipeDefinition struct {
-	Type             string          `json:"type"`
-	Category         Category        `json:"category"`
-	Presets          []GalleryPreset `json:"presets"`
-	AvoidDuplicates  bool            `json:"avoid_duplicates"`
-	SupportsRotation bool            `json:"supports_rotation"`
-	AdminOnly        bool            `json:"admin_only"`
+	Type                string          `json:"type"`
+	Category            Category        `json:"category"`
+	RequiredLibraryType string          `json:"required_library_type,omitempty"`
+	Presets             []GalleryPreset `json:"presets"`
+	AvoidDuplicates     bool            `json:"avoid_duplicates"`
+	SupportsRotation    bool            `json:"supports_rotation"`
+	AdminOnly           bool            `json:"admin_only"`
 	// Hidden recipes are still resolvable (so existing sections with that type
 	// keep working) but the API gallery list omits them. Used to phase out
 	// duplicate type aliases like `genre` (which is just a custom_filter).

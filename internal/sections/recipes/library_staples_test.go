@@ -6,7 +6,7 @@ import (
 )
 
 func TestLibraryStaplesAreRegistered(t *testing.T) {
-	wanted := []string{"recently_added", "recently_released", "continue_watching", "next_up", "watchlist", "favorites", "random"}
+	wanted := []string{"currently_airing", "recently_added", "recently_released", "continue_watching", "next_up", "watchlist", "favorites", "random"}
 	for _, typ := range wanted {
 		rec, ok := Get(typ)
 		if !ok {
@@ -22,8 +22,30 @@ func TestLibraryStaplesAreRegistered(t *testing.T) {
 	}
 }
 
+func TestCurrentlyAiringRecipeIsLiveTVGatedAndLocalized(t *testing.T) {
+	rec, ok := Get("currently_airing")
+	if !ok {
+		t.Fatal("currently_airing recipe not registered")
+	}
+
+	definition := rec.Definition()
+	if definition.RequiredLibraryType != "livetv" {
+		t.Fatalf("required library type = %q, want livetv", definition.RequiredLibraryType)
+	}
+	if len(definition.Presets) != 1 {
+		t.Fatalf("presets len = %d, want 1", len(definition.Presets))
+	}
+	preset := definition.Presets[0]
+	if preset.DisplayNameLocalized["de"] != "Gerade läuft" {
+		t.Fatalf("German display name = %q, want Gerade läuft", preset.DisplayNameLocalized["de"])
+	}
+	if preset.DescriptionShortLocalized["de"] != "Live-TV-Programme, die gerade laufen." {
+		t.Fatalf("German description = %q, want localized description", preset.DescriptionShortLocalized["de"])
+	}
+}
+
 func TestLibraryStaplesAcceptEmptyParams(t *testing.T) {
-	for _, typ := range []string{"recently_added", "continue_watching", "random"} {
+	for _, typ := range []string{"currently_airing", "recently_added", "continue_watching", "random"} {
 		rec, _ := Get(typ)
 		if err := rec.Validate(json.RawMessage(`{}`)); err != nil {
 			t.Errorf("%s.Validate({}) = %v", typ, err)
