@@ -118,6 +118,25 @@ describe("Home", () => {
   });
 
   it("mounts Live TV Home for the visible library and passes the profile locale", async () => {
+    mockUseHomeLayout.mockReturnValue({
+      data: {
+        sections: [
+          {
+            id: "live-tv",
+            section_type: "currently_airing",
+            title: "Currently airing",
+            featured: false,
+            item_limit: 20,
+            is_custom: false,
+            customized: false,
+            position: 0,
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    });
     mockUseUserLibraries.mockReturnValue({
       data: [{ id: 7, name: "Live", type: "livetv", sort_order: 0 }],
     });
@@ -135,6 +154,52 @@ describe("Home", () => {
     expect(container.querySelector('[data-kind="live-tv-home"]')).toMatchObject({
       dataset: { libraryId: "7", locale: "de" },
     });
+  });
+
+  it("renders the Live TV slot in the resolved home order", async () => {
+    mockUseHomeLayout.mockReturnValue({
+      data: {
+        sections: [
+          { ...homeLayout("before"), position: 0 },
+          {
+            id: "live-tv",
+            section_type: "currently_airing",
+            title: "Currently airing",
+            featured: false,
+            item_limit: 20,
+            is_custom: false,
+            customized: false,
+            position: 1,
+          },
+          { ...homeLayout("after"), position: 2 },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    });
+    mockUseUserLibraries.mockReturnValue({
+      data: [{ id: 7, name: "Live", type: "livetv", sort_order: 0 }],
+    });
+    mockUseCurrentProfile.mockReturnValue({ profile: { language: "en-US" } });
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(sectionKeys.homeItems("before"), homeSection("before"));
+    queryClient.setQueryData(sectionKeys.homeItems("after"), homeSection("after"));
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Home />
+        </QueryClientProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    const kinds = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-kind]"),
+      (node) => node.dataset.kind,
+    );
+    expect(kinds).toEqual(["taste-seed", "section-row", "live-tv-home", "section-row"]);
   });
 
   it("keeps section items cached past the client-wide gc time", async () => {

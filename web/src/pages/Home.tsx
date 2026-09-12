@@ -266,11 +266,17 @@ export default function Home() {
       <div className={`space-y-10 ${hasHeroSlot ? "pb-2" : "pt-6 pb-2"}`}>
         {heroSlot}
         <TasteSeedBanner />
-        {liveTVLibrary ? (
-          <LiveTVHomeSection libraryId={liveTVLibrary.id} locale={liveTVLocale} />
-        ) : null}
-
         {viewModel.rows.map((slot) => {
+          if (slot.layout.section_type === "currently_airing") {
+            return liveTVLibrary ? (
+              <LiveTVHomeSection
+                key={slot.layout.id}
+                libraryId={liveTVLibrary.id}
+                locale={liveTVLocale}
+                currentOnly
+              />
+            ) : null;
+          }
           if (slot.state === "empty") {
             return null;
           }

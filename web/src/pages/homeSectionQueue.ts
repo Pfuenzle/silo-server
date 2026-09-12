@@ -30,7 +30,9 @@ export function planNextHomeSectionBatch(input: {
   maxConcurrentRequests: number;
 }): string[] {
   return planNextHomeSectionRequests({
-    prioritizedIds: getPrioritizedHomeSectionIds(input.layout),
+    prioritizedIds: getPrioritizedHomeSectionIds(
+      input.layout.filter((section) => section.section_type !== "currently_airing"),
+    ),
     loadedIds: input.loadedIds,
     inFlightIds: input.inFlightIds,
     limit: Math.max(0, input.maxConcurrentRequests - input.inFlightIds.size),
