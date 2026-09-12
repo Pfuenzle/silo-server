@@ -1192,7 +1192,7 @@ func main() {
 	if apiRedisClient != nil {
 		livePlayback := livetv.NewLivePlaybackService(livetv.LivePlaybackConfig{
 			Fetch:       livetv.NewFetchService(livetv.FetchConfig{Policy: livetv.NetworkPolicy{AllowPrivateNetworks: true}}),
-			ProxyOrigin: "",
+			ProxyOrigin: integratedLivePlaybackOrigin(mode),
 			Authority:   liveTVRepo,
 			Store:       newLivePlaybackStore(apiRedisClient, cfg.Auth.JWTSecret),
 		})
@@ -1200,12 +1200,16 @@ func main() {
 		deps.LivePlayback = livePlayback
 	}
 	updateLivePlaybackOrigin := func(origin string) {
+		if mode == "integrated" {
+			origin = integratedLivePlaybackOrigin(mode)
+		}
 		if deps.LivePlayback != nil {
 			deps.LivePlayback.SetProxyOrigin(origin)
 		}
 		deps.LivePlaybackOrigin = origin
 	}
 	deps.LivePlaybackOriginUpdater = updateLivePlaybackOrigin
+	updateLivePlaybackOrigin(integratedLivePlaybackOrigin(mode))
 	accessGroupStore := access.NewGroupStore(pool)
 	audiobooksService := audiobooks.New(&audiobooksSettingsAdapter{repo: settingsRepo})
 	absCompatEnabled, err := audiobooksService.ABSCompatEnabled(appCtx)
@@ -1292,7 +1296,7 @@ func main() {
 		}
 		proxyPool.SetNodes(proxyNodes)
 		transcodePool.SetNodes(transcodeNodes)
-		if deps.LivePlayback != nil {
+		if deps.LivePlayback != nil && mode != "integrated" {
 			proxyOrigin := proxyPool.LivePlaybackOrigin()
 			updateLivePlaybackOrigin(proxyOrigin)
 		}
@@ -3370,6 +3374,13 @@ func main() {
 	_ = adminJobRunner
 
 	slog.Info("server stopped")
+}
+
+func integratedLivePlaybackOrigin(mode string) string {
+	if mode == "integrated" {
+		return "/api/v1"
+	}
+	return ""
 }
 
 // waitForShutdownWork waits for registered cleanup tasks within the process's
