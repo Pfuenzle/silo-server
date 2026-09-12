@@ -77,6 +77,30 @@ func TestResolve_PositionOverride(t *testing.T) {
 	}
 }
 
+func TestResolve_CurrentlyAiringPositionOverridePersistsOrder(t *testing.T) {
+	admin := []*PageSection{
+		{ID: "continue", Position: 0, SectionType: SectionContinueWatching, Title: "Continue Watching"},
+		{ID: "live-tv", Position: 1, SectionType: SectionCurrentlyAiring, Title: "Currently airing"},
+		{ID: "recent", Position: 2, SectionType: SectionRecentlyAdded, Title: "Recently Added"},
+	}
+
+	livePosition := 0
+	continuePosition := 1
+	recentPosition := 2
+	result := ResolveForSettings(admin, []ProfileSectionOverride{
+		{SectionID: "live-tv", Position: &livePosition},
+		{SectionID: "continue", Position: &continuePosition},
+		{SectionID: "recent", Position: &recentPosition},
+	})
+
+	if got := result[0].ID; got != "live-tv" {
+		t.Fatalf("first section ID = %q, want live-tv", got)
+	}
+	if got := result[0].SectionType; got != SectionCurrentlyAiring {
+		t.Fatalf("first section type = %q, want %q", got, SectionCurrentlyAiring)
+	}
+}
+
 func TestResolve_UserAddedSection(t *testing.T) {
 	admin := []*PageSection{
 		{ID: "1", Position: 0, SectionType: SectionRecentlyAdded, Title: "A", ItemLimit: 20, Config: json.RawMessage(`{}`)},

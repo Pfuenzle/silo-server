@@ -83,6 +83,35 @@ func TestDefaultHomeSectionsWithLibraries(t *testing.T) {
 	})
 }
 
+func TestDefaultHomeSectionsCurrentlyAiringIsOrderedAndLiveTVGated(t *testing.T) {
+	withLiveTV := DefaultHomeSections([]*models.MediaFolder{
+		{ID: 7, Name: "Live", Type: "livetv"},
+		{ID: 9, Name: "Movies", Type: "movies"},
+	})
+	withoutLiveTV := DefaultHomeSections([]*models.MediaFolder{
+		{ID: 9, Name: "Movies", Type: "movies"},
+	})
+
+	var currentIndex = -1
+	for index, section := range withLiveTV {
+		if section.SectionType == SectionCurrentlyAiring {
+			currentIndex = index
+			break
+		}
+	}
+	if currentIndex != 1 {
+		t.Fatalf("currently airing index = %d, want 1", currentIndex)
+	}
+	if withLiveTV[currentIndex].Position != 1 {
+		t.Fatalf("currently airing position = %d, want 1", withLiveTV[currentIndex].Position)
+	}
+	for _, section := range withoutLiveTV {
+		if section.SectionType == SectionCurrentlyAiring {
+			t.Fatal("currently airing should be omitted without a Live TV library")
+		}
+	}
+}
+
 func TestDefaultHomeSectionsWithAudiobookLibrary(t *testing.T) {
 	libraries := []*models.MediaFolder{
 		{ID: 7, Name: "Movies", Type: "movies", SortOrder: 1},
