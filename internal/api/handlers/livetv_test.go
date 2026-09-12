@@ -235,6 +235,24 @@ func TestLiveTVResponses_preserveStructuredArtwork(t *testing.T) {
 	}
 }
 
+func TestLiveTVProgrammeResponse_usesChannelNameWithStableChannelID(t *testing.T) {
+	// Given a programme associated with a named channel whose stable ID is opaque.
+	handler := &LiveTVHandler{}
+	channel := livetv.Channel{StableID: "TS|86a-stable-channel-id", Name: "Nikola"}
+	programme := livetv.Programme{StableID: "epg|programme-1", Title: "Evening News"}
+
+	// When the programme is mapped to the native API response.
+	response := handler.programmeResponse(context.Background(), programme, &channel)
+
+	// Then the response carries both the display name and playback identity.
+	if response.ChannelName != "Nikola" {
+		t.Fatalf("channel_name = %q, want Nikola", response.ChannelName)
+	}
+	if response.ChannelID != "TS|86a-stable-channel-id" {
+		t.Fatalf("channel_id = %q, want stable channel ID", response.ChannelID)
+	}
+}
+
 func TestAuthorizeArtwork_acceptsOnlyAuthorizedResolverResults(t *testing.T) {
 	// Given a handler with an image resolver returning an internal API URL.
 	handler := &LiveTVHandler{artwork: fakeLiveTVArtworkResolver{url: "/api/v1/images/livetv/logo"}}

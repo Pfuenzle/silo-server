@@ -160,7 +160,7 @@ func (h *LiveTVHandler) HandleListFavoriteProgrammes(w http.ResponseWriter, r *h
 		if getErr != nil {
 			continue
 		}
-		response.Programmes = append(response.Programmes, h.programmeResponse(r.Context(), programme, nil))
+		response.Programmes = append(response.Programmes, h.programmeResponseWithChannel(r.Context(), entry.LibraryID, programme))
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -214,13 +214,13 @@ func (h *LiveTVHandler) HandleHomeSections(w http.ResponseWriter, r *http.Reques
 		response.FavoriteChannelsAiring = append(response.FavoriteChannelsAiring, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: h.authorizeArtwork(r.Context(), channel.Artwork), Rating: channel.Rating})
 	}
 	for _, programme := range current {
-		response.FavoriteProgrammesAiring = append(response.FavoriteProgrammesAiring, h.programmeResponse(r.Context(), programme, nil))
+		response.FavoriteProgrammesAiring = append(response.FavoriteProgrammesAiring, h.programmeResponseWithChannel(r.Context(), favorite.LibraryID, programme))
 	}
 	for _, programme := range topRated {
-		response.TopRatedFavoriteProgrammes = append(response.TopRatedFavoriteProgrammes, h.programmeResponse(r.Context(), programme, nil))
+		response.TopRatedFavoriteProgrammes = append(response.TopRatedFavoriteProgrammes, h.programmeResponseWithChannel(r.Context(), favorite.LibraryID, programme))
 	}
 	for _, programme := range upcoming {
-		response.UpcomingFavoriteProgrammes = append(response.UpcomingFavoriteProgrammes, h.programmeResponse(r.Context(), programme, nil))
+		response.UpcomingFavoriteProgrammes = append(response.UpcomingFavoriteProgrammes, h.programmeResponseWithChannel(r.Context(), favorite.LibraryID, programme))
 	}
 	writeJSON(w, http.StatusOK, response)
 }

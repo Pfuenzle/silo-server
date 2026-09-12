@@ -109,7 +109,7 @@ func (h *LiveTVHandler) HandleProgrammeDetail(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load Live TV programme")
 		return
 	}
-	writeJSON(w, http.StatusOK, h.programmeResponse(r.Context(), programme, nil))
+	writeJSON(w, http.StatusOK, h.programmeResponseWithChannel(r.Context(), library.ID, programme))
 }
 
 func (h *LiveTVHandler) HandleCurrentNext(w http.ResponseWriter, r *http.Request) {
@@ -258,6 +258,19 @@ func (h *LiveTVHandler) programmeResponse(ctx context.Context, programme livetv.
 		response.ChannelName = channel.Name
 	}
 	return response
+}
+
+func (h *LiveTVHandler) programmeResponseWithChannel(ctx context.Context, libraryID int, programme livetv.Programme) liveTVProgrammeResponse {
+	channels, _, err := h.repo.ListChannels(ctx, libraryID, liveTVMaxPageSize, 0)
+	if err != nil {
+		return h.programmeResponse(ctx, programme, nil)
+	}
+	for index := range channels {
+		if channels[index].ID == programme.ChannelID {
+			return h.programmeResponse(ctx, programme, &channels[index])
+		}
+	}
+	return h.programmeResponse(ctx, programme, nil)
 }
 
 func (h *LiveTVHandler) authorizeArtwork(ctx context.Context, raw []byte) json.RawMessage {
