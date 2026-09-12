@@ -15,7 +15,11 @@ const mocks = vi.hoisted(() => ({
   setSearchParams: vi.fn(),
   playback: vi.fn(),
   toastError: vi.fn(),
-  channels: [{ id: "source|one", name: "One", category: "News", artwork: { url: "/api/artwork/one" } }],
+  toggleChannel: vi.fn(),
+  channels: [
+    { id: "source|one", name: "One", category: "News", artwork: { url: "/api/artwork/one" } },
+  ],
+  favoriteChannels: [] as readonly { id: string }[],
   favoriteProgrammes: [] as readonly LiveTVProgramme[],
   guide: {
     data: undefined as { items: readonly LiveTVProgramme[]; stale: boolean } | undefined,
@@ -33,27 +37,31 @@ vi.mock("@/hooks/useCurrentProfile", () => ({ useCurrentProfile: () => ({ profil
 vi.mock("@/hooks/queries/livetv", () => ({
   resolveLiveTVPlayback: (...args: unknown[]) => mocks.playback(...args),
   useLiveTVChannels: () => ({
-     data: { items: mocks.channels },
+    data: { items: mocks.channels },
     isLoading: false,
     isError: false,
   }),
   useLiveTVGuide: () => mocks.guide,
   useLiveTVFavorites: (_libraryId: number, kind: string) => ({
-    data: kind === "programmes" ? mocks.favoriteProgrammes : [],
+    data: kind === "programmes" ? mocks.favoriteProgrammes : mocks.favoriteChannels,
   }),
-  useToggleLiveTVFavorite: () => ({ mutate: vi.fn() }),
+  useToggleLiveTVFavorite: (_libraryId: number, kind: string) => ({
+    mutate: kind === "channels" ? mocks.toggleChannel : vi.fn(),
+  }),
 }));
 vi.mock("@/components/LibraryHeader", () => ({
   default: ({
     availableTabs,
     tabLabels,
+    onValueChange,
   }: {
     availableTabs: readonly string[];
     tabLabels: Record<string, string>;
+    onValueChange?: (value: string) => void;
   }) => (
     <nav>
       {availableTabs.map((value) => (
-        <button key={value} type="button">
+        <button key={value} type="button" onClick={() => onValueChange?.(value)}>
           {tabLabels[value]}
         </button>
       ))}
@@ -81,8 +89,12 @@ describe("LiveTVLibraryPage", () => {
     mocks.setSearchParams.mockReset();
     mocks.playback.mockReset();
     mocks.toastError.mockReset();
-    mocks.channels = [{ id: "source|one", name: "One", category: "News", artwork: { url: "/api/artwork/one" } }];
+    mocks.toggleChannel.mockReset();
+    mocks.channels = [
+      { id: "source|one", name: "One", category: "News", artwork: { url: "/api/artwork/one" } },
+    ];
     mocks.favoriteProgrammes = [];
+    mocks.favoriteChannels = [];
     mocks.guide = {
       data: { items: [], stale: false },
       isLoading: false,
@@ -109,11 +121,10 @@ describe("LiveTVLibraryPage", () => {
 
     await act(async () => listButton?.click());
 
-    const updater = mocks.setSearchParams.mock.calls[0]?.[0] as (
-      current: URLSearchParams,
-    ) => URLSearchParams;
-    const next = updater(new URLSearchParams("tab=program&view=grid"));
-    expect(next.toString()).toBe("tab=program&view=list");
+    expect(mocks.setSearchParams).toHaveBeenCalledWith(
+      new URLSearchParams("tab=favorites&view=list"),
+      { replace: true },
+    );
   });
 
   it("renders a favorite programme in the Favorites tab", async () => {
@@ -140,6 +151,24 @@ describe("LiveTVLibraryPage", () => {
     expect(container.textContent).toContain("Morning News");
   });
 
+  it("keeps the selected tab visible when favorite data invalidates and rerenders", async () => {
+    mocks.searchParams = new URLSearchParams("tab=favorites&view=grid");
+    mocks.favoriteChannels = [{ id: "source|one" }];
+    await renderPage();
+
+    const favoriteButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Remove One from favorites"]',
+    );
+    await act(async () => favoriteButton?.click());
+    mocks.favoriteChannels = [];
+    await renderPage();
+
+    expect(container.querySelector('[data-testid="live-tv-library"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="live-tv-empty"]')).toBeNull();
+    expect(mocks.toggleChannel).toHaveBeenCalledWith({ id: "source|one", favorite: false });
+    expect(mocks.setSearchParams).not.toHaveBeenCalled();
+  });
+
   it("shows a localized error when playback is unavailable", async () => {
     mocks.playback.mockResolvedValue({ playable: false, error_code: "source_unavailable" });
     mocks.searchParams = new URLSearchParams("tab=channels&view=grid");
@@ -156,7 +185,9 @@ describe("LiveTVLibraryPage", () => {
       "This channel is currently unavailable.",
     );
     expect(
-      Array.from(container.querySelectorAll("button")).some((button) => button.textContent === "Try again"),
+      Array.from(container.querySelectorAll("button")).some(
+        (button) => button.textContent === "Try again",
+      ),
     ).toBe(true);
     expect(container.querySelector('[data-testid="player"]')).toBeNull();
   });
@@ -186,7 +217,11 @@ describe("LiveTVLibraryPage", () => {
     };
     await renderPage();
 
-    await act(async () => container.querySelector('[data-testid="live-tv-channel-source|one"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await act(async () =>
+      container
+        .querySelector('[data-testid="live-tv-channel-source|one"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
 
     expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain("Morning News");
     expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain("One");
@@ -196,17 +231,19 @@ describe("LiveTVLibraryPage", () => {
     mocks.searchParams = new URLSearchParams("tab=program&view=grid");
     mocks.guide = {
       data: {
-        items: [{
-          id: "programme-1",
-          channel_id: "source|one",
-          channel_name: "One",
-          title: "Morning News",
-          description: "The latest headlines.",
-          starts_at: new Date(Date.now() - 60_000).toISOString(),
-          ends_at: new Date(Date.now() + 60_000).toISOString(),
-          artwork: { url: "/api/artwork/programme" },
-          rating: 4.5,
-        }],
+        items: [
+          {
+            id: "programme-1",
+            channel_id: "source|one",
+            channel_name: "One",
+            title: "Morning News",
+            description: "The latest headlines.",
+            starts_at: new Date(Date.now() - 60_000).toISOString(),
+            ends_at: new Date(Date.now() + 60_000).toISOString(),
+            artwork: { url: "/api/artwork/programme" },
+            rating: 4.5,
+          },
+        ],
         stale: false,
       },
       isLoading: false,
@@ -215,7 +252,11 @@ describe("LiveTVLibraryPage", () => {
     };
     await renderPage();
 
-    await act(async () => container.querySelector('[data-testid="live-tv-programme-programme-1"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await act(async () =>
+      container
+        .querySelector('[data-testid="live-tv-programme-programme-1"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
 
     expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain("Morning News");
   });
@@ -224,17 +265,19 @@ describe("LiveTVLibraryPage", () => {
     mocks.searchParams = new URLSearchParams("tab=channels&view=grid");
     mocks.guide = {
       data: {
-        items: [{
-          id: "programme-1",
-          channel_id: "source|one",
-          channel_name: "One",
-          title: "Morning News",
-          description: "The latest headlines.",
-          starts_at: new Date(Date.now() - 60_000).toISOString(),
-          ends_at: new Date(Date.now() + 60_000).toISOString(),
-          artwork: { url: "/api/artwork/programme" },
-          rating: 4.5,
-        }],
+        items: [
+          {
+            id: "programme-1",
+            channel_id: "source|one",
+            channel_name: "One",
+            title: "Morning News",
+            description: "The latest headlines.",
+            starts_at: new Date(Date.now() - 60_000).toISOString(),
+            ends_at: new Date(Date.now() + 60_000).toISOString(),
+            artwork: { url: "/api/artwork/programme" },
+            rating: 4.5,
+          },
+        ],
         stale: false,
       },
       isLoading: false,
@@ -243,17 +286,29 @@ describe("LiveTVLibraryPage", () => {
     };
     await renderPage();
 
-    expect(container.querySelector('[data-testid="live-tv-channel-source|one"]')?.textContent).toContain("Morning News");
+    expect(
+      container.querySelector('[data-testid="live-tv-channel-source|one"]')?.textContent,
+    ).toContain("Morning News");
     expect(container.querySelector('[data-testid="live-tv-programme-row"]')).toBeNull();
   });
 
   it("starts playback from the shared popup Watch Channel action", async () => {
     mocks.searchParams = new URLSearchParams("tab=channels&view=grid");
-    mocks.playback.mockResolvedValue({ playable: true, url: "/api/v1/stream/live/grant-1/manifest", grant_id: "grant-1" });
+    mocks.playback.mockResolvedValue({
+      playable: true,
+      url: "/api/v1/stream/live/grant-1/manifest",
+      grant_id: "grant-1",
+    });
     await renderPage();
 
-    await act(async () => container.querySelector('[data-testid="live-tv-channel-source|one"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
-    const watch = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent === "Watch Channel");
+    await act(async () =>
+      container
+        .querySelector('[data-testid="live-tv-channel-source|one"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+    const watch = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.textContent === "Watch Channel",
+    );
     await act(async () => watch?.click());
 
     expect(mocks.playback).toHaveBeenCalledWith(7, "source|one");
@@ -265,12 +320,20 @@ describe("LiveTVLibraryPage", () => {
     mocks.playback.mockResolvedValue({ playable: false, error_code: "source_unavailable" });
     await renderPage();
 
-    await act(async () => container.querySelector('[data-testid="live-tv-channel-source|one"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
-    const watch = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent === "Watch Channel");
+    await act(async () =>
+      container
+        .querySelector('[data-testid="live-tv-channel-source|one"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+    const watch = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.textContent === "Watch Channel",
+    );
     await act(async () => watch?.click());
 
     expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain("This channel is currently unavailable.");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "This channel is currently unavailable.",
+    );
   });
 
   it("opens the player when playback returns a playable grant", async () => {

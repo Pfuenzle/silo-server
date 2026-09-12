@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Heart, LayoutGrid, List, Radio, Star } from "lucide-react";
 import { useSearchParams } from "react-router";
 import { Button } from "@/components/ui/button";
@@ -96,7 +96,13 @@ function LiveTVInfoDialog({
             <div className="space-y-4">
               <div className="bg-muted flex aspect-video items-center justify-center overflow-hidden rounded-lg">
                 {image ? (
-                  <img src={image} alt="" className="size-full object-cover" width="640" height="360" />
+                  <img
+                    src={image}
+                    alt=""
+                    className="size-full object-cover"
+                    width="640"
+                    height="360"
+                  />
                 ) : (
                   <Radio className="text-muted-foreground size-10" aria-hidden="true" />
                 )}
@@ -108,14 +114,24 @@ function LiveTVInfoDialog({
                     {formatTime(item.startsAt)} – {formatTime(item.endsAt)}
                   </span>
                 ) : null}
-                {item.category ? <span className="text-muted-foreground">{item.category}</span> : null}
+                {item.category ? (
+                  <span className="text-muted-foreground">{item.category}</span>
+                ) : null}
                 <Rating value={item.rating} />
               </div>
-              {item.description ? <p className="text-muted-foreground text-sm">{item.description}</p> : null}
-              {playbackFailure ? <p className="text-destructive text-sm" role="alert">{playbackFailure}</p> : null}
+              {item.description ? (
+                <p className="text-muted-foreground text-sm">{item.description}</p>
+              ) : null}
+              {playbackFailure ? (
+                <p className="text-destructive text-sm" role="alert">
+                  {playbackFailure}
+                </p>
+              ) : null}
             </div>
             <DialogFooter>
-              <Button type="button" onClick={onWatch}>{liveTVT("watchChannel", locale)}</Button>
+              <Button type="button" onClick={onWatch}>
+                {liveTVT("watchChannel", locale)}
+              </Button>
             </DialogFooter>
           </>
         ) : null}
@@ -200,7 +216,10 @@ function ChannelCard({
                 : `Add ${channel.name} to favorites`
             }
             aria-pressed={favorite}
-            onClick={onToggle}
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggle();
+            }}
           >
             <Heart
               className={
@@ -423,6 +442,10 @@ export function LiveTVLibraryPage({
   readonly libraryName: string;
 }) {
   const [searchParams, setSearchParams] = useSearchParams();
+  const latestSearchParamsRef = useRef(new URLSearchParams(searchParams));
+  useEffect(() => {
+    latestSearchParamsRef.current = new URLSearchParams(searchParams);
+  }, [searchParams]);
   const { tab, view } = parseLiveTVSearchParams(searchParams);
   const [live, setLive] = useState<{
     readonly title: string;
@@ -455,17 +478,16 @@ export function LiveTVLibraryPage({
   const channels = channelsQuery.data?.items ?? [];
   const favoriteIds = new Set((favoriteChannelsQuery.data ?? []).map((item) => item.id));
   const favoriteProgrammeIds = new Set((favoriteProgrammesQuery.data ?? []).map((item) => item.id));
-  const updateState = (next: Partial<{ readonly tab: LiveTVTab; readonly view: LiveTVView }>) =>
-    setSearchParams(
-      (current) => {
-        const currentState = parseLiveTVSearchParams(current);
-        return updateLiveTVSearchParams(current, {
-          tab: next.tab ?? currentState.tab,
-          view: next.view ?? currentState.view,
-        });
-      },
-      { replace: true },
-    );
+  const updateState = (next: Partial<{ readonly tab: LiveTVTab; readonly view: LiveTVView }>) => {
+    const current = latestSearchParamsRef.current;
+    const currentState = parseLiveTVSearchParams(current);
+    const nextSearchParams = updateLiveTVSearchParams(current, {
+      tab: next.tab ?? currentState.tab,
+      view: next.view ?? currentState.view,
+    });
+    latestSearchParamsRef.current = nextSearchParams;
+    setSearchParams(nextSearchParams, { replace: true });
+  };
   const playChannel = async (channelId: string, title: string) => {
     setPlaybackFailure(null);
     try {
@@ -589,7 +611,10 @@ export function LiveTVLibraryPage({
             </div>
           ) : null}
           {playbackFailure ? (
-            <div className="border-destructive/30 bg-destructive/10 rounded-xl border p-4" role="alert">
+            <div
+              className="border-destructive/30 bg-destructive/10 rounded-xl border p-4"
+              role="alert"
+            >
               <p className="font-semibold">{playbackFailure.message}</p>
               <Button
                 type="button"
