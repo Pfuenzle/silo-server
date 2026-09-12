@@ -117,6 +117,33 @@ func TestReconciler_persistsCachedArtworkPath(t *testing.T) {
 	}
 }
 
+func TestReconciler_preservesSuccessfulArtworkFieldsWhenOneCacheFails(t *testing.T) {
+	// Given two artwork fields where only one provider image can be cached.
+	store := newMemorySnapshotStore()
+	reconciler := NewReconciler(store, time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC))
+	reconciler.SetArtworkCacher(selectiveArtworkCacher{})
+	snapshot := SourceSnapshot{Channels: []Channel{{StableID: "playlist-a|news", Artwork: []byte(`{"logo":"https://provider.example/logo.png","poster":"https://provider.example/poster.png"}`)}}}
+
+	// When the snapshot is reconciled.
+	if err := reconciler.Reconcile(context.Background(), Source{ID: 7, SourceKey: "playlist-a"}, snapshot, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Then the successful field is retained and the failed field is omitted.
+	if got := string(store.snapshot(7).Channels[0].Artwork); got != `{"logo":"livetv/logo.webp"}` {
+		t.Fatalf("artwork = %s, want successful cached field only", got)
+	}
+}
+
+type selectiveArtworkCacher struct{}
+
+func (selectiveArtworkCacher) CacheLiveTVArtwork(_ context.Context, sourceURL, _, _ string) (string, error) {
+	if strings.Contains(sourceURL, "poster") {
+		return "", errors.New("poster unavailable")
+	}
+	return "livetv/logo.webp", nil
+}
+
 type fakeArtworkCacher struct {
 	path string
 	err  error

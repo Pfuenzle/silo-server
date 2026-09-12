@@ -106,9 +106,13 @@ func (r *Reconciler) cacheArtworkValue(ctx context.Context, source Source, raw [
 	for key, url := range value {
 		cached, err := r.artwork.CacheLiveTVArtwork(ctx, url, kind, source.SourceKey+"|"+identity+"|"+key)
 		if err != nil || cached == "" {
-			return nil
+			delete(value, key)
+			continue
 		}
 		value[key] = cached
+	}
+	if len(value) == 0 {
+		return nil
 	}
 	encoded, err := json.Marshal(value)
 	if err != nil {

@@ -239,6 +239,42 @@ func TestAuthorizeArtwork_acceptsOnlyAuthorizedResolverResults(t *testing.T) {
 	}
 }
 
+func TestAuthorizeArtwork_acceptsConfiguredCloudflareTokenURL(t *testing.T) {
+	// Given an object store configured for Cloudflare token delivery.
+	handler := &LiveTVHandler{
+		objectStore: fakeLiveTVArtworkStore{url: "https://cdn.example/logo.png?verify=token"},
+	}
+
+	// When cached Live TV artwork is authorized.
+	got := handler.authorizeArtwork(context.Background(), json.RawMessage(`{"logo":"livetv/logo.webp"}`))
+
+	// Then the configured authorized URL is returned.
+	if string(got) != `{"logo":"https://cdn.example/logo.png?verify=token"}` {
+		t.Fatalf("artwork = %s", got)
+	}
+}
+
+func TestAuthorizeArtwork_usesConfiguredObjectStoreWithoutImageResolver(t *testing.T) {
+	// Given cached artwork and only the configured object store.
+	handler := &LiveTVHandler{objectStore: fakeLiveTVArtworkStore{url: "https://cdn.example/logo.png"}}
+
+	// When cached Live TV artwork is authorized.
+	got := handler.authorizeArtwork(context.Background(), json.RawMessage(`{"logo":"livetv/logo.webp"}`))
+
+	// Then the trusted object-store delivery URL is returned.
+	if string(got) != `{"logo":"https://cdn.example/logo.png"}` {
+		t.Fatalf("artwork = %s", got)
+	}
+}
+
 type fakeLiveTVArtworkResolver struct{ url string }
 
 func (f fakeLiveTVArtworkResolver) PresignURL(context.Context, string, string) string { return f.url }
+
+type fakeLiveTVArtworkStore struct{ url string }
+
+func (f fakeLiveTVArtworkStore) Bucket() string { return "artwork" }
+
+func (f fakeLiveTVArtworkStore) PresignGetURL(context.Context, string, string, time.Duration) (string, error) {
+	return f.url, nil
+}

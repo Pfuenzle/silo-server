@@ -257,17 +257,18 @@ func (h *LiveTVHandler) programmeResponse(ctx context.Context, programme livetv.
 
 func (h *LiveTVHandler) authorizeArtwork(ctx context.Context, raw []byte) json.RawMessage {
 	var value map[string]string
-	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil || h == nil || h.artwork == nil {
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil || h == nil || (h.artwork == nil && h.objectStore == nil) {
 		return nil
 	}
 	for key, path := range value {
 		resolved := ""
-		if h.objectStore != nil && !strings.Contains(path, "://") && !strings.HasPrefix(path, "/") {
+		fromObjectStore := h.objectStore != nil && !strings.Contains(path, "://") && !strings.HasPrefix(path, "/")
+		if fromObjectStore {
 			resolved, _ = h.objectStore.PresignGetURL(ctx, h.objectStore.Bucket(), path, 15*time.Minute)
 		} else if h.artwork != nil {
 			resolved = h.artwork.PresignURL(ctx, path, "card")
 		}
-		if !isAuthorizedArtworkURL(resolved) {
+		if resolved == "" || (!fromObjectStore && !isAuthorizedArtworkURL(resolved)) {
 			delete(value, key)
 			continue
 		}
@@ -292,7 +293,7 @@ func isAuthorizedArtworkURL(raw string) bool {
 		return false
 	}
 	query := parsed.Query()
-	return query.Get("X-Amz-Signature") != "" || query.Get("X-Goog-Signature") != ""
+	return query.Get("X-Amz-Signature") != "" || query.Get("X-Goog-Signature") != "" || query.Get("verify") != ""
 }
 
 func parseLiveTVPage(r *http.Request) (int, int) {
