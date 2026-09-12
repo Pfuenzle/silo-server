@@ -543,6 +543,55 @@ func TestValidateSectionConfigAcceptsContinueTypes(t *testing.T) {
 	}
 }
 
+func TestValidateSectionTypeRequiresLiveTVLibrary(t *testing.T) {
+	if msg, ok := validateSectionType(sections.SectionCurrentlyAiring, nil); ok || msg == "" {
+		t.Fatalf("currently_airing accepted without Live TV library: %q", msg)
+	}
+	if msg, ok := validateSectionType(sections.SectionCurrentlyAiring, []*models.MediaFolder{{Type: "movies"}}); ok || msg == "" {
+		t.Fatalf("currently_airing accepted with non-Live TV library: %q", msg)
+	}
+	if msg, ok := validateSectionType(sections.SectionCurrentlyAiring, []*models.MediaFolder{{Type: "livetv"}}); !ok || msg != "" {
+		t.Fatalf("currently_airing rejected with Live TV library: %q", msg)
+	}
+}
+
+func TestFilterSectionsByLibraryTypeHidesPersistedCurrentlyAiring(t *testing.T) {
+	input := []sections.ResolvedSection{
+		{ID: "live", SectionType: sections.SectionCurrentlyAiring},
+		{ID: "recent", SectionType: sections.SectionRecentlyAdded},
+	}
+
+	got := filterSectionsByLibraryType(input, []*models.MediaFolder{{Type: "movies"}})
+	if len(got) != 1 || got[0].ID != "recent" {
+		t.Fatalf("filtered sections = %#v, want only recent", got)
+	}
+
+	got = filterSectionsByLibraryType(input, []*models.MediaFolder{{Type: "livetv"}})
+	if len(got) != 2 {
+		t.Fatalf("sections with Live TV = %#v, want both sections", got)
+	}
+}
+
+func TestFilterPageSectionsByLibraryTypeHidesPersistedCurrentlyAiring(t *testing.T) {
+	input := []*sections.PageSection{
+		{ID: "live", SectionType: sections.SectionCurrentlyAiring},
+		{ID: "recent", SectionType: sections.SectionRecentlyAdded},
+	}
+
+	got := filterPageSectionsByLibraryType(input, nil)
+	if len(got) != 1 || got[0].ID != "recent" {
+		t.Fatalf("filtered admin sections = %#v, want only recent", got)
+	}
+}
+
+func TestFilterPageSectionsKeepsCurrentlyAiringWithLiveTV(t *testing.T) {
+	input := []*sections.PageSection{{ID: "live", SectionType: sections.SectionCurrentlyAiring}}
+	got := filterPageSectionsByLibraryType(input, []*models.MediaFolder{{Type: "livetv"}})
+	if len(got) != 1 || got[0].ID != "live" {
+		t.Fatalf("sections with Live TV = %#v, want currently airing", got)
+	}
+}
+
 func TestValidateSectionConfigRejectsUnknownContinueType(t *testing.T) {
 	msg, ok := validateSectionConfig(sections.SectionContinueWatching, []byte(`{"continue_type":"scrolling"}`))
 	if ok {
@@ -775,6 +824,23 @@ func TestSaveProfileOverridesRejectsAdminOnlyRecipeWhenSettingDisabled(t *testin
 func TestSaveProfileOverridesUnknownRecipeReturnsBadRequest(t *testing.T) {
 	h := &SectionHandler{}
 	body := []byte(`{"scope":"home","library_id":"","overrides":[{"is_user_added":true,"user_section_type":"no_such_recipe","user_config":{}}]}`)
+	req := httptest.NewRequest(http.MethodPut, "/profile/sections", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := apimw.SetClaims(req.Context(), &auth.Claims{Role: "user", UserID: 1})
+	ctx = apimw.SetProfileID(ctx, "p1")
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	h.HandleSaveProfileOverrides(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSaveProfileOverridesRejectsCurrentlyAiringWithoutLiveTV(t *testing.T) {
+	h := &SectionHandler{}
+	body := []byte(`{"scope":"home","library_id":"","overrides":[{"is_user_added":true,"user_section_type":"currently_airing","user_config":{}}]}`)
 	req := httptest.NewRequest(http.MethodPut, "/profile/sections", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	ctx := apimw.SetClaims(req.Context(), &auth.Claims{Role: "user", UserID: 1})

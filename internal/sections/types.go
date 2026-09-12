@@ -55,6 +55,7 @@ const (
 // ValidSectionTypes is the set of all valid section type values.
 var ValidSectionTypes = map[SectionType]bool{
 	SectionContinueWatching:    true,
+	SectionCurrentlyAiring:     true,
 	SectionRecentlyAdded:       true,
 	SectionRecentlyReleased:    true,
 	SectionWatchlist:           true,

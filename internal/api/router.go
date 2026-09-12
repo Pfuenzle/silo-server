@@ -1588,7 +1588,7 @@ func NewRouter(deps Dependencies) chi.Router {
 	libraryCollectionService := deps.CollectionService
 	if deps.DB != nil {
 		sectionRepo := sections.NewRepository(deps.DB)
-		sectionBulkHandler = &handlers.SectionBulkHandler{Repo: sectionRepo}
+		sectionBulkHandler = &handlers.SectionBulkHandler{Repo: sectionRepo, FolderRepo: catalog.NewFolderRepository(deps.DB)}
 		sectionFetcher := sections.NewFetcher(deps.DB)
 		sectionFetcher.StoreProvider = deps.UserStoreProvider
 		sectionFetcher.CollectionRepo = catalog.NewLibraryCollectionRepository(deps.DB)

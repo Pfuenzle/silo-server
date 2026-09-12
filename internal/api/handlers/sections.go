@@ -67,6 +67,13 @@ func (h *SectionHandler) defaultHomeSections(ctx context.Context) ([]*sections.P
 	return sections.DefaultHomeSections(libraries), nil
 }
 
+func (h *SectionHandler) currentLibraries(ctx context.Context) ([]*models.MediaFolder, error) {
+	if h.FolderRepo == nil {
+		return nil, nil
+	}
+	return h.FolderRepo.List(ctx)
+}
+
 func (h *SectionHandler) defaultLibrarySections(ctx context.Context, libraryID int) ([]*sections.PageSection, error) {
 	if h.FolderRepo == nil {
 		return libraryDefaultSections(nil, libraryID), nil
@@ -197,6 +204,51 @@ func validateSectionConfig(sectionType sections.SectionType, config json.RawMess
 	return "", true
 }
 
+func validateSectionType(sectionType sections.SectionType, libraries []*models.MediaFolder) (string, bool) {
+	if !sections.ValidSectionTypes[sectionType] {
+		return "Invalid section_type", false
+	}
+	if sectionType == sections.SectionCurrentlyAiring && !hasLiveTVLibrary(libraries) {
+		return "currently_airing requires a Live TV library", false
+	}
+	return "", true
+}
+
+func hasLiveTVLibrary(libraries []*models.MediaFolder) bool {
+	for _, library := range libraries {
+		if library != nil && library.Type == "livetv" {
+			return true
+		}
+	}
+	return false
+}
+
+func filterSectionsByLibraryType(items []sections.ResolvedSection, libraries []*models.MediaFolder) []sections.ResolvedSection {
+	if hasLiveTVLibrary(libraries) {
+		return items
+	}
+	out := make([]sections.ResolvedSection, 0, len(items))
+	for _, item := range items {
+		if item.SectionType != sections.SectionCurrentlyAiring {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func filterPageSectionsByLibraryType(items []*sections.PageSection, libraries []*models.MediaFolder) []*sections.PageSection {
+	if hasLiveTVLibrary(libraries) {
+		return items
+	}
+	out := make([]*sections.PageSection, 0, len(items))
+	for _, item := range items {
+		if item.SectionType != sections.SectionCurrentlyAiring {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
 func validateSectionScope(scope string, libraryID *int) (string, bool) {
 	switch scope {
 	case "", "home":
@@ -238,6 +290,12 @@ func (h *SectionHandler) HandleListSections(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list sections")
 		return
 	}
+	libraries, err := h.currentLibraries(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list libraries")
+		return
+	}
+	list = filterPageSectionsByLibraryType(list, libraries)
 
 	resp := sectionListResponse{Sections: make([]sectionResponse, 0, len(list))}
 	for _, s := range list {
@@ -259,8 +317,13 @@ func (h *SectionHandler) HandleCreateSection(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if !sections.ValidSectionTypes[sections.SectionType(req.SectionType)] {
-		writeError(w, http.StatusBadRequest, "bad_request", "Invalid section_type")
+	libraries, err := h.currentLibraries(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list libraries")
+		return
+	}
+	if msg, ok := validateSectionType(sections.SectionType(req.SectionType), libraries); !ok {
+		writeError(w, http.StatusBadRequest, "bad_request", msg)
 		return
 	}
 
@@ -348,6 +411,16 @@ func (h *SectionHandler) HandleUpdateSection(w http.ResponseWriter, r *http.Requ
 		existing.Enabled = *req.Enabled
 	}
 
+	libraries, listErr := h.currentLibraries(r.Context())
+	if listErr != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list libraries")
+		return
+	}
+	if msg, ok := validateSectionType(existing.SectionType, libraries); !ok {
+		writeError(w, http.StatusBadRequest, "bad_request", msg)
+		return
+	}
+
 	if msg, ok := validateSectionScope(existing.Scope, existing.LibraryID); !ok {
 		writeError(w, http.StatusBadRequest, "bad_request", msg)
 		return
@@ -433,6 +506,24 @@ func (h *SectionHandler) HandleReorderSections(w http.ResponseWriter, r *http.Re
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
 		return
+	}
+
+	libraries, err := h.currentLibraries(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list libraries")
+		return
+	}
+	if !hasLiveTVLibrary(libraries) {
+		for _, entry := range req.Entries {
+			section, getErr := h.repo.GetByID(r.Context(), entry.ID)
+			if getErr != nil {
+				continue
+			}
+			if section.SectionType == sections.SectionCurrentlyAiring {
+				writeError(w, http.StatusBadRequest, "unavailable_section", "currently_airing requires a Live TV library")
+				return
+			}
+		}
 	}
 
 	if err := h.repo.Reorder(r.Context(), req.Entries); err != nil {
@@ -810,6 +901,11 @@ func (h *SectionHandler) loadResolvedHomeSections(r *http.Request) ([]sections.R
 		}
 	}
 
+	libraries, libraryErr := h.currentLibraries(r.Context())
+	if libraryErr != nil {
+		return nil, nil, catalog.AccessFilter{}, profileID, libraryErr
+	}
+	resolved = filterSectionsByLibraryType(resolved, libraries)
 	resolved = filterResolvedSectionsByAccess(resolved, accessFilter)
 
 	return resolved, libraryIDs, accessFilter, profileID, nil
@@ -968,6 +1064,17 @@ func (h *SectionHandler) HandleSaveProfileOverrides(w http.ResponseWriter, r *ht
 			writeError(w, http.StatusForbidden, "custom_disabled", "this server does not allow profiles to build custom sections")
 			return
 		}
+		if rec.Definition().RequiredLibraryType == "livetv" {
+			libraries, listErr := h.currentLibraries(r.Context())
+			if listErr != nil {
+				writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list libraries")
+				return
+			}
+			if !hasLiveTVLibrary(libraries) {
+				writeError(w, http.StatusBadRequest, "unavailable_recipe", "currently_airing requires a Live TV library")
+				return
+			}
+		}
 		// Validate whichever config the resolver will actually use.
 		cfg := o.UserConfig
 		if len(cfg) == 0 {
@@ -1095,6 +1202,12 @@ func (h *SectionHandler) HandleSectionSettings(w http.ResponseWriter, r *http.Re
 	}
 
 	resolved := sections.ResolveForSettings(adminSections, overrides)
+	libraries, libraryErr := h.currentLibraries(r.Context())
+	if libraryErr != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list libraries")
+		return
+	}
+	resolved = filterSectionsByLibraryType(resolved, libraries)
 	resolved = filterResolvedSectionsByAccess(resolved, requestAccessFilter(r))
 
 	type settingsEntry struct {

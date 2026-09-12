@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/sections/recipes"
 )
@@ -17,7 +18,8 @@ type BulkSectionRepo interface {
 
 // SectionBulkHandler handles the bulk-create sections endpoint.
 type SectionBulkHandler struct {
-	Repo BulkSectionRepo
+	Repo       BulkSectionRepo
+	FolderRepo *catalog.FolderRepository
 }
 
 type bulkCreateSectionRequest struct {
@@ -73,6 +75,21 @@ func (h *SectionBulkHandler) HandleBulkCreate(w http.ResponseWriter, r *http.Req
 	if !ok {
 		writeError(w, http.StatusBadRequest, "bad_request", "unknown section_type")
 		return
+	}
+	if rec.Definition().RequiredLibraryType == "livetv" {
+		if h.FolderRepo == nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "Library repository not available")
+			return
+		}
+		libraries, err := h.FolderRepo.List(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list libraries")
+			return
+		}
+		if !hasLiveTVLibrary(libraries) {
+			writeError(w, http.StatusBadRequest, "unavailable_recipe", "currently_airing requires a Live TV library")
+			return
+		}
 	}
 	if err := rec.Validate(req.Config); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
