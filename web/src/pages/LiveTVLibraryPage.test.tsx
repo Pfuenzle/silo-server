@@ -151,6 +151,31 @@ describe("LiveTVLibraryPage", () => {
     expect(container.textContent).toContain("Morning News");
   });
 
+  it("renders the programme channel name instead of its stable ID in the guide", async () => {
+    mocks.searchParams = new URLSearchParams("tab=program&view=grid");
+    const programme = {
+      id: "programme-nikola",
+      channel_id: "TS|86a-stable-channel-id",
+      channel_name: "Nikola",
+      title: "Evening News",
+      starts_at: new Date(Date.now() - 60_000).toISOString(),
+      ends_at: new Date(Date.now() + 60_000).toISOString(),
+    } satisfies LiveTVProgramme;
+    mocks.guide = {
+      data: { items: [programme], stale: false },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    };
+
+    await renderPage();
+
+    expect(container.querySelector('[data-testid="live-tv-guide"]')?.textContent).toContain("Nikola");
+    expect(container.querySelector('[data-testid="live-tv-guide"]')?.textContent).not.toContain(
+      "TS|86a-stable-channel-id",
+    );
+  });
+
   it("keeps the selected tab visible when favorite data invalidates and rerenders", async () => {
     mocks.searchParams = new URLSearchParams("tab=favorites&view=grid");
     mocks.favoriteChannels = [{ id: "source|one" }];

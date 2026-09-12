@@ -389,7 +389,9 @@ function Guide({
               key={channelId}
               className="grid min-w-[42rem] grid-cols-[8rem_1fr] border-b last:border-b-0"
             >
-              <div className="text-muted-foreground truncate p-3 text-xs">{channelId}</div>
+              <div className="text-muted-foreground truncate p-3 text-xs">
+                {programmes.find((item) => item.channel_id === channelId)?.channel_name ?? channelId}
+              </div>
               <div className="grid grid-cols-4">
                 {programmes
                   .filter((item) => item.channel_id === channelId)
@@ -541,8 +543,13 @@ export function LiveTVLibraryPage({
       .filter((item) => Date.parse(item.starts_at) <= now && Date.parse(item.ends_at) > now)
       .map((item) => [item.channel_id, item]),
   );
-  const programmes =
-    tab === "favorites" ? guide.filter((item) => favoriteProgrammeIds.has(item.id)) : guide;
+  const favoriteQueryError = favoriteChannelsQuery.isError || favoriteProgrammesQuery.isError;
+  const programmes: readonly LiveTVProgramme[] =
+    tab === "favorites"
+      ? (favoriteProgrammesQuery.data?.filter(
+          (item): item is LiveTVProgramme => "channel_id" in item,
+        ) ?? [])
+      : guide;
   return (
     <div className="page-shell space-y-8 py-6" data-testid="live-tv-library">
       <header className="flex flex-wrap items-end justify-between gap-4">
@@ -620,6 +627,21 @@ export function LiveTVLibraryPage({
                 type="button"
                 className="mt-3"
                 onClick={() => void playChannel(playbackFailure.channelId, playbackFailure.title)}
+              >
+                {liveTVT("retry", locale)}
+              </Button>
+            </div>
+          ) : null}
+          {favoriteQueryError ? (
+            <div className="border-destructive/30 bg-destructive/10 rounded-xl border p-4" role="alert">
+              <p className="font-semibold">{liveTVT("favoritesError", locale)}</p>
+              <Button
+                type="button"
+                className="mt-3"
+                onClick={() => {
+                  void favoriteChannelsQuery.refetch();
+                  void favoriteProgrammesQuery.refetch();
+                }}
               >
                 {liveTVT("retry", locale)}
               </Button>
@@ -705,7 +727,7 @@ export function LiveTVLibraryPage({
                 ))}
             </div>
           ) : null}
-          {tab !== "channels" ? (
+          {tab !== "channels" && !(tab === "favorites" && favoriteProgrammesQuery.isLoading) ? (
             <ProgrammeRow
               title={liveTVT("now", locale)}
               items={programmes}
