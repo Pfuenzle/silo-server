@@ -29,6 +29,13 @@ func DefaultHomeSections(libraries []*models.MediaFolder) []*PageSection {
 
 	position := len(result)
 	for _, library := range libraries {
+		if library != nil && library.Type == "livetv" {
+			result = append(result, &PageSection{ID: "default-currently-airing", Scope: "home", Position: position, SectionType: SectionCurrentlyAiring, Title: "Currently airing", ItemLimit: 20, Enabled: true})
+			position++
+			break
+		}
+	}
+	for _, library := range libraries {
 		if library == nil {
 			continue
 		}

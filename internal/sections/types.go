@@ -11,6 +11,7 @@ import (
 type SectionType string
 
 const (
+	SectionCurrentlyAiring  SectionType = "currently_airing"
 	SectionContinueWatching SectionType = "continue_watching"
 	SectionRecentlyAdded    SectionType = "recently_added"
 	SectionRecentlyReleased SectionType = "recently_released"
