@@ -22,6 +22,7 @@ type fakeRequestService struct {
 	listGenresFn   func() ([]mediarequests.DiscoverBrandCard, error)
 	listMineFn     func() ([]*mediarequests.Request, error)
 	browseFn       func(kind, slug string, mediaType mediarequests.MediaType, sort string, page int) (*mediarequests.DiscoverBrowseResponse, error)
+	declineFn      func(id, reason string) (*mediarequests.Request, error)
 }
 
 func (f *fakeRequestService) ListStudios(context.Context, mediarequests.Viewer) ([]mediarequests.DiscoverBrandCard, error) {
@@ -96,7 +97,10 @@ func (f *fakeRequestService) Approve(context.Context, mediarequests.Viewer, stri
 	return nil, nil
 }
 
-func (f *fakeRequestService) Decline(context.Context, mediarequests.Viewer, string, string) (*mediarequests.Request, error) {
+func (f *fakeRequestService) Decline(_ context.Context, _ mediarequests.Viewer, id, reason string) (*mediarequests.Request, error) {
+	if f.declineFn != nil {
+		return f.declineFn(id, reason)
+	}
 	return nil, nil
 }
 
@@ -384,5 +388,31 @@ func TestHandleBrowseGenreRequiresMediaType(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleDeclineAllowsEmptyBody(t *testing.T) {
+	// Given a request decline with no optional reason body.
+	var gotReason string
+	svc := &fakeRequestService{declineFn: func(id, reason string) (*mediarequests.Request, error) {
+		if id != "request-1" {
+			t.Fatalf("id = %q, want request-1", id)
+		}
+		gotReason = reason
+		return &mediarequests.Request{ID: id}, nil
+	}}
+	h := NewRequestsHandler(svc)
+	request := authedRequest(http.MethodPost, "/api/v1/requests/request-1/decline")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "request-1")
+	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, rctx))
+
+	// When the decline endpoint receives the empty body.
+	recording := httptest.NewRecorder()
+	h.HandleDecline(recording, request)
+
+	// Then the optional reason is empty and the action succeeds.
+	if recording.Code != http.StatusOK || gotReason != "" {
+		t.Fatalf("status/reason = %d/%q, want 200/empty", recording.Code, gotReason)
 	}
 }

@@ -353,7 +353,7 @@ func (h *RequestsHandler) HandleDecline(w http.ResponseWriter, r *http.Request) 
 		Reason string `json:"reason"`
 	}
 	if r.Body != nil {
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 			writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
 			return
 		}
@@ -516,7 +516,7 @@ func (h *RequestsHandler) HandleLoadIntegrationOptions(w http.ResponseWriter, r 
 	}
 	var integration mediarequests.Integration
 	if r.Body != nil {
-		if err := json.NewDecoder(r.Body).Decode(&integration); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&integration); err != nil && !errors.Is(err, io.EOF) {
 			writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
 			return
 		}
