@@ -98,6 +98,25 @@ func (h *LiveTVHandler) SetPlaybackOrigin(origin string) {
 	}
 }
 
+func (h *LiveTVHandler) HandlePlaybackStream(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.playback == nil {
+		writeError(w, http.StatusServiceUnavailable, "live_playback_unavailable", "Live TV playback is unavailable")
+		return
+	}
+	claims := apimw.GetClaims(r.Context())
+	profileID := apimw.GetProfileID(r.Context())
+	if claims == nil || claims.UserID <= 0 || strings.TrimSpace(profileID) == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+		return
+	}
+	ctx := livetv.WithLivePlaybackIdentity(r.Context(), livetv.LivePlaybackIdentity{
+		UserID: claims.UserID, ProfileID: profileID, SessionID: claims.SessionID,
+	})
+	request := r.WithContext(ctx)
+	request.URL.Path = strings.TrimPrefix(request.URL.Path, "/api/v1")
+	h.playback.ServeHTTP(w, request)
+}
+
 func (h *LiveTVHandler) HandleCapability(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, liveTVCapabilityResponse{
 		SchemaVersion:     1,

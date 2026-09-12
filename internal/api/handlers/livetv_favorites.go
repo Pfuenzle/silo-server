@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -126,9 +127,20 @@ func (h *LiveTVHandler) HandleListFavoriteChannels(w http.ResponseWriter, r *htt
 		if getErr != nil {
 			continue
 		}
-		response.Channels = append(response.Channels, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: channel.Artwork, Rating: channel.Rating})
+		response.Channels = append(response.Channels, h.favoriteChannelResponse(r.Context(), channel))
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *LiveTVHandler) favoriteChannelResponse(ctx context.Context, channel livetv.Channel) liveTVChannelResponse {
+	return liveTVChannelResponse{
+		ID:       channel.StableID.String(),
+		Name:     channel.Name,
+		Number:   channel.Number,
+		Category: string(channel.Category),
+		Artwork:  h.authorizeArtwork(ctx, channel.Artwork),
+		Rating:   channel.Rating,
+	}
 }
 
 func (h *LiveTVHandler) HandleListFavoriteProgrammes(w http.ResponseWriter, r *http.Request) {

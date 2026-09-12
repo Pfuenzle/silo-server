@@ -1,13 +1,43 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Silo-Server/silo-server/internal/livetv"
 	"github.com/go-chi/chi/v5"
 )
+
+func TestFavoriteChannelResponse_authorizesCachedArtwork(t *testing.T) {
+	// Given a favorite channel with a cached S3 artwork path.
+	handler := &LiveTVHandler{objectStore: fakeLiveTVArtworkStore{url: "https://cdn.example/logo.webp"}}
+	channel := livetv.Channel{Artwork: json.RawMessage(`{"logo":"livetv/channels/x/logo/original.webp"}`)}
+
+	// When the favorite channel is mapped to its API response.
+	response := handler.favoriteChannelResponse(context.Background(), channel)
+
+	// Then the response contains the authorized delivery URL instead of the object key.
+	if string(response.Artwork) != `{"logo":"https://cdn.example/logo.webp"}` {
+		t.Fatalf("artwork = %s", response.Artwork)
+	}
+}
+
+func TestFavoriteChannelResponse_dropsUnsignedProviderArtwork(t *testing.T) {
+	// Given a favorite channel with provider artwork and no authorized resolver result.
+	handler := &LiveTVHandler{artwork: fakeLiveTVArtworkResolver{url: "https://provider.example/logo.png"}}
+	channel := livetv.Channel{Artwork: json.RawMessage(`{"logo":"https://provider.example/logo.png"}`)}
+
+	// When the favorite channel is mapped to its API response.
+	response := handler.favoriteChannelResponse(context.Background(), channel)
+
+	// Then the unsigned provider URL is not exposed.
+	if len(response.Artwork) != 0 {
+		t.Fatalf("artwork = %s, want empty", response.Artwork)
+	}
+}
 
 func TestLiveTVHomeSectionsResponse_hasTypedEmptyRails(t *testing.T) {
 	// Given an empty Live TV home response.

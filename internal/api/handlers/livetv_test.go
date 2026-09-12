@@ -72,6 +72,21 @@ func TestLiveTVCapability_route_returnsJSONOverHTTP(t *testing.T) {
 	}
 }
 
+func TestLiveTVPlaybackStream_requiresAuthenticatedProfile(t *testing.T) {
+	// Given a handler with a playback service but no authenticated profile.
+	handler := &LiveTVHandler{playback: livetv.NewLivePlaybackService(livetv.LivePlaybackConfig{})}
+	recording := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream/live/grant/manifest", nil)
+
+	// When the integrated playback route is served.
+	handler.HandlePlaybackStream(recording, request)
+
+	// Then the route rejects the request before touching the grant service.
+	if recording.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recording.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestLiveTVAdminRoutes_mountExactTopLevelPathsAndMethods(t *testing.T) {
 	// Given the production Live TV admin route mount helper.
 	router := chi.NewRouter()
