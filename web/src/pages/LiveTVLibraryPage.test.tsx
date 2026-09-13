@@ -176,6 +176,29 @@ describe("LiveTVLibraryPage", () => {
     );
   });
 
+  it("does not expose a stable ID when a programme sender name is unavailable", async () => {
+    mocks.searchParams = new URLSearchParams("tab=program&view=grid");
+    const programme = {
+      id: "programme-no-name",
+      channel_id: "TS|86a-stable-channel-id",
+      title: "Evening News",
+      starts_at: new Date(Date.now() - 60_000).toISOString(),
+      ends_at: new Date(Date.now() + 60_000).toISOString(),
+    } satisfies LiveTVProgramme;
+    mocks.guide = {
+      data: { items: [programme], stale: false },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    };
+
+    await renderPage();
+
+    expect(container.querySelector('[data-testid="live-tv-guide"]')?.textContent).not.toContain(
+      "TS|86a-stable-channel-id",
+    );
+  });
+
   it("keeps the selected tab visible when favorite data invalidates and rerenders", async () => {
     mocks.searchParams = new URLSearchParams("tab=favorites&view=grid");
     mocks.favoriteChannels = [{ id: "source|one" }];
