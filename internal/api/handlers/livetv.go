@@ -103,15 +103,25 @@ func (h *LiveTVHandler) HandlePlaybackStream(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusServiceUnavailable, "live_playback_unavailable", "Live TV playback is unavailable")
 		return
 	}
-	claims := apimw.GetClaims(r.Context())
-	profileID := apimw.GetProfileID(r.Context())
-	if claims == nil || claims.UserID <= 0 || strings.TrimSpace(profileID) == "" {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
-		return
+	ctx := r.Context()
+	if token := r.URL.Query().Get("live_token"); token != "" {
+		identity, err := h.playback.MediaTokenIdentity(ctx, chi.URLParam(r, "grant_id"), token)
+		if err != nil {
+			writeError(w, http.StatusForbidden, "forbidden", "Live TV playback session is not authorized")
+			return
+		}
+		ctx = livetv.WithLivePlaybackIdentity(ctx, identity)
+	} else {
+		claims := apimw.GetClaims(ctx)
+		profileID := apimw.GetProfileID(ctx)
+		if claims == nil || claims.UserID <= 0 || strings.TrimSpace(profileID) == "" {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+			return
+		}
+		ctx = livetv.WithLivePlaybackIdentity(ctx, livetv.LivePlaybackIdentity{
+			UserID: claims.UserID, ProfileID: profileID, SessionID: claims.SessionID,
+		})
 	}
-	ctx := livetv.WithLivePlaybackIdentity(r.Context(), livetv.LivePlaybackIdentity{
-		UserID: claims.UserID, ProfileID: profileID, SessionID: claims.SessionID,
-	})
 	request := r.WithContext(ctx)
 	request.URL.Path = strings.TrimPrefix(request.URL.Path, "/api/v1")
 	h.playback.ServeHTTP(w, request)

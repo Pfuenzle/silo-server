@@ -2256,6 +2256,11 @@ func NewRouter(deps Dependencies) chi.Router {
 			r.Get("/watch-providers/{provider}/auth/callback", watchProviderHandler.HandleAuthorizationCodeCallback)
 		}
 
+		if liveTVHandler != nil && deps.LivePlayback != nil && deps.LivePlaybackOrigin == "/api/v1" {
+			r.Get("/stream/live/{grant_id}/manifest", liveTVHandler.HandlePlaybackStream)
+			r.Get("/stream/live/{grant_id}/segment/{name}", liveTVHandler.HandlePlaybackStream)
+		}
+
 		// All remaining routes require auth.
 		if authMiddleware != nil {
 			r.Group(func(r chi.Router) {
@@ -2275,13 +2280,6 @@ func NewRouter(deps Dependencies) chi.Router {
 					r.Get("/user/libraries", libraryHandler.HandleListUserLibraries)
 				}
 				if liveTVHandler != nil {
-					if deps.LivePlayback != nil && deps.LivePlaybackOrigin == "/api/v1" {
-						r.Group(func(r chi.Router) {
-							r.Use(apimw.RequireProfile)
-							r.Get("/stream/live/{grant_id}/manifest", liveTVHandler.HandlePlaybackStream)
-							r.Get("/stream/live/{grant_id}/segment/{name}", liveTVHandler.HandlePlaybackStream)
-						})
-					}
 					r.Get("/livetv/capability", liveTVHandler.HandleCapability)
 					r.Delete("/livetv/playback/{grant_id}", liveTVHandler.HandleStopPlayback)
 					r.Route("/livetv/libraries/{library_id}", func(r chi.Router) {
