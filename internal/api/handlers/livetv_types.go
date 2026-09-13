@@ -98,5 +98,6 @@ type liveTVPlaybackResponse struct {
 	Playable  bool   `json:"playable"`
 	GrantID   string `json:"grant_id,omitempty"`
 	URL       string `json:"url,omitempty"`
+	Mode      string `json:"mode,omitempty"`
 	ErrorCode string `json:"error_code,omitempty"`
 }

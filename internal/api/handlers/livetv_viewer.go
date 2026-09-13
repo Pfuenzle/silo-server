@@ -171,7 +171,7 @@ func (h *LiveTVHandler) HandlePlaybackResolution(w http.ResponseWriter, r *http.
 	}
 	grant, err := h.playback.Start(livetv.WithLivePlaybackIdentity(r.Context(), livetv.LivePlaybackIdentity{UserID: claims.UserID, ProfileID: apimw.GetProfileID(r.Context()), SessionID: claims.SessionID}), livetv.LivePlaybackRequest{
 		UserID: claims.UserID, ProfileID: apimw.GetProfileID(r.Context()), LibraryID: library.ID,
-		SessionID: claims.SessionID, Mode: livetv.LivePlaybackModeHLS, ChannelID: stableID,
+		SessionID: claims.SessionID, Mode: livetv.LivePlaybackModeAuto, ChannelID: stableID,
 	})
 	if err != nil {
 		if errors.Is(err, livetv.ErrLivePlaybackUnavailable) || errors.Is(err, livetv.ErrSourcePolicy) {
@@ -181,7 +181,7 @@ func (h *LiveTVHandler) HandlePlaybackResolution(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to resolve Live TV playback")
 		return
 	}
-	writeJSON(w, http.StatusOK, liveTVPlaybackResponse{ChannelID: channelID, Live: true, Playable: true, GrantID: grant.GrantID, URL: grant.ManifestURL})
+	writeJSON(w, http.StatusOK, liveTVPlaybackResponse{ChannelID: channelID, Live: true, Playable: true, GrantID: grant.GrantID, URL: grant.ManifestURL, Mode: string(grant.Mode)})
 }
 
 func (h *LiveTVHandler) liveTVLibrary(r *http.Request, viewer bool) (*models.MediaFolder, error) {
