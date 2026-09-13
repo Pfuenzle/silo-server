@@ -3,6 +3,7 @@ import { api } from "@/api/client";
 import { isSiloPlaybackUrl } from "@/api/livetv";
 import { liveTVT } from "@/lib/i18n";
 import { useCurrentProfile } from "@/hooks/useCurrentProfile";
+import { PlayerControls } from "./PlayerControls";
 
 interface LiveTVPlayerProps {
   readonly channelId: string;
@@ -29,6 +30,11 @@ export function LiveTVPlayer({
   const retryPlayerRef = useRef<(() => void) | undefined>(undefined);
   const stoppedRef = useRef(false);
   const [state, setState] = useState<"starting" | "playing" | "error" | "reconnecting">("starting");
+  const [playing, setPlaying] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const [volume, setVolume] = useState(1);
+  const [muted, setMuted] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const { profile } = useCurrentProfile();
   const locale = profile?.language?.startsWith("de") ? "de" : "en";
   const streamIsSafe = isSiloPlaybackUrl(streamUrl);
@@ -52,8 +58,12 @@ export function LiveTVPlayer({
     const video = videoRef.current;
     if (!video) return;
 
-    const handlePlaying = () => setState("playing");
-    const handleError = () => setState("reconnecting");
+    const handlePlaying = () => {
+      setState("playing");
+      setPlaying(true);
+    };
+    const handlePause = () => setPlaying(false);
+    const handleError = () => setState("error");
     let destroyPlayer: (() => void) | undefined;
     let cancelled = false;
     const streamURL = streamUrl;
@@ -98,6 +108,7 @@ export function LiveTVPlayer({
         });
     }
     video.addEventListener("playing", handlePlaying);
+    video.addEventListener("pause", handlePause);
     video.addEventListener("error", handleError);
     const timeout = window.setTimeout(() => {
       setState((current) => (current === "starting" ? "error" : current));
@@ -112,6 +123,7 @@ export function LiveTVPlayer({
       video.removeAttribute("src");
       video.load();
       video.removeEventListener("playing", handlePlaying);
+      video.removeEventListener("pause", handlePause);
       video.removeEventListener("error", handleError);
     };
   }, [mode, startupTimeoutMs, streamIsSafe, streamUrl]);
@@ -121,6 +133,12 @@ export function LiveTVPlayer({
       revokePlayback();
     };
   }, [revokePlayback]);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => setIsFullscreen(document.fullscreenElement !== null);
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, []);
 
   const stop = () => {
     videoRef.current?.pause();
@@ -138,6 +156,29 @@ export function LiveTVPlayer({
     });
   };
 
+  const togglePlayback = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      void Promise.resolve(video.play()).catch((error: unknown) => {
+        if (error instanceof Error) setState("error");
+      });
+      return;
+    }
+    video.pause();
+  };
+
+  const toggleFullscreen = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+      setIsFullscreen(false);
+      return;
+    }
+    void video.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => setIsFullscreen(false));
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black"
@@ -148,36 +189,76 @@ export function LiveTVPlayer({
         className="size-full object-contain"
         autoPlay
         playsInline
-        controls
+        muted={muted}
+        onVolumeChange={(event) => {
+          setVolume(event.currentTarget.volume);
+          setMuted(event.currentTarget.muted);
+        }}
+        onClick={() => setControlsVisible((visible) => !visible)}
       />
-      <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-4 bg-black/70 p-4 text-white">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold">{title}</p>
-          <p
-            role="status"
-            aria-label={liveTVT("playerPlaying", locale)}
-            className="text-primary text-xs font-semibold tracking-wide uppercase"
-          >
-            {!streamIsSafe || state === "error"
-              ? liveTVT("playerError", locale)
-              : state === "playing"
-                ? liveTVT("playerPlaying", locale)
-                : state === "reconnecting"
-                  ? liveTVT("playerReconnecting", locale)
-                  : liveTVT("playerStarting", locale)}
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {!streamIsSafe || state === "error" ? (
-            <button type="button" onClick={retry}>
-              {liveTVT("playerRetry", locale)}
-            </button>
-          ) : null}
-          <button type="button" onClick={stop} aria-label={liveTVT("playerStop", locale)}>
-            {liveTVT("playerStop", locale)}
+      <p role="status" aria-label={liveTVT("playerPlaying", locale)} className="sr-only">
+        {!streamIsSafe || state === "error"
+          ? liveTVT("playerError", locale)
+          : state === "playing"
+            ? liveTVT("playerPlaying", locale)
+            : state === "reconnecting"
+              ? liveTVT("playerReconnecting", locale)
+              : liveTVT("playerStarting", locale)}
+      </p>
+      {controlsVisible ? (
+        <PlayerControls
+          live
+          liveLabel={liveTVT("playerPlaying", locale)}
+          visible
+          playing={playing}
+          currentTime={0}
+          duration={0}
+          buffered={null}
+          volume={volume}
+          muted={muted}
+          isFullscreen={isFullscreen}
+          subtitleTracks={[]}
+          activeSubtitleIndex={null}
+          onSubtitleSelect={() => {}}
+          subtitleDelayMs={0}
+          onSubtitleDelayChange={() => {}}
+          audioTracks={[]}
+          activeAudioIndex={0}
+          qualityOptions={[]}
+          activeQualityId="auto"
+          isTranscoding={false}
+          qualityError={null}
+          onQualitySelect={() => {}}
+          showPlaybackInfo={false}
+          onTogglePlaybackInfo={() => {}}
+          onPlayPause={togglePlayback}
+          onSeek={() => {}}
+          onVolumeChange={(nextVolume) => {
+            const video = videoRef.current;
+            if (!video) return;
+            video.volume = nextVolume;
+            setVolume(nextVolume);
+          }}
+          onMutedChange={(nextMuted) => {
+            const video = videoRef.current;
+            if (!video) return;
+            video.muted = nextMuted;
+            setMuted(nextMuted);
+          }}
+          onFullscreenToggle={toggleFullscreen}
+          onStop={stop}
+          stopLabel={liveTVT("playerStop", locale)}
+          onSurfaceTap={() => setControlsVisible((visible) => !visible)}
+          title={title}
+        />
+      ) : null}
+      {state === "error" || !streamIsSafe ? (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/70">
+          <button type="button" onClick={retry}>
+            {liveTVT("playerRetry", locale)}
           </button>
         </div>
-      </div>
+      ) : null}
     </div>
   );
 }

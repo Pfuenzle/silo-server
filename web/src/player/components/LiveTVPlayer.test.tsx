@@ -56,9 +56,43 @@ describe("LiveTVPlayer", () => {
 
     expect(screen.getByRole("status", { name: "Live" })).toBeInTheDocument();
     expect(screen.queryByText(/\d+:\d+/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("slider")).not.toBeInTheDocument();
+    expect(screen.getByRole("slider", { name: "Volume" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop live playback" })).toBeInTheDocument();
-    expect(document.querySelector("video")).toHaveAttribute("controls");
+    expect(document.querySelector("video")).not.toHaveAttribute("controls");
+    expect(screen.getByTestId("player-controls")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Quality unavailable" })).toBeDisabled();
+  });
+
+  it("uses the normal player chrome without VOD transport controls", () => {
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    expect(screen.getByTestId("player-controls")).toHaveClass("player-controls");
+    expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Fullscreen" })).toBeInTheDocument();
+    expect(screen.getByRole("slider", { name: "Volume" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /seconds/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/\/\s*\d+:/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the localized stop action available in the compact player", () => {
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    window.dispatchEvent(new Event("resize"));
+    expect(screen.getByRole("button", { name: "Stop live playback" })).toBeInTheDocument();
   });
 
   it("deletes the live grant on stop and unmount", async () => {
@@ -178,6 +212,23 @@ describe("LiveTVPlayer", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("reports media errors through the normal retry control", () => {
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    const video = document.querySelector("video");
+    expect(video).not.toBeNull();
+    if (video) fireEvent.error(video);
+
+    expect(screen.getByRole("button", { name: "Retry live playback" })).toBeInTheDocument();
   });
 
   it("loads direct MPEG-TS through the authenticated Silo URL", async () => {

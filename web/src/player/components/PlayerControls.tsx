@@ -10,6 +10,7 @@ import {
   Play,
   RotateCcw,
   RotateCw,
+  Settings,
   SkipBack,
   SkipForward,
   Tags,
@@ -36,6 +37,7 @@ import { useCoarsePointer } from "../hooks/useCoarsePointer";
 import { PlayerMenuSurface } from "./PlayerMenuSurface";
 
 interface PlayerControlsProps {
+  live?: boolean;
   // Visibility
   visible: boolean;
   // Video state
@@ -94,6 +96,9 @@ interface PlayerControlsProps {
   // Title strip
   title?: string;
   subtitleLabel?: string;
+  liveLabel?: string;
+  onStop?: () => void;
+  stopLabel?: string;
   // Callbacks
   onPlayPause: () => void;
   onSeek: (seconds: number) => void;
@@ -160,6 +165,10 @@ export function PlayerControls({
   onMutedChange,
   onFullscreenToggle,
   onSurfaceTap,
+  live = false,
+  liveLabel = "LIVE",
+  onStop,
+  stopLabel = "Stop",
 }: PlayerControlsProps) {
   const isCoarsePointer = useCoarsePointer();
   const controlsRef = useRef<HTMLDivElement>(null);
@@ -197,6 +206,7 @@ export function PlayerControls({
   return (
     <div
       ref={controlsRef}
+      data-testid="player-controls"
       data-compact={compactControls}
       data-touch={isCoarsePointer}
       className={`player-controls absolute inset-0 z-10 transition-opacity duration-300 ${
@@ -231,14 +241,14 @@ export function PlayerControls({
                 <ClusterSlotSpacer size="md" />
               )
             ) : null}
-            <CircleButton
+            {!live && <CircleButton
               size="md"
               variant="secondary"
               ariaLabel={`Back ${SKIP_BACK_SECONDS} seconds`}
               onClick={handleSkipBack}
             >
               <SkipIcon direction="back" seconds={SKIP_BACK_SECONDS} />
-            </CircleButton>
+            </CircleButton>}
             <button
               type="button"
               className="flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-white text-black shadow-xl focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
@@ -251,14 +261,14 @@ export function PlayerControls({
                 <Play className="ml-1 h-7 w-7" fill="currentColor" strokeWidth={0} />
               )}
             </button>
-            <CircleButton
+            {!live && <CircleButton
               size="md"
               variant="secondary"
               ariaLabel={`Forward ${SKIP_FORWARD_SECONDS} seconds`}
               onClick={handleSkipForward}
             >
               <SkipIcon direction="forward" seconds={SKIP_FORWARD_SECONDS} />
-            </CircleButton>
+            </CircleButton>}
             {showEpisodeSlots ? (
               hasNextEpisode ? (
                 <CircleButton
@@ -282,7 +292,7 @@ export function PlayerControls({
         className="player-hud player-rise absolute inset-x-0 bottom-0 z-10 px-[max(0.75rem,env(safe-area-inset-left))] pt-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-[max(1.5rem,env(safe-area-inset-left))] sm:pr-[max(1.5rem,env(safe-area-inset-right))] sm:pb-[max(1.25rem,env(safe-area-inset-bottom))]"
         onClick={(e) => e.stopPropagation()}
       >
-        <SeekBar
+        {!live ? <SeekBar
           currentTime={currentTime}
           duration={duration}
           buffered={buffered}
@@ -292,7 +302,7 @@ export function PlayerControls({
           activeEditKind={activeEditKind}
           onRegionEdgeChange={onRegionEdgeChange}
           onSeek={onSeek}
-        />
+        /> : null}
 
         {compactControls ? (
           <div className="player-compact-row mt-2 flex min-w-0 items-center gap-2">
@@ -306,9 +316,8 @@ export function PlayerControls({
                 </div>
               ) : null}
               <div className="font-mono text-[11px] tracking-[0.12em] text-white/75 tabular-nums">
-                {formatTime(currentTime)}
-                <span className="mx-1 text-white/30">/</span>
-                {formatTime(duration)}
+                {live ? liveLabel : formatTime(currentTime)}
+                {!live ? <><span className="mx-1 text-white/30">/</span>{formatTime(duration)}</> : null}
               </div>
             </div>
             <SubtitleMenu
@@ -325,7 +334,7 @@ export function PlayerControls({
               getSubtitleStartPosition={getSubtitleStartPosition}
               audioTracks={audioTracks}
             />
-            <QualityMenu
+            {!live ? <QualityMenu
               options={qualityOptions}
               activeId={activeQualityId}
               isTranscoding={isTranscoding}
@@ -333,7 +342,7 @@ export function PlayerControls({
               onSelect={onQualitySelect}
               versions={versions}
               onSwitchVersion={onSwitchVersion}
-            />
+            /> : <button type="button" className="player-utility-btn" disabled aria-label="Quality unavailable"><Settings className="h-[18px] w-[18px]" /></button>}
             <button
               type="button"
               className="player-utility-btn"
@@ -356,6 +365,11 @@ export function PlayerControls({
                 <Maximize className="h-[18px] w-[18px]" />
               )}
             </button>
+            {onStop ? (
+              <button type="button" className="player-utility-btn" onClick={onStop} aria-label={stopLabel}>
+                {stopLabel}
+              </button>
+            ) : null}
           </div>
         ) : (
           <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-5">
@@ -383,9 +397,8 @@ export function PlayerControls({
                   </>
                 ) : null}
                 <span className="shrink-0 font-mono text-[11px] tracking-[0.12em] whitespace-nowrap text-white/75 normal-case tabular-nums">
-                  {formatTime(currentTime)}
-                  <span className="mx-1 text-white/30">/</span>
-                  {formatTime(duration)}
+                  {live ? liveLabel : formatTime(currentTime)}
+                  {!live ? <><span className="mx-1 text-white/30">/</span>{formatTime(duration)}</> : null}
                 </span>
               </div>
             </div>
@@ -412,14 +425,14 @@ export function PlayerControls({
                 )
               ) : null}
 
-              <CircleButton
+              {!live && <CircleButton
                 size="sm"
                 variant="secondary"
                 ariaLabel={`Back ${SKIP_BACK_SECONDS} seconds`}
                 onClick={handleSkipBack}
               >
                 <SkipIcon direction="back" seconds={SKIP_BACK_SECONDS} />
-              </CircleButton>
+              </CircleButton>}
 
               <CircleButton
                 size="md"
@@ -435,14 +448,14 @@ export function PlayerControls({
                 )}
               </CircleButton>
 
-              <CircleButton
+              {!live && <CircleButton
                 size="sm"
                 variant="secondary"
                 ariaLabel={`Forward ${SKIP_FORWARD_SECONDS} seconds`}
                 onClick={handleSkipForward}
               >
                 <SkipIcon direction="forward" seconds={SKIP_FORWARD_SECONDS} />
-              </CircleButton>
+              </CircleButton>}
 
               {showEpisodeSlots ? (
                 hasNextEpisode ? (
@@ -482,7 +495,7 @@ export function PlayerControls({
                 />
               )}
 
-              <ChaptersMenu chapters={chapters ?? []} currentTime={currentTime} onSeek={onSeek} />
+              {!live ? <ChaptersMenu chapters={chapters ?? []} currentTime={currentTime} onSeek={onSeek} /> : null}
 
               <SubtitleMenu
                 tracks={subtitleTracks}
@@ -499,7 +512,7 @@ export function PlayerControls({
                 audioTracks={audioTracks}
               />
 
-              <QualityMenu
+              {!live ? <QualityMenu
                 options={qualityOptions}
                 activeId={activeQualityId}
                 isTranscoding={isTranscoding}
@@ -507,12 +520,12 @@ export function PlayerControls({
                 onSelect={onQualitySelect}
                 versions={versions}
                 onSwitchVersion={onSwitchVersion}
-              />
+              /> : <button type="button" className="player-utility-btn" disabled aria-label="Quality unavailable"><Settings className="h-[18px] w-[18px]" /></button>}
 
               {markerEditAvailable && onToggleMarkerEdit && (
-                <button
-                  type="button"
-                  className="player-utility-btn"
+            <button
+              type="button"
+              className="player-utility-btn"
                   onClick={onToggleMarkerEdit}
                   aria-label="Edit markers"
                   aria-pressed={markerEditActive}
@@ -532,7 +545,6 @@ export function PlayerControls({
               >
                 <Info className="h-[18px] w-[18px]" />
               </button>
-
               {onTogglePiP && document.pictureInPictureEnabled && (
                 <button
                   type="button"
@@ -557,6 +569,16 @@ export function PlayerControls({
                   <Maximize className="h-[18px] w-[18px]" />
                 )}
               </button>
+              {onStop ? (
+                <button
+                  type="button"
+                  className="player-utility-btn"
+                  onClick={onStop}
+                  aria-label={stopLabel}
+                >
+                  {stopLabel}
+                </button>
+              ) : null}
             </div>
           </div>
         )}
