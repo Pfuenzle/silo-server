@@ -22,6 +22,7 @@ type fakeRequestService struct {
 	listStudiosFn  func() ([]mediarequests.DiscoverBrandCard, error)
 	listNetworksFn func() ([]mediarequests.DiscoverBrandCard, error)
 	listGenresFn   func() ([]mediarequests.DiscoverBrandCard, error)
+	discoverAllFn  func() ([]mediarequests.DiscoverySection, error)
 	listMineFn     func() ([]*mediarequests.Request, error)
 	browseFn       func(kind, slug string, mediaType mediarequests.MediaType, sort string, page int) (*mediarequests.DiscoverBrowseResponse, error)
 	declineFn      func(id, reason string) (*mediarequests.Request, error)
@@ -72,6 +73,9 @@ func (f *fakeRequestService) Discover(context.Context, mediarequests.Viewer, str
 }
 
 func (f *fakeRequestService) DiscoverAll(context.Context, mediarequests.Viewer) ([]mediarequests.DiscoverySection, error) {
+	if f.discoverAllFn != nil {
+		return f.discoverAllFn()
+	}
 	return nil, nil
 }
 
@@ -208,6 +212,30 @@ func TestHandleSearchReturnsSafeTMDBProviderError(t *testing.T) {
 	h.HandleSearch(rec, authedRequest("GET", "/api/v1/requests/search?q=dune&media_type=all"))
 
 	// Then the response identifies a safe provider failure without credentials.
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["error"] != "tmdb_provider_error" || body["message"] != "TMDB rejected the request (HTTP 401). Check the TMDB provider configuration." {
+		t.Fatalf("body = %#v", body)
+	}
+	if strings.Contains(rec.Body.String(), "api_key") || strings.Contains(rec.Body.String(), "Invalid API key") {
+		t.Fatalf("response exposed provider detail: %s", rec.Body.String())
+	}
+}
+
+func TestHandleDiscoverReturnsSafeTMDBProviderError(t *testing.T) {
+	svc := &fakeRequestService{discoverAllFn: func() ([]mediarequests.DiscoverySection, error) {
+		return nil, &tmdb.APIError{HTTPStatus: http.StatusUnauthorized, StatusCode: 7, Message: "Invalid API key"}
+	}}
+	h := NewRequestsHandler(svc)
+
+	rec := httptest.NewRecorder()
+	h.HandleDiscover(rec, authedRequest("GET", "/api/v1/requests/discover"))
+
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
 	}
