@@ -293,6 +293,7 @@ export default function Requests() {
               pendingRequestKey={pendingRequestKey}
               isSubmitting={createRequest.isPending}
               onRequest={submitRequest}
+              onRetry={() => void search.refetch()}
             />
           ) : discovery.isLoading ? (
             <DiscoveryCarouselSkeleton />
@@ -597,7 +598,7 @@ function MineBucketRow({ bucket, requests }: { bucket: MineBucketKey; requests: 
   );
 }
 
-function SearchResultsView({
+export function SearchResultsView({
   query,
   mediaType,
   page,
@@ -611,6 +612,7 @@ function SearchResultsView({
   pendingRequestKey,
   isSubmitting,
   onRequest,
+  onRetry,
 }: {
   query: string;
   mediaType: RequestSearchMediaType;
@@ -625,6 +627,7 @@ function SearchResultsView({
   pendingRequestKey?: string;
   isSubmitting: boolean;
   onRequest: (item: RequestMediaResult) => void;
+  onRetry: () => void;
 }) {
   const typeLabel =
     mediaType === "series"
@@ -692,6 +695,7 @@ function SearchResultsView({
         <EmptyPanel
           title="Search failed"
           detail={errorMessage ?? "TMDB search couldn't be loaded. Try again in a moment."}
+          action={{ label: "Retry search", onClick: onRetry }}
         />
       ) : isLoading ? (
         <SearchGridSkeleton />
@@ -820,11 +824,24 @@ function EmptyMineState() {
   );
 }
 
-function EmptyPanel({ title, detail }: { title: string; detail: string }) {
+function EmptyPanel({
+  title,
+  detail,
+  action,
+}: {
+  readonly title: string;
+  readonly detail: string;
+  readonly action?: { readonly label: string; readonly onClick: () => void };
+}) {
   return (
     <div className="border-border/60 bg-card/40 mx-4 flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed px-6 py-12 text-center sm:mx-6 lg:mx-10 xl:mx-12">
       <p className="text-foreground text-sm font-semibold">{title}</p>
       <p className="text-muted-foreground max-w-sm text-sm leading-6">{detail}</p>
+      {action ? (
+        <Button type="button" variant="outline" size="sm" onClick={action.onClick}>
+          {action.label}
+        </Button>
+      ) : null}
     </div>
   );
 }
