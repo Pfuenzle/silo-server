@@ -26,6 +26,7 @@ export function LiveTVPlayer({
   onStop,
 }: LiveTVPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const retryPlayerRef = useRef<(() => void) | undefined>(undefined);
   const stoppedRef = useRef(false);
   const [state, setState] = useState<"starting" | "playing" | "error" | "reconnecting">("starting");
   const { profile } = useCurrentProfile();
@@ -54,7 +55,6 @@ export function LiveTVPlayer({
     const handlePlaying = () => setState("playing");
     const handleError = () => setState("reconnecting");
     let destroyPlayer: (() => void) | undefined;
-    let retryPlayer: (() => void) | undefined;
     let cancelled = false;
     const streamURL = streamUrl;
     if (mode === "direct") {
@@ -65,12 +65,12 @@ export function LiveTVPlayer({
           destroyPlayer = () => player.destroy();
           player.attachMediaElement(video);
           player.load();
-          retryPlayer = () => {
+          retryPlayerRef.current = () => {
             player.unload();
             player.load();
-            void player.play().catch(() => setState("error"));
+            void Promise.resolve(player.play()).catch(() => setState("error"));
           };
-          void player.play().catch(() => setState("error"));
+          void Promise.resolve(player.play()).catch(() => setState("error"));
         })
         .catch((error: unknown) => {
           if (error instanceof Error) setState("error");
@@ -88,7 +88,7 @@ export function LiveTVPlayer({
             player.attachMedia(video);
             player.loadSource(streamURL);
             destroyPlayer = () => player.destroy();
-            retryPlayer = () => player.startLoad();
+            retryPlayerRef.current = () => player.startLoad();
           } else {
             video.src = streamURL;
           }
@@ -107,6 +107,7 @@ export function LiveTVPlayer({
       cancelled = true;
       window.clearTimeout(timeout);
       destroyPlayer?.();
+      retryPlayerRef.current = undefined;
       video.pause();
       video.removeAttribute("src");
       video.load();
@@ -131,8 +132,8 @@ export function LiveTVPlayer({
     const video = videoRef.current;
     if (!video) return;
     setState("reconnecting");
-    retryPlayer?.();
-    void video.play().catch((error: unknown) => {
+    retryPlayerRef.current?.();
+    void Promise.resolve(video.play()).catch((error: unknown) => {
       if (error instanceof Error) setState("error");
     });
   };

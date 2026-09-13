@@ -26,6 +26,9 @@ vi.mock("hls.js", () => ({
     loadSource() {
       hlsCallsMock("loadSource");
     }
+    startLoad() {
+      hlsCallsMock("startLoad");
+    }
   },
 }));
 
@@ -148,6 +151,32 @@ describe("LiveTVPlayer", () => {
 
     await waitFor(() => expect(hlsConstructorMock).toHaveBeenCalled());
     expect(hlsCallsMock.mock.calls.map(([name]) => name)).toEqual(["attachMedia", "loadSource"]);
+  });
+
+  it("restarts the negotiated HLS engine from the retry control", async () => {
+    hlsSupportedMock.mockReturnValue(true);
+    vi.useFakeTimers();
+    try {
+      render(
+        <LiveTVPlayer
+          channelId="source:news-1"
+          title="News"
+          streamUrl="/api/v1/stream/live/grant-1/manifest"
+          grantId="grant-1"
+          startupTimeoutMs={10}
+        />,
+      );
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      act(() => vi.advanceTimersByTime(11));
+      fireEvent.click(screen.getByRole("button", { name: "Retry live playback" }));
+
+      expect(hlsCallsMock).toHaveBeenCalledWith("startLoad");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("loads direct MPEG-TS through the authenticated Silo URL", async () => {
