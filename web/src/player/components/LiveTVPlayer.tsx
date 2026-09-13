@@ -54,6 +54,7 @@ export function LiveTVPlayer({
     const handlePlaying = () => setState("playing");
     const handleError = () => setState("reconnecting");
     let destroyPlayer: (() => void) | undefined;
+    let retryPlayer: (() => void) | undefined;
     let cancelled = false;
     const streamURL = streamUrl;
     if (mode === "direct") {
@@ -61,10 +62,15 @@ export function LiveTVPlayer({
         .then(({ default: MPEGts }) => {
           if (cancelled) return;
           const player = MPEGts.createPlayer({ type: "mpegts", url: streamURL, isLive: true });
+          destroyPlayer = () => player.destroy();
           player.attachMediaElement(video);
           player.load();
-          void player.play();
-          destroyPlayer = () => player.destroy();
+          retryPlayer = () => {
+            player.unload();
+            player.load();
+            void player.play().catch(() => setState("error"));
+          };
+          void player.play().catch(() => setState("error"));
         })
         .catch((error: unknown) => {
           if (error instanceof Error) setState("error");
@@ -82,6 +88,7 @@ export function LiveTVPlayer({
             player.attachMedia(video);
             player.loadSource(streamURL);
             destroyPlayer = () => player.destroy();
+            retryPlayer = () => player.startLoad();
           } else {
             video.src = streamURL;
           }
@@ -100,6 +107,9 @@ export function LiveTVPlayer({
       cancelled = true;
       window.clearTimeout(timeout);
       destroyPlayer?.();
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
       video.removeEventListener("playing", handlePlaying);
       video.removeEventListener("error", handleError);
     };
@@ -121,7 +131,7 @@ export function LiveTVPlayer({
     const video = videoRef.current;
     if (!video) return;
     setState("reconnecting");
-    video.load();
+    retryPlayer?.();
     void video.play().catch((error: unknown) => {
       if (error instanceof Error) setState("error");
     });
