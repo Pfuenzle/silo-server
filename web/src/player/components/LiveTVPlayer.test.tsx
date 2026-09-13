@@ -156,7 +156,6 @@ describe("LiveTVPlayer", () => {
   });
 
   it("keeps native stream URLs limited to the opaque server binding", async () => {
-
     render(
       <LiveTVPlayer
         channelId="source:news-1"

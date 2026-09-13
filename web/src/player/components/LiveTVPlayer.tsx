@@ -176,7 +176,10 @@ export function LiveTVPlayer({
       setIsFullscreen(false);
       return;
     }
-    void video.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => setIsFullscreen(false));
+    void video
+      .requestFullscreen()
+      .then(() => setIsFullscreen(true))
+      .catch(() => setIsFullscreen(false));
   };
 
   return (
