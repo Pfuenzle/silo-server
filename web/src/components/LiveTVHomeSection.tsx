@@ -218,7 +218,9 @@ function ChannelRail({
                 className="size-10 rounded-md object-contain"
               />
             ) : null}
-            {!liveTVArtwork(channel.artwork) ? <Radio className="text-primary size-5 shrink-0" /> : null}
+            {!liveTVArtwork(channel.artwork) ? (
+              <Radio className="text-primary size-5 shrink-0" />
+            ) : null}
             <div className="min-w-0">
               <h3 className="truncate text-sm font-medium">{channel.name}</h3>
               <p className="text-muted-foreground text-xs">{channel.number ?? ""}</p>
