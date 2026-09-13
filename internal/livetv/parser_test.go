@@ -173,3 +173,24 @@ func TestParseXMLTV_reportsDuplicateProviderIDsDeterministically(t *testing.T) {
 		t.Fatalf("diagnostics = %#v", diagnostics)
 	}
 }
+
+func TestParseXMLTV_mapsProviderChannelIDsWithTimezoneOffsets(t *testing.T) {
+	// Given an XMLTV feed using the common numeric offset with a non-UTC zone.
+	xml := `<tv><channel id="xteve-news"><display-name>News</display-name></channel><programme channel="xteve-news" start="20260913170000 +0200" stop="20260913180000 +0200"><title>Evening News</title></programme></tv>`
+
+	// When it is parsed using the persisted playlist-to-EPG mapping.
+	snapshot, diagnostics, err := ParseXMLTV(context.Background(), "epg-a", strings.NewReader(xml), 4096, map[string]ChannelMapping{
+		"news-1": {ProviderID: "xteve-news", DisplayName: "News"},
+	})
+
+	// Then the programme survives mapping and is normalized to UTC.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Programmes) != 1 || snapshot.Programmes[0].ChannelExternalID != "news-1" {
+		t.Fatalf("snapshot = %#v, diagnostics = %#v", snapshot, diagnostics)
+	}
+	if !snapshot.Programmes[0].StartsAt.Equal(time.Date(2026, 9, 13, 15, 0, 0, 0, time.UTC)) {
+		t.Fatalf("start = %v, want UTC 15:00", snapshot.Programmes[0].StartsAt)
+	}
+}
