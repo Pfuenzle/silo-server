@@ -139,10 +139,10 @@ function CurrentlyAiringRail({
             {libraryId !== undefined ? (
               <Link
                 to={`/library/${libraryId}?tab=program`}
-                aria-label={`${liveTVT("watchLive")}: ${programme.title}`}
+                aria-label={`${liveTVT("watchLive", locale)}: ${programme.title}`}
                 className="text-primary focus-visible:ring-ring mt-auto inline-flex min-h-11 items-center text-xs font-semibold uppercase focus-visible:ring-2 focus-visible:outline-none"
               >
-                {liveTVT("watchLive")}
+                {liveTVT("watchLive", locale)}
               </Link>
             ) : null}
           </article>

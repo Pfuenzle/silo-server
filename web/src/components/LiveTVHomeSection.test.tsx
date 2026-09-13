@@ -99,6 +99,30 @@ describe("LiveTVHomeSection", () => {
     expect(rows.indexOf("Currently airing")).toBeLessThan(rows.indexOf("Favorite channels airing"));
   });
 
+  it("localizes the currently airing watch action", () => {
+    renderHome(
+      <LiveTVHomeSection
+        libraryId={7}
+        locale="de"
+        query={{
+          data: {
+            currently_airing: [programme("current", "Morning News")],
+            favorite_channels_currently_airing: [],
+            favorite_programmes_currently_airing: [],
+            top_rated_favorite_programmes: [],
+            upcoming_favorite_programmes: [],
+          },
+          isLoading: false,
+          isFetching: false,
+          isError: false,
+          refetch: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: /Live ansehen: Morning News/ })).toBeVisible();
+  });
+
   it("rejects malformed home-section payloads at the API boundary", () => {
     expect(() => liveTVHomeSectionsSchema.parse({ currently_airing: [] })).toThrow();
   });
