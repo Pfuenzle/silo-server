@@ -435,20 +435,19 @@ func (r *Repository) UpdateRequestLifecycle(ctx context.Context, id string, life
 		UPDATE media_requests
 		SET external_library_id = CASE WHEN $2 = '' THEN external_library_id ELSE $2 END,
 		    external_download_id = CASE WHEN $3 = '' THEN external_download_id ELSE $3 END,
-		    external_status = CASE WHEN $4 = '' THEN external_status ELSE $4 END,
-		    external_detail = CASE WHEN $5 = '' THEN external_detail ELSE $5 END,
-		    imported_path = CASE WHEN $6 = '' THEN imported_path ELSE $6 END,
-		    scan_run_id = CASE WHEN $7 = '' THEN scan_run_id ELSE $7 END,
-		    silo_audiobook_id = CASE WHEN $8 = '' THEN silo_audiobook_id ELSE $8 END,
-		    silo_audiobook_link = CASE WHEN $9 = '' THEN silo_audiobook_link ELSE $9 END,
-		    retryable = $10,
+		    external_detail = CASE WHEN $4 = '' THEN external_detail ELSE $4 END,
+		    imported_path = CASE WHEN $5 = '' THEN imported_path ELSE $5 END,
+		    scan_run_id = CASE WHEN $6 = '' THEN scan_run_id ELSE $6 END,
+		    silo_audiobook_id = CASE WHEN $7 = '' THEN silo_audiobook_id ELSE $7 END,
+		    silo_audiobook_link = CASE WHEN $8 = '' THEN silo_audiobook_link ELSE $8 END,
+		    retryable = $9,
 		    updated_at = now()
 		WHERE id = $1
 		RETURNING `+requestColumns(), id, strings.TrimSpace(lifecycle.ExternalLibraryID),
-		strings.TrimSpace(lifecycle.ExternalDownloadID), strings.TrimSpace(lifecycle.ExternalStatus),
-		strings.TrimSpace(lifecycle.ExternalDetail), strings.TrimSpace(lifecycle.ImportedPath),
-		strings.TrimSpace(lifecycle.ScanRunID), strings.TrimSpace(lifecycle.SiloAudiobookID),
-		strings.TrimSpace(lifecycle.SiloAudiobookLink), lifecycle.Retryable))
+		strings.TrimSpace(lifecycle.ExternalDownloadID), strings.TrimSpace(lifecycle.ExternalDetail),
+		strings.TrimSpace(lifecycle.ImportedPath), strings.TrimSpace(lifecycle.ScanRunID),
+		strings.TrimSpace(lifecycle.SiloAudiobookID), strings.TrimSpace(lifecycle.SiloAudiobookLink),
+		lifecycle.Retryable))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -870,9 +869,9 @@ func requestSelectSQL() string {
 
 func requestColumns() string {
 	return `id, fulfillment_key, submission_state, submission_started_at, provider, media_type, tmdb_id, provider_item_id, tvdb_id, imdb_id, title, year,
-	        overview, poster_path, backdrop_path, status, outcome,
-	        requested_by_user_id, requested_by_profile_id, is_anime,
-	        external_id, external_status, external_library_id, external_download_id, external_detail,
+		       overview, poster_path, backdrop_path, status, outcome,
+		       requested_by_user_id, requested_by_profile_id, is_anime,
+		       external_library_id, external_download_id, external_detail,
 	        imported_path, scan_run_id, silo_audiobook_id, silo_audiobook_link, retryable,
 	        last_error, created_at, updated_at, approved_at, completed_at`
 }
@@ -906,8 +905,6 @@ func scanRequest(row requestScanner) (*Request, error) {
 		&req.RequestedByUserID,
 		&req.RequestedByProfileID,
 		&req.IsAnime,
-		&req.ExternalID,
-		&req.ExternalStatus,
 		&req.ExternalLibraryID,
 		&req.ExternalDownloadID,
 		&req.ExternalDetail,
