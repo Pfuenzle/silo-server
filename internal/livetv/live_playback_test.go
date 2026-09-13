@@ -46,6 +46,9 @@ func TestLivePlayback_Start_returnsSiloOnlyOpaqueGrant_boundToOwnership(t *testi
 	if stored.UserID != 7 || stored.ProfileID != "profile-a" || stored.LibraryID != 4 || stored.ChannelID != 9 || stored.SessionID != "session-a" {
 		t.Fatalf("stored ownership = %#v", stored)
 	}
+	if stored.providerURL != "" || stored.mediaToken != "" {
+		t.Fatalf("lookup exposed private playback state: %#v", stored)
+	}
 }
 
 func TestLivePlayback_Start_withoutProxyOrigin_isUnavailable(t *testing.T) {
@@ -81,7 +84,7 @@ func TestLivePlayback_Start_withRegisteredProxyOrigin_isAvailable(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if grant.ManifestURL != "http://proxy:8080/stream/live/"+grant.GrantID+"/manifest" {
+	if !strings.HasPrefix(grant.ManifestURL, "http://proxy:8080/stream/live/"+grant.GrantID+"/manifest?live_token=") {
 		t.Fatalf("manifest URL = %q, provider origin must not be used", grant.ManifestURL)
 	}
 }
@@ -165,6 +168,131 @@ func TestLivePlayback_ServeHLS_rewritesManifestAndRejectsUnauthorizedBeforeUpstr
 	service.ServeHTTP(badRR, bad)
 	if badRR.Code != http.StatusForbidden || requests.Load() != beforeUnauthorized {
 		t.Fatalf("unauthorized response = %d, upstream requests %d -> %d", badRR.Code, beforeUnauthorized, requests.Load())
+	}
+}
+
+func TestLivePlayback_HLSResourceBinding_allowsNativeRequestsAndRejectsWrongOrMissingToken(t *testing.T) {
+	// Given a valid HLS grant and an upstream segment.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		if r.URL.Path == "/live.m3u8" {
+			_, _ = io.WriteString(w, "#EXTM3U\nsegment-1.ts\n")
+			return
+		}
+		if r.URL.Path == "/segment-1.ts" {
+			_, _ = io.WriteString(w, "segment-bytes")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(upstream.Close)
+	service := NewLivePlaybackService(LivePlaybackConfig{
+		Fetch:       NewFetchService(FetchConfig{Resolver: liveTestResolver{IP: net.ParseIP("198.51.100.2")}, Dialer: liveDialer(upstream.Listener.Addr().String())}),
+		ProxyOrigin: "https://silo.example",
+		Authority:   liveTestAuthority{},
+	})
+	grant, err := service.Start(context.Background(), LivePlaybackRequest{UserID: 7, ProfileID: "profile-a", LibraryID: 4, SessionID: "session-a", Mode: LivePlaybackModeHLS, ChannelID: SourceQualifiedID("fixture|channel-1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// When the authenticated owner loads the manifest and native media loads the
+	// rewritten resource without custom headers.
+	manifestRequest := httptest.NewRequest(http.MethodGet, grant.ManifestURL, nil)
+	manifestRequest.Header.Set("X-Live-User-ID", "7")
+	manifestRequest.Header.Set("X-Live-Profile-ID", "profile-a")
+	manifestResponse := httptest.NewRecorder()
+	service.ServeHTTP(manifestResponse, manifestRequest)
+	if manifestResponse.Code != http.StatusOK {
+		t.Fatalf("manifest status = %d, body = %q", manifestResponse.Code, manifestResponse.Body.String())
+	}
+	segmentURL := strings.TrimSpace(strings.Split(manifestResponse.Body.String(), "\n")[1])
+	segmentResponse := httptest.NewRecorder()
+	service.ServeHTTP(segmentResponse, httptest.NewRequest(http.MethodGet, segmentURL, nil))
+
+	// Then the opaque binding is sufficient, but it is not replaceable by a
+	// missing or unrelated binding.
+	if segmentResponse.Code != http.StatusOK || segmentResponse.Body.String() != "segment-bytes" {
+		t.Fatalf("native segment response = %d %q", segmentResponse.Code, segmentResponse.Body.String())
+	}
+	for _, name := range []string{"missing", "wrong"} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, strings.Split(segmentURL, "?")[0], nil)
+			if name == "wrong" {
+				request.URL.RawQuery = "live_token=not-the-grant-token"
+			}
+			response := httptest.NewRecorder()
+			service.ServeHTTP(response, request)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", response.Code)
+			}
+		})
+	}
+}
+
+func TestLivePlayback_HLSResourceBinding_expiresAndRevokes(t *testing.T) {
+	// Given a short-lived HLS grant and a deterministic clock.
+	now := time.Unix(100, 0).UTC()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		if r.URL.Path == "/live.m3u8" {
+			_, _ = io.WriteString(w, "#EXTM3U\nsegment.ts\n")
+			return
+		}
+		_, _ = io.WriteString(w, "bytes")
+	}))
+	t.Cleanup(upstream.Close)
+	service := NewLivePlaybackService(LivePlaybackConfig{
+		Fetch:       NewFetchService(FetchConfig{Resolver: liveTestResolver{IP: net.ParseIP("198.51.100.2")}, Dialer: liveDialer(upstream.Listener.Addr().String())}),
+		ProxyOrigin: "https://silo.example", Authority: liveTestAuthority{}, Now: func() time.Time { return now }, IdleTimeout: time.Minute,
+	})
+	grant, err := service.Start(context.Background(), LivePlaybackRequest{UserID: 7, ProfileID: "profile-a", LibraryID: 4, SessionID: "session-a", Mode: LivePlaybackModeHLS, ChannelID: SourceQualifiedID("fixture|channel-1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, grant.ManifestURL, nil)
+	request.Header.Set("X-Live-User-ID", "7")
+	request.Header.Set("X-Live-Profile-ID", "profile-a")
+	service.ServeHTTP(manifest, request)
+	segmentURL := strings.TrimSpace(strings.Split(manifest.Body.String(), "\n")[1])
+
+	// When the grant is revoked or becomes idle-expired.
+	service.RevokeContext(context.Background(), grant.GrantID)
+	revoked := httptest.NewRecorder()
+	service.ServeHTTP(revoked, httptest.NewRequest(http.MethodGet, segmentURL, nil))
+	if revoked.Code != http.StatusForbidden {
+		t.Fatalf("revoked status = %d, want 403", revoked.Code)
+	}
+	if _, ok := service.Lookup(grant.GrantID); ok {
+		t.Fatal("revoked grant remains active")
+	}
+}
+
+func TestLivePlayback_HLSResourceBinding_expires(t *testing.T) {
+	// Given a valid grant whose short-lived media binding has expired.
+	now := time.Unix(100, 0).UTC()
+	service := NewLivePlaybackService(LivePlaybackConfig{
+		Fetch:       NewFetchService(FetchConfig{Resolver: liveTestResolver{}}),
+		ProxyOrigin: "https://silo.example", Authority: liveTestAuthority{}, Now: func() time.Time { return now },
+	})
+	grant, err := service.Start(context.Background(), LivePlaybackRequest{UserID: 7, ProfileID: "profile-a", LibraryID: 4, SessionID: "session-a", Mode: LivePlaybackModeHLS, ChannelID: SourceQualifiedID("fixture|channel-1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, ok := service.sessions[grant.GrantID]
+	if !ok {
+		t.Fatal("grant was not stored")
+	}
+	mediaToken := stored.mediaToken
+	stored.mediaTokenExpiresAt = now.Add(-time.Second)
+
+	// When native media presents the expired binding.
+	identity, err := service.MediaTokenIdentity(context.Background(), grant.GrantID, mediaToken)
+
+	// Then the expired binding is denied without reconstructing profile identity.
+	if !errors.Is(err, ErrLivePlaybackForbidden) || identity != (LivePlaybackIdentity{}) {
+		t.Fatalf("identity = %#v, error = %v, want forbidden", identity, err)
 	}
 }
 

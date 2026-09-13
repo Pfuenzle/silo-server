@@ -2,6 +2,8 @@ package livetv
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -88,6 +90,8 @@ type LivePlaybackSession struct {
 	NodeReference         string
 	trustedSource         bool
 	Reconnects            int
+	mediaToken            string
+	mediaTokenExpiresAt   time.Time
 	resources             map[string]string
 	providerURL           string
 }
@@ -176,7 +180,11 @@ func (s *LivePlaybackService) Start(ctx context.Context, request LivePlaybackReq
 		return LivePlaybackGrant{}, err
 	}
 	now := s.now().UTC()
-	session := &LivePlaybackSession{GrantID: uuid.NewString(), UserID: request.UserID, ProfileID: request.ProfileID, LibraryID: request.LibraryID, ChannelID: channel.ID, SessionID: request.SessionID, Mode: request.Mode, IsLive: true, CreatedAt: now, LastSeenAt: now, SourceID: channel.SourceID, SourceKey: string(channel.StableID), trustedSource: s.allowPrivateNetworksForConfiguredSources, providerURL: validated.String(), resources: make(map[string]string)}
+	mediaToken, err := newLiveMediaToken()
+	if err != nil {
+		return LivePlaybackGrant{}, fmt.Errorf("create Live TV media binding: %w", err)
+	}
+	session := &LivePlaybackSession{GrantID: uuid.NewString(), UserID: request.UserID, ProfileID: request.ProfileID, LibraryID: request.LibraryID, ChannelID: channel.ID, SessionID: request.SessionID, Mode: request.Mode, IsLive: true, CreatedAt: now, LastSeenAt: now, SourceID: channel.SourceID, SourceKey: string(channel.StableID), trustedSource: s.allowPrivateNetworksForConfiguredSources, mediaToken: mediaToken, mediaTokenExpiresAt: now.Add(10 * time.Minute), providerURL: validated.String(), resources: make(map[string]string)}
 	s.mu.Lock()
 	s.sessions[session.GrantID] = session
 	s.mu.Unlock()
@@ -200,5 +208,21 @@ func (s *LivePlaybackService) Start(ctx context.Context, request LivePlaybackReq
 	if s.observer != nil {
 		s.observer.Started(*session)
 	}
-	return LivePlaybackGrant{GrantID: session.GrantID, ManifestURL: s.ProxyOrigin() + "/stream/live/" + session.GrantID + "/manifest", IsLive: true}, nil
+	return LivePlaybackGrant{GrantID: session.GrantID, ManifestURL: mediaURL(s.ProxyOrigin(), session.GrantID, "manifest", "", mediaToken), IsLive: true}, nil
+}
+
+func (s *LivePlaybackService) MediaTokenIdentity(ctx context.Context, grantID, token string) (LivePlaybackIdentity, error) {
+	session, err := s.authorize(ctx, grantID, "", "", token)
+	if err != nil {
+		return LivePlaybackIdentity{}, err
+	}
+	return LivePlaybackIdentity{UserID: session.UserID, ProfileID: session.ProfileID, SessionID: session.SessionID}, nil
+}
+
+func newLiveMediaToken() (string, error) {
+	buffer := make([]byte, 32)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }

@@ -73,10 +73,12 @@ func (s *LivePlaybackService) Lookup(grantID string) (LivePlaybackSession, bool)
 	copy := cloneLivePlaybackSession(*session)
 	s.mu.Unlock()
 	copy.providerURL = ""
+	copy.mediaToken = ""
+	copy.mediaTokenExpiresAt = time.Time{}
 	return copy, true
 }
 
-func (s *LivePlaybackService) authorize(ctx context.Context, grantID, userID, profileID string) (*LivePlaybackSession, error) {
+func (s *LivePlaybackService) authorize(ctx context.Context, grantID, userID, profileID string, mediaToken ...string) (*LivePlaybackSession, error) {
 	s.mu.Lock()
 	if _, revoked := s.revoked[grantID]; revoked {
 		s.mu.Unlock()
@@ -110,6 +112,15 @@ func (s *LivePlaybackService) authorize(ctx context.Context, grantID, userID, pr
 			s.observer.Ended(*session, "expired")
 		}
 		return nil, ErrLivePlaybackExpired
+	}
+	if len(mediaToken) > 0 && mediaToken[0] != "" {
+		if mediaToken[0] != session.mediaToken || s.now().UTC().After(session.mediaTokenExpiresAt) {
+			s.mu.Unlock()
+			return nil, ErrLivePlaybackForbidden
+		}
+		if strings.TrimSpace(userID) == "" && strings.TrimSpace(profileID) == "" {
+			userID, profileID = fmt.Sprintf("%d", session.UserID), session.ProfileID
+		}
 	}
 	if identity, ok := ctx.Value(livePlaybackIdentityKey{}).(LivePlaybackIdentity); ok {
 		userID, profileID = fmt.Sprintf("%d", identity.UserID), identity.ProfileID
