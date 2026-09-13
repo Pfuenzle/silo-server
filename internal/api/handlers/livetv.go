@@ -110,6 +110,14 @@ func (h *LiveTVHandler) HandlePlaybackStream(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusForbidden, "forbidden", "Live TV playback session is not authorized")
 			return
 		}
+		profileID := apimw.GetProfileID(ctx)
+		if profileID == "" {
+			profileID = r.Header.Get("X-Profile-Id")
+		}
+		if profileID != "" && profileID != identity.ProfileID {
+			writeError(w, http.StatusForbidden, "forbidden", "Live TV playback session is not authorized")
+			return
+		}
 		ctx = livetv.WithLivePlaybackIdentity(ctx, identity)
 	} else {
 		claims := apimw.GetClaims(ctx)

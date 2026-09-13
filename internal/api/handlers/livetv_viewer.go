@@ -181,7 +181,6 @@ func (h *LiveTVHandler) HandlePlaybackResolution(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to resolve Live TV playback")
 		return
 	}
-	grant.ManifestURL = h.playbackOrigin + "/stream/live/" + grant.GrantID + "/manifest"
 	writeJSON(w, http.StatusOK, liveTVPlaybackResponse{ChannelID: channelID, Live: true, Playable: true, GrantID: grant.GrantID, URL: grant.ManifestURL})
 }
 
