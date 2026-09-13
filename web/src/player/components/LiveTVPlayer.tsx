@@ -148,7 +148,7 @@ export function LiveTVPlayer({
         className="size-full object-contain"
         autoPlay
         playsInline
-        controls={false}
+        controls
       />
       <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-4 bg-black/70 p-4 text-white">
         <div className="min-w-0">

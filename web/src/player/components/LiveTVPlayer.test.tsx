@@ -58,6 +58,7 @@ describe("LiveTVPlayer", () => {
     expect(screen.queryByText(/\d+:\d+/)).not.toBeInTheDocument();
     expect(screen.queryByRole("slider")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop live playback" })).toBeInTheDocument();
+    expect(document.querySelector("video")).toHaveAttribute("controls");
   });
 
   it("deletes the live grant on stop and unmount", async () => {
