@@ -349,7 +349,10 @@ export default function Requests() {
           ) : mine.isError ? (
             <EmptyPanel
               title="Couldn't load your requests"
-              detail="Refresh in a moment, or check back later."
+              detail={
+                requestErrorMessage(mine.error) ??
+                "Refresh in a moment, or check back later."
+              }
             />
           ) : totalMine === 0 ? (
             <EmptyMineState />
