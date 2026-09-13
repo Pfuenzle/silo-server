@@ -454,6 +454,7 @@ export function LiveTVLibraryPage({
     readonly channelId: string;
     readonly streamUrl: string;
     readonly grantId: string;
+    readonly mode: "direct" | "hls";
   } | null>(null);
   const [playbackFailure, setPlaybackFailure] = useState<{
     readonly channelId: string;
@@ -495,7 +496,7 @@ export function LiveTVLibraryPage({
     try {
       const outcome = liveTVPlaybackOutcome(await resolveLiveTVPlayback(libraryId, channelId));
       if (outcome.kind === "playable") {
-        setLive({ title, channelId, streamUrl: outcome.url, grantId: outcome.grantId });
+        setLive({ title, channelId, streamUrl: outcome.url, grantId: outcome.grantId, mode: outcome.mode });
         return;
       }
       const message =

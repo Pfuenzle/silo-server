@@ -9,6 +9,7 @@ interface LiveTVPlayerProps {
   readonly title: string;
   readonly streamUrl: string;
   readonly grantId: string;
+  readonly mode?: "direct" | "hls";
   readonly startupTimeoutMs?: number;
   readonly onStop?: () => void;
 }
@@ -20,6 +21,7 @@ export function LiveTVPlayer({
   title,
   streamUrl,
   grantId,
+  mode = "hls",
   startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS,
   onStop,
 }: LiveTVPlayerProps) {
@@ -51,32 +53,43 @@ export function LiveTVPlayer({
 
     const handlePlaying = () => setState("playing");
     const handleError = () => setState("reconnecting");
-    let hls: {
-      destroy: () => void;
-      loadSource: (url: string) => void;
-      attachMedia: (element: HTMLVideoElement) => void;
-    } | null = null;
+    let destroyPlayer: (() => void) | undefined;
     let cancelled = false;
     const streamURL = streamUrl;
-    void import("hls.js")
-      .then(({ default: Hls }) => {
-        if (cancelled) return;
-        if (Hls.isSupported()) {
-          hls = new Hls({
-            enableWorker: true,
-            lowLatencyMode: true,
-            backBufferLength: 0,
-          });
-          hls.attachMedia(video);
-          hls.loadSource(streamURL);
-        } else {
+    if (mode === "direct") {
+      void import("mpegts.js")
+        .then(({ default: MPEGts }) => {
           if (cancelled) return;
-          video.src = streamURL;
-        }
-      })
-      .catch((error: unknown) => {
-        if (error instanceof Error) setState("error");
-      });
+          const player = MPEGts.createPlayer({ type: "mpegts", url: streamURL, isLive: true });
+          player.attachMediaElement(video);
+          player.load();
+          void player.play();
+          destroyPlayer = () => player.destroy();
+        })
+        .catch((error: unknown) => {
+          if (error instanceof Error) setState("error");
+        });
+    } else {
+      void import("hls.js")
+        .then(({ default: Hls }) => {
+          if (cancelled) return;
+          if (Hls.isSupported()) {
+            const player = new Hls({
+              enableWorker: true,
+              lowLatencyMode: true,
+              backBufferLength: 0,
+            });
+            player.attachMedia(video);
+            player.loadSource(streamURL);
+            destroyPlayer = () => player.destroy();
+          } else {
+            video.src = streamURL;
+          }
+        })
+        .catch((error: unknown) => {
+          if (error instanceof Error) setState("error");
+        });
+    }
     video.addEventListener("playing", handlePlaying);
     video.addEventListener("error", handleError);
     const timeout = window.setTimeout(() => {
@@ -86,11 +99,11 @@ export function LiveTVPlayer({
     return () => {
       cancelled = true;
       window.clearTimeout(timeout);
-      hls?.destroy();
+      destroyPlayer?.();
       video.removeEventListener("playing", handlePlaying);
       video.removeEventListener("error", handleError);
     };
-  }, [startupTimeoutMs, streamIsSafe, streamUrl]);
+  }, [mode, startupTimeoutMs, streamIsSafe, streamUrl]);
 
   useEffect(() => {
     return () => {

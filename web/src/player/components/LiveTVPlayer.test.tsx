@@ -150,6 +150,20 @@ describe("LiveTVPlayer", () => {
     expect(hlsCallsMock.mock.calls.map(([name]) => name)).toEqual(["attachMedia", "loadSource"]);
   });
 
+  it("loads direct MPEG-TS through the authenticated Silo URL", async () => {
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+        mode="direct"
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByRole("status", { name: "Live" })).toBeInTheDocument());
+  });
+
   it("does not initialize HLS after the player unmounts", async () => {
     hlsSupportedMock.mockReturnValue(true);
     const { unmount } = render(
