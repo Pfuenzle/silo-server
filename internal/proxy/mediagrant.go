@@ -144,6 +144,25 @@ func (s *Server) handleLivePlayback(w http.ResponseWriter, r *http.Request) {
 		writeGrantError(w, http.StatusServiceUnavailable, "service_unavailable", "Live TV playback is unavailable")
 		return
 	}
+	if liveToken := strings.TrimSpace(r.URL.Query().Get("live_token")); liveToken != "" {
+		identity, err := s.livePlayback.MediaTokenIdentity(r.Context(), chi.URLParam(r, "grant_id"), liveToken)
+		if err != nil {
+			writeGrantError(w, http.StatusForbidden, "forbidden", "Live TV playback session is not authorized")
+			return
+		}
+		if s.loginSessions == nil {
+			writeGrantError(w, http.StatusServiceUnavailable, "service_unavailable", "Live TV authorization is unavailable")
+			return
+		}
+		valid, err := s.loginSessions.IsValid(r.Context(), identity.SessionID)
+		if err != nil || !valid {
+			writeGrantError(w, http.StatusUnauthorized, "unauthorized", "Session is no longer valid")
+			return
+		}
+		ctx := livetv.WithLivePlaybackIdentity(r.Context(), identity)
+		s.livePlayback.ServeHTTP(w, r.WithContext(ctx))
+		return
+	}
 	cfg := s.watcher.Config()
 	secret := ""
 	if cfg != nil {

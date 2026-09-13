@@ -149,7 +149,10 @@ func TestProxyLivePlayback_requiresMatchingSignedProfileProof(t *testing.T) {
 		t.Fatalf("manifest response = %d %q", manifest.Code, manifest.Body.String())
 	}
 	segmentPath := strings.TrimSpace(strings.Split(manifest.Body.String(), "\n")[2])
-	segment := liveProxyRequest(t, srv, segmentPath, accessToken, "profile-a", validProof)
+	segmentRequest := httptest.NewRequest(http.MethodGet, segmentPath, nil)
+	segmentRecorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(segmentRecorder, segmentRequest)
+	segment := segmentRecorder
 	if segment.Code != http.StatusOK || segment.Body.String() != "segment-bytes" {
 		t.Fatalf("segment response = %d %q", segment.Code, segment.Body.String())
 	}
@@ -157,6 +160,33 @@ func TestProxyLivePlayback_requiresMatchingSignedProfileProof(t *testing.T) {
 	stopped := liveProxyRequest(t, srv, manifestPath, accessToken, "profile-a", validProof)
 	if stopped.Code != http.StatusNotFound && stopped.Code != http.StatusForbidden {
 		t.Fatalf("stopped grant status = %d, want 404 or 403", stopped.Code)
+	}
+}
+
+func TestProxyLivePlayback_nativeBindingRejectsRevokedLoginSession(t *testing.T) {
+	// Given a Live TV service and a proxy whose login session is revoked after
+	// the manifest was issued.
+	srv := newGrantProxyServer(t, nil)
+	srv.SetProfileTokenService(access.NewProfileTokenService(grantTestSecret, time.Hour))
+	service := livetv.NewLivePlaybackService(livetv.LivePlaybackConfig{
+		Fetch:       livetv.NewFetchService(livetv.FetchConfig{Resolver: liveProxyResolver{}}),
+		ProxyOrigin: "http://proxy",
+		Authority:   liveProxyAuthority{streamURL: "http://provider.example/live.m3u8"},
+	})
+	grant, err := service.Start(context.Background(), livetv.LivePlaybackRequest{UserID: 7, ProfileID: "profile-a", LibraryID: 4, ChannelID: "fixture|channel-1", SessionID: "login-1", Mode: livetv.LivePlaybackModeHLS})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetLivePlayback(service)
+	srv.SetMediaGrantAuthority(stubGrantStore{}, stubLoginSessions{valid: map[string]bool{"login-1": false}})
+
+	// When a native request presents only the opaque binding.
+	recorder := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, grant.ManifestURL, nil))
+
+	// Then revoking the login session still blocks media access.
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", recorder.Code)
 	}
 }
 
