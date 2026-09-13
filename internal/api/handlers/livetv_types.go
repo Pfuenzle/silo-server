@@ -62,25 +62,27 @@ type liveTVPage[T any] struct {
 }
 
 type liveTVChannelResponse struct {
-	ID       string          `json:"id"`
-	Name     string          `json:"name"`
-	Number   string          `json:"number,omitempty"`
-	Category string          `json:"category,omitempty"`
-	Artwork  json.RawMessage `json:"artwork,omitempty"`
-	Rating   json.RawMessage `json:"rating,omitempty"`
-	Stale    bool            `json:"stale"`
+	ID                   string          `json:"id"`
+	Name                 string          `json:"name"`
+	Number               string          `json:"number,omitempty"`
+	Category             string          `json:"category,omitempty"`
+	Artwork              json.RawMessage `json:"artwork,omitempty"`
+	ProviderLogoSupplied bool            `json:"provider_logo_supplied"`
+	Rating               json.RawMessage `json:"rating,omitempty"`
+	Stale                bool            `json:"stale"`
 }
 
 type liveTVProgrammeResponse struct {
-	ID          string          `json:"id"`
-	ChannelID   string          `json:"channel_id"`
-	ChannelName string          `json:"channel_name"`
-	Title       string          `json:"title"`
-	Description string          `json:"description,omitempty"`
-	StartsAt    time.Time       `json:"starts_at"`
-	EndsAt      time.Time       `json:"ends_at"`
-	Artwork     json.RawMessage `json:"artwork,omitempty"`
-	Rating      json.RawMessage `json:"rating,omitempty"`
+	ID                   string          `json:"id"`
+	ChannelID            string          `json:"channel_id"`
+	ChannelName          string          `json:"channel_name"`
+	Title                string          `json:"title"`
+	Description          string          `json:"description,omitempty"`
+	StartsAt             time.Time       `json:"starts_at"`
+	EndsAt               time.Time       `json:"ends_at"`
+	Artwork              json.RawMessage `json:"artwork,omitempty"`
+	ProviderLogoSupplied bool            `json:"provider_logo_supplied"`
+	Rating               json.RawMessage `json:"rating,omitempty"`
 }
 
 type liveTVGuideResponse struct {

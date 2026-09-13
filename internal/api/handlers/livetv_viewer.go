@@ -37,7 +37,7 @@ func (h *LiveTVHandler) HandleListChannels(w http.ResponseWriter, r *http.Reques
 	items := make([]liveTVChannelResponse, 0, len(channels))
 	stale := h.libraryStale(r, library.ID)
 	for _, channel := range channels {
-		items = append(items, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: h.authorizeArtwork(r.Context(), channel.Artwork), Rating: channel.Rating, Stale: stale})
+		items = append(items, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: h.authorizeArtwork(r.Context(), channel.Artwork), ProviderLogoSupplied: providerLogoSupplied(channel.Artwork), Rating: channel.Rating, Stale: stale})
 	}
 	writeJSON(w, http.StatusOK, liveTVPage[liveTVChannelResponse]{Items: items, Total: total, Limit: limit, Offset: offset})
 }
@@ -57,7 +57,7 @@ func (h *LiveTVHandler) HandleChannelDetail(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load Live TV channel")
 		return
 	}
-	writeJSON(w, http.StatusOK, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: h.authorizeArtwork(r.Context(), channel.Artwork), Rating: channel.Rating, Stale: h.libraryStale(r, library.ID)})
+	writeJSON(w, http.StatusOK, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: h.authorizeArtwork(r.Context(), channel.Artwork), ProviderLogoSupplied: providerLogoSupplied(channel.Artwork), Rating: channel.Rating, Stale: h.libraryStale(r, library.ID)})
 }
 
 func (h *LiveTVHandler) HandleGuide(w http.ResponseWriter, r *http.Request) {
@@ -252,7 +252,7 @@ func (h *LiveTVHandler) libraryRefreshError(r *http.Request, libraryID int) stri
 }
 
 func (h *LiveTVHandler) programmeResponse(ctx context.Context, programme livetv.Programme, channel *livetv.Channel) liveTVProgrammeResponse {
-	response := liveTVProgrammeResponse{ID: programme.StableID.String(), Title: programme.Title, Description: programme.Description, StartsAt: programme.StartsAt, EndsAt: programme.EndsAt, Artwork: h.authorizeArtwork(ctx, programme.Artwork), Rating: programme.Rating}
+	response := liveTVProgrammeResponse{ID: programme.StableID.String(), Title: programme.Title, Description: programme.Description, StartsAt: programme.StartsAt, EndsAt: programme.EndsAt, Artwork: h.authorizeArtwork(ctx, programme.Artwork), ProviderLogoSupplied: providerLogoSupplied(programme.Artwork), Rating: programme.Rating}
 	if channel != nil {
 		response.ChannelID = channel.StableID.String()
 		response.ChannelName = channel.Name
@@ -307,6 +307,19 @@ func (h *LiveTVHandler) authorizeArtwork(ctx context.Context, raw []byte) json.R
 		return nil
 	}
 	return encoded
+}
+
+func providerLogoSupplied(raw []byte) bool {
+	var value map[string]string
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return false
+	}
+	for key, path := range value {
+		if (key == "logo" || key == "url" || key == "path") && strings.TrimSpace(path) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func isAuthorizedArtworkURL(raw string) bool {

@@ -273,6 +273,21 @@ func TestAuthorizeArtwork_acceptsOnlyAuthorizedResolverResults(t *testing.T) {
 	}
 }
 
+func TestProviderLogoSupplied_reportsSourceMetadataWithoutLeakingURL(t *testing.T) {
+	// Given source metadata with a provider logo and metadata without one.
+	withLogo := json.RawMessage(`{"logo":"https://provider.example/logo.png"}`)
+	withoutLogo := json.RawMessage(`{"poster":"https://provider.example/poster.png"}`)
+
+	// When logo provenance is inspected for the API response contract.
+	withLogoSupplied := providerLogoSupplied(withLogo)
+	withoutLogoSupplied := providerLogoSupplied(withoutLogo)
+
+	// Then only the provider logo field is reported as supplied.
+	if !withLogoSupplied || withoutLogoSupplied {
+		t.Fatalf("provider logo provenance = %v/%v, want true/false", withLogoSupplied, withoutLogoSupplied)
+	}
+}
+
 func TestAuthorizeArtwork_acceptsConfiguredCloudflareTokenURL(t *testing.T) {
 	// Given an object store configured for Cloudflare token delivery.
 	handler := &LiveTVHandler{

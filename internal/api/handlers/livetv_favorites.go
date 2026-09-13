@@ -134,12 +134,13 @@ func (h *LiveTVHandler) HandleListFavoriteChannels(w http.ResponseWriter, r *htt
 
 func (h *LiveTVHandler) favoriteChannelResponse(ctx context.Context, channel livetv.Channel) liveTVChannelResponse {
 	return liveTVChannelResponse{
-		ID:       channel.StableID.String(),
-		Name:     channel.Name,
-		Number:   channel.Number,
-		Category: string(channel.Category),
-		Artwork:  h.authorizeArtwork(ctx, channel.Artwork),
-		Rating:   channel.Rating,
+		ID:                   channel.StableID.String(),
+		Name:                 channel.Name,
+		Number:               channel.Number,
+		Category:             string(channel.Category),
+		Artwork:              h.authorizeArtwork(ctx, channel.Artwork),
+		ProviderLogoSupplied: providerLogoSupplied(channel.Artwork),
+		Rating:               channel.Rating,
 	}
 }
 
@@ -211,7 +212,7 @@ func (h *LiveTVHandler) HandleHomeSections(w http.ResponseWriter, r *http.Reques
 		response.CurrentlyAiring = append(response.CurrentlyAiring, h.programmeResponse(r.Context(), programme, channelsByID[programme.ChannelID]))
 	}
 	for _, channel := range channels {
-		response.FavoriteChannelsAiring = append(response.FavoriteChannelsAiring, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: h.authorizeArtwork(r.Context(), channel.Artwork), Rating: channel.Rating})
+		response.FavoriteChannelsAiring = append(response.FavoriteChannelsAiring, liveTVChannelResponse{ID: channel.StableID.String(), Name: channel.Name, Number: channel.Number, Category: string(channel.Category), Artwork: h.authorizeArtwork(r.Context(), channel.Artwork), ProviderLogoSupplied: providerLogoSupplied(channel.Artwork), Rating: channel.Rating})
 	}
 	for _, programme := range current {
 		response.FavoriteProgrammesAiring = append(response.FavoriteProgrammesAiring, h.programmeResponseWithChannel(r.Context(), favorite.LibraryID, programme))
