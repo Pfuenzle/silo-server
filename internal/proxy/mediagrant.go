@@ -150,6 +150,11 @@ func (s *Server) handleLivePlayback(w http.ResponseWriter, r *http.Request) {
 			writeGrantError(w, http.StatusForbidden, "forbidden", "Live TV playback session is not authorized")
 			return
 		}
+		profileID := strings.TrimSpace(r.Header.Get("X-Profile-Id"))
+		if profileID != "" && profileID != identity.ProfileID {
+			writeGrantError(w, http.StatusForbidden, "forbidden", "Live TV playback session is not authorized")
+			return
+		}
 		if s.loginSessions == nil {
 			writeGrantError(w, http.StatusServiceUnavailable, "service_unavailable", "Live TV authorization is unavailable")
 			return
