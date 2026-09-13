@@ -9,9 +9,31 @@ const storageMock = vi.hoisted(() => ({
   KEYS: { PROFILE_ID: "profile_id" },
   get: vi.fn(() => "profile-1"),
 }));
+const hlsConstructorMock = vi.hoisted(() => vi.fn());
+const hlsCallsMock = vi.hoisted(() => vi.fn());
+const hlsSupportedMock = vi.hoisted(() => vi.fn(() => false));
 vi.mock("@/api/client", () => ({ api: apiMock, getAccessToken: accessTokenMock }));
 vi.mock("@/hooks/useCurrentProfile", () => ({ useCurrentProfile: () => profileMock }));
 vi.mock("@/utils/storage", () => ({ storage: storageMock }));
+vi.mock("hls.js", () => ({
+  default: class MockHls {
+    static isSupported() {
+      return hlsSupportedMock();
+    }
+
+    constructor() {
+      hlsConstructorMock();
+    }
+
+    attachMedia() {
+      hlsCallsMock("attachMedia");
+    }
+    destroy() {}
+    loadSource() {
+      hlsCallsMock("loadSource");
+    }
+  },
+}));
 
 afterEach(() => {
   cleanup();
@@ -21,6 +43,10 @@ afterEach(() => {
   accessTokenMock.mockReturnValue(null);
   storageMock.get.mockReturnValue("profile-1");
   profileMock.profile = null;
+  hlsConstructorMock.mockReset();
+  hlsCallsMock.mockReset();
+  hlsSupportedMock.mockReset();
+  hlsSupportedMock.mockReturnValue(false);
 });
 
 describe("LiveTVPlayer", () => {
@@ -117,5 +143,36 @@ describe("LiveTVPlayer", () => {
       expect(source).toContain("token=access-token");
       expect(source).toContain("profile_id=profile-1");
     });
+  });
+
+  it("attaches the media element before loading the manifest", async () => {
+    hlsSupportedMock.mockReturnValue(true);
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    await waitFor(() => expect(hlsConstructorMock).toHaveBeenCalled());
+    expect(hlsCallsMock.mock.calls.map(([name]) => name)).toEqual(["attachMedia", "loadSource"]);
+  });
+
+  it("does not initialize HLS after the player unmounts", async () => {
+    hlsSupportedMock.mockReturnValue(true);
+    const { unmount } = render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    unmount();
+    await Promise.resolve();
+    expect(hlsConstructorMock).not.toHaveBeenCalled();
   });
 });

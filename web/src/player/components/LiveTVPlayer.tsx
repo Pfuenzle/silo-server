@@ -57,6 +57,7 @@ export function LiveTVPlayer({
       loadSource: (url: string) => void;
       attachMedia: (element: HTMLVideoElement) => void;
     } | null = null;
+    let cancelled = false;
     const accessToken = getAccessToken();
     const profileId = storage.get(storage.KEYS.PROFILE_ID);
     const streamParams = new URLSearchParams();
@@ -68,6 +69,7 @@ export function LiveTVPlayer({
       : streamUrl;
     void import("hls.js")
       .then(({ default: Hls }) => {
+        if (cancelled) return;
         if (Hls.isSupported()) {
           hls = new Hls({
             enableWorker: true,
@@ -78,9 +80,10 @@ export function LiveTVPlayer({
               if (profileId) request.setRequestHeader("X-Profile-Id", profileId);
             },
           });
-          hls.loadSource(streamURL);
           hls.attachMedia(video);
+          hls.loadSource(streamURL);
         } else {
+          if (cancelled) return;
           video.src = streamURL;
         }
       })
@@ -94,6 +97,7 @@ export function LiveTVPlayer({
     }, startupTimeoutMs);
 
     return () => {
+      cancelled = true;
       window.clearTimeout(timeout);
       hls?.destroy();
       video.removeEventListener("playing", handlePlaying);
