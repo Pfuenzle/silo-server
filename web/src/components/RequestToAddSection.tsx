@@ -13,7 +13,9 @@ import {
 import { cn } from "@/lib/utils";
 import RequestPosterCard from "./RequestPosterCard";
 
-function cardKey(item: Pick<RequestMediaResult, "media_type" | "tmdb_id" | "provider_item_id">): string {
+function cardKey(
+  item: Pick<RequestMediaResult, "media_type" | "tmdb_id" | "provider_item_id">,
+): string {
   return `${item.media_type}-${item.provider_item_id ?? item.tmdb_id}`;
 }
 
@@ -36,8 +38,14 @@ const DEFAULT_REQUEST_COPY = {
   empty: "Nothing found",
 };
 
-function requestCopy() {
-  return DEFAULT_REQUEST_COPY;
+function requestCopy(libraryHadHits: boolean, libraryResultsKnown: boolean) {
+  if (libraryResultsKnown && !libraryHadHits) {
+    return {
+      ...DEFAULT_REQUEST_COPY,
+      heading: "Not in your library, but you can request",
+    };
+  }
+  return { ...DEFAULT_REQUEST_COPY, heading: "Request to Add" };
 }
 
 export type RequestToAddSectionProps = {
@@ -57,6 +65,8 @@ export type RequestToAddSectionProps = {
 export function RequestToAddSection({
   variant,
   query,
+  libraryHadHits,
+  libraryResultsKnown = true,
   mediaType = "all",
   allowAudiobooks = true,
 }: RequestToAddSectionProps) {
@@ -72,11 +82,12 @@ export function RequestToAddSection({
   if (!discoveryEnabled) return null;
 
   const filtered = (search.data?.results ?? []).filter(
-    (item) => item.availability !== "available" && (allowAudiobooks || item.media_type !== "audiobook"),
+    (item) =>
+      item.availability !== "available" && (allowAudiobooks || item.media_type !== "audiobook"),
   );
-  const copy = requestCopy();
+  const copy = requestCopy(libraryHadHits, libraryResultsKnown);
   const searching = search.isLoading || search.isFetching;
-  const empty = !searching && (search.isError || filtered.length === 0);
+  const empty = !searching && filtered.length === 0;
 
   if (searching || empty) {
     return (
@@ -84,10 +95,11 @@ export function RequestToAddSection({
         <div className="text-muted-foreground flex items-center gap-2 px-3 pb-2 text-[10px] font-medium tracking-[0.1em] uppercase">
           <span>Discover · Outside your library</span>
         </div>
-        <div className="text-foreground px-3 pb-2 text-sm font-semibold">
-          Request to Add
-        </div>
-        <div role="status" className="text-muted-foreground flex items-center gap-2 px-3 py-4 text-sm">
+        <div className="text-foreground px-3 pb-2 text-sm font-semibold">{copy.heading}</div>
+        <div
+          role="status"
+          className="text-muted-foreground flex items-center gap-2 px-3 py-4 text-sm"
+        >
           {searching ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
           <span>{searching ? copy.searching : copy.empty}</span>
         </div>
@@ -99,27 +111,19 @@ export function RequestToAddSection({
   const visible = filtered.slice(0, limit);
 
   if (variant === "dialog") {
-    return (
-      <DialogVariant
-        items={visible}
-      />
-    );
+    return <DialogVariant items={visible} />;
   }
-  return (
-    <GridVariant
-      items={visible}
-    />
-  );
+  return <GridVariant items={visible} heading={copy.heading} />;
 }
 
-function HeaderCopy({ count }: { count: number }) {
+function HeaderCopy({ count, heading }: { count: number; heading: string }) {
   return (
     <>
       <div className="text-muted-foreground flex items-center gap-2 px-3 pt-2 pb-1 text-[10px] font-medium tracking-[0.1em] uppercase">
         <span>Discover · Outside your library</span>
       </div>
       <div className="text-foreground px-3 pb-1 text-sm font-semibold">
-        Request to Add
+        {heading}
         <span className="bg-muted text-muted-foreground rounded-full px-1.5 text-[10px]">
           {count}
         </span>
@@ -128,16 +132,10 @@ function HeaderCopy({ count }: { count: number }) {
   );
 }
 
-function DialogVariant({
-  items,
-}: {
-  items: RequestMediaResult[];
-}) {
+function DialogVariant({ items }: { items: RequestMediaResult[] }) {
   return (
     <div className="border-t border-white/5 pt-1">
-      <HeaderCopy
-        count={items.length}
-      />
+      <HeaderCopy count={items.length} heading="Request to Add" />
       <ul className="px-1 py-1">
         {items.map((item) => (
           <li key={cardKey(item)}>
@@ -150,14 +148,20 @@ function DialogVariant({
 }
 
 function DialogRow({ item }: { item: RequestMediaResult }) {
-  const poster = item.media_type === "audiobook" ? (item.poster_path ?? null) : tmdbImageURL(item.poster_path);
-  const Icon = item.media_type === "series" ? Tv : item.media_type === "audiobook" ? BookOpen : Film;
+  const poster =
+    item.media_type === "audiobook" ? (item.poster_path ?? null) : tmdbImageURL(item.poster_path);
+  const Icon =
+    item.media_type === "series" ? Tv : item.media_type === "audiobook" ? BookOpen : Film;
   const requestable = item.request.requestable;
   const unavailableLabel = requestable ? null : nonRequestableLabel(item);
 
   return (
     <Link
-      to={item.media_type === "audiobook" ? "/requests" : `/requests/${item.media_type}/${item.tmdb_id}`}
+      to={
+        item.media_type === "audiobook"
+          ? "/requests"
+          : `/requests/${item.media_type}/${item.tmdb_id}`
+      }
       className="hover:bg-muted/80 flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors"
     >
       <div
@@ -178,7 +182,11 @@ function DialogRow({ item }: { item: RequestMediaResult }) {
         <div className="truncate text-sm font-medium">{item.title}</div>
         <div className="text-muted-foreground text-xs">
           {item.year ? `${item.year} · ` : ""}
-          {item.media_type === "series" ? "Series" : item.media_type === "audiobook" ? "Audiobook" : "Movie"}
+          {item.media_type === "series"
+            ? "Series"
+            : item.media_type === "audiobook"
+              ? "Audiobook"
+              : "Movie"}
         </div>
       </div>
       {requestable ? (
@@ -197,11 +205,7 @@ function DialogRow({ item }: { item: RequestMediaResult }) {
   );
 }
 
-function GridVariant({
-  items,
-}: {
-  items: RequestMediaResult[];
-}) {
+function GridVariant({ items, heading }: { items: RequestMediaResult[]; heading: string }) {
   const count = items.length;
   const createRequest = useCreateMediaRequest();
   // Track each in-flight card key independently; the shared `useMutation`
@@ -249,7 +253,7 @@ function GridVariant({
             </span>
           </div>
           <h2 className="font-display text-foreground text-[clamp(1.25rem,1.6vw,1.55rem)] leading-tight font-semibold tracking-tight">
-            Request to Add
+            {heading}
           </h2>
         </div>
         <span className="inline-flex items-center gap-1.5 self-end rounded-full border border-amber-400/15 bg-amber-400/[0.06] px-2.5 py-1 text-[11px] font-medium tracking-wide text-amber-100/75 tabular-nums">

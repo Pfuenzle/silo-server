@@ -115,8 +115,11 @@ export function useToggleLiveTVFavorite(libraryId: number, kind: "channels" | "p
               .getQueryData<LiveTVPage<LiveTVChannel>>(liveTVKeys.channels(libraryId))
               ?.items.find((item) => item.id === id)
           : queryClient
-              .getQueryData<LiveTVGuide>(liveTVKeys.guide(libraryId, "", ""))
-              ?.items.find((item) => item.id === id);
+              .getQueriesData<LiveTVGuide>({
+                queryKey: ["livetv", "guide", libraryId],
+              })
+              .flatMap(([, guide]) => guide?.items ?? [])
+              .find((item) => item.id === id);
       queryClient.setQueryData(
         key,
         (current: readonly (LiveTVChannel | LiveTVProgramme)[] | undefined) => {

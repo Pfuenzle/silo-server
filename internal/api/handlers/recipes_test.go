@@ -47,6 +47,36 @@ func TestHandleListRecipesGroupsByCategory(t *testing.T) {
 	}
 }
 
+func TestHandleListIncludesLiveTVCurrentlyAiringRecipe(t *testing.T) {
+	h := &RecipeHandler{}
+	req := httptest.NewRequest(http.MethodGet, "/api/sections/recipes", nil)
+	rec := httptest.NewRecorder()
+
+	h.HandleList(rec, req)
+
+	var resp struct {
+		Categories map[string][]recipes.RecipeDefinition `json:"categories"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var found *recipes.RecipeDefinition
+	for _, definition := range resp.Categories[string(recipes.CategoryLibraryStaples)] {
+		if definition.Type == "currently_airing" {
+			definitionCopy := definition
+			found = &definitionCopy
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("currently_airing recipe missing from library_staples catalog")
+	}
+	if found.RequiredLibraryType != "livetv" {
+		t.Fatalf("required library type = %q, want livetv", found.RequiredLibraryType)
+	}
+}
+
 func TestHandleListExcludesHiddenRecipes(t *testing.T) {
 	h := &RecipeHandler{}
 	req := httptest.NewRequest(http.MethodGet, "/api/sections/recipes", nil)
