@@ -147,6 +147,42 @@ describe("PlayerControls", () => {
     expect(screen.getByRole("button", { name: "Edit markers" })).toBeInTheDocument();
   });
 
+  it("keeps the VOD quality menu available", () => {
+    const onQualitySelect = vi.fn();
+    renderControls(false, { onQualitySelect });
+
+    fireEvent.click(screen.getByRole("button", { name: "Quality" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Original/ }));
+
+    expect(onQualitySelect).toHaveBeenCalledWith("original");
+  });
+
+  it("keeps chapters hidden for compact live playback when quality options exist", () => {
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1024);
+    let resize = () => {};
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          resize = () => callback([], {} as ResizeObserver);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    renderControls(false, {
+      live: true,
+      chapters: [
+        { index: 0, title: "Opening", start_seconds: 0, end_seconds: 120, source: "embedded" },
+      ],
+    });
+
+    act(resize);
+    fireEvent.click(screen.getByRole("button", { name: "More player options" }));
+    expect(screen.queryByRole("button", { name: "Chapters" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Chapters" })).not.toBeInTheDocument();
+  });
+
   it("uses the mobile transport and hides hardware-volume controls on coarse pointers", () => {
     vi.stubGlobal(
       "matchMedia",

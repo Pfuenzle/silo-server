@@ -202,6 +202,20 @@ export function PlayerControls({
   // both prev/next slots so the cluster remains symmetric around the play
   // button. Movies (no episode nav at all) skip the slots entirely.
   const showEpisodeSlots = hasPrevEpisode || hasNextEpisode;
+  const qualityControlAvailable =
+    qualityOptions.length > 0 && typeof onQualitySelect === "function";
+  const qualityMenu =
+    !live || qualityControlAvailable ? (
+      <QualityMenu
+        options={qualityOptions}
+        activeId={activeQualityId}
+        isTranscoding={isTranscoding}
+        error={qualityError}
+        onSelect={onQualitySelect}
+        versions={versions}
+        onSwitchVersion={onSwitchVersion}
+      />
+    ) : null;
 
   return (
     <div
@@ -346,15 +360,9 @@ export function PlayerControls({
               audioTracks={audioTracks}
             />
             {!live ? (
-              <QualityMenu
-                options={qualityOptions}
-                activeId={activeQualityId}
-                isTranscoding={isTranscoding}
-                error={qualityError}
-                onSelect={onQualitySelect}
-                versions={versions}
-                onSwitchVersion={onSwitchVersion}
-              />
+              qualityMenu
+            ) : qualityControlAvailable ? (
+              qualityMenu
             ) : (
               <button
                 type="button"
@@ -551,15 +559,9 @@ export function PlayerControls({
               />
 
               {!live ? (
-                <QualityMenu
-                  options={qualityOptions}
-                  activeId={activeQualityId}
-                  isTranscoding={isTranscoding}
-                  error={qualityError}
-                  onSelect={onQualitySelect}
-                  versions={versions}
-                  onSwitchVersion={onSwitchVersion}
-                />
+                qualityMenu
+              ) : qualityControlAvailable ? (
+                qualityMenu
               ) : (
                 <button
                   type="button"
@@ -668,7 +670,7 @@ export function PlayerControls({
                 }}
               />
             )}
-            {(chapters?.length ?? 0) > 0 && (
+            {!live && (chapters?.length ?? 0) > 0 && (
               <OverflowAction
                 icon={<ListVideo className="h-5 w-5" />}
                 label="Chapters"
@@ -722,7 +724,7 @@ export function PlayerControls({
           hideTrigger
         />
       )}
-      {compactControls && (
+      {compactControls && !live && (
         <ChaptersMenu
           chapters={chapters ?? []}
           currentTime={currentTime}
