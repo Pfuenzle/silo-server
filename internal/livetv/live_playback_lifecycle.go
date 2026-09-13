@@ -70,7 +70,7 @@ func (s *LivePlaybackService) Lookup(grantID string) (LivePlaybackSession, bool)
 		s.mu.Unlock()
 		return LivePlaybackSession{}, false
 	}
-	copy := *session
+	copy := cloneLivePlaybackSession(*session)
 	s.mu.Unlock()
 	copy.providerURL = ""
 	return copy, true

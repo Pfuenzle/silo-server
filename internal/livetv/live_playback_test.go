@@ -270,6 +270,20 @@ func TestLivePlayback_HLSRewriter_rewritesURIAttributes(t *testing.T) {
 	}
 }
 
+func TestLivePlaybackSessionClone_doesNotShareResources(t *testing.T) {
+	// Given a playback session containing rewritten HLS resources.
+	original := LivePlaybackSession{resources: map[string]string{"r-1": "https://provider.example/segment.ts"}}
+
+	// When the session is copied for persistence.
+	clone := cloneLivePlaybackSession(original)
+	clone.resources["r-2"] = "https://provider.example/other.ts"
+
+	// Then later manifest mutations cannot change the persisted copy.
+	if len(original.resources) != 1 {
+		t.Fatalf("original resources = %#v, want one resource", original.resources)
+	}
+}
+
 func TestLivePlayback_HLSRewriter_doesNotExposeUnsupportedURI(t *testing.T) {
 	// Given an HLS manifest containing an unsupported URI scheme.
 	service := NewLivePlaybackService(LivePlaybackConfig{})

@@ -86,7 +86,7 @@ func (s *LivePlaybackService) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		}
 		s.mu.Lock()
 		rewritten := s.rewriteLiveManifest(session, string(body), s.proxyOrigin)
-		stored := *session
+		stored := cloneLivePlaybackSession(*session)
 		s.mu.Unlock()
 		if s.store != nil {
 			if err := s.store.Put(r.Context(), stored); err != nil {
@@ -122,7 +122,7 @@ func (s *LivePlaybackService) refreshActivity(ctx context.Context, grantID strin
 		return
 	}
 	current.LastSeenAt = s.now().UTC()
-	updated := *current
+	updated := cloneLivePlaybackSession(*current)
 	s.mu.Unlock()
 	if s.store != nil {
 		if err := s.store.Put(ctx, updated); err != nil {
@@ -133,4 +133,13 @@ func (s *LivePlaybackService) refreshActivity(ctx context.Context, grantID strin
 	if s.observer != nil {
 		s.observer.Activity(updated)
 	}
+}
+
+func cloneLivePlaybackSession(session LivePlaybackSession) LivePlaybackSession {
+	clone := session
+	clone.resources = make(map[string]string, len(session.resources))
+	for key, value := range session.resources {
+		clone.resources[key] = value
+	}
+	return clone
 }
