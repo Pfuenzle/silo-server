@@ -57,14 +57,15 @@ type LivePlaybackRequest struct {
 }
 
 type LivePlaybackConfig struct {
-	Fetch       *FetchService
-	ProxyOrigin string
-	Now         func() time.Time
-	IdleTimeout time.Duration
-	MaxLifetime time.Duration
-	Observer    LivePlaybackObserver
-	Authority   LivePlaybackSourceAuthority
-	Store       LivePlaybackStore
+	Fetch                                    *FetchService
+	ProxyOrigin                              string
+	Now                                      func() time.Time
+	IdleTimeout                              time.Duration
+	MaxLifetime                              time.Duration
+	Observer                                 LivePlaybackObserver
+	Authority                                LivePlaybackSourceAuthority
+	Store                                    LivePlaybackStore
+	AllowPrivateNetworksForConfiguredSources bool
 }
 
 type LivePlaybackGrant struct {
@@ -85,6 +86,7 @@ type LivePlaybackSession struct {
 	SourceID              int64
 	SourceKey             string
 	NodeReference         string
+	trustedSource         bool
 	Reconnects            int
 	resources             map[string]string
 	providerURL           string
@@ -95,18 +97,19 @@ type livePlaybackActiveRequest struct {
 }
 
 type LivePlaybackService struct {
-	fetch                    *FetchService
-	proxyOrigin              string
-	now                      func() time.Time
-	idleTimeout, maxLifetime time.Duration
-	observer                 LivePlaybackObserver
-	authority                LivePlaybackSourceAuthority
-	store                    LivePlaybackStore
-	mu                       sync.Mutex
-	sessions                 map[string]*LivePlaybackSession
-	reconnects               map[string]int
-	active                   map[string]map[*livePlaybackActiveRequest]struct{}
-	revoked                  map[string]struct{}
+	fetch                                    *FetchService
+	proxyOrigin                              string
+	now                                      func() time.Time
+	idleTimeout, maxLifetime                 time.Duration
+	observer                                 LivePlaybackObserver
+	authority                                LivePlaybackSourceAuthority
+	store                                    LivePlaybackStore
+	allowPrivateNetworksForConfiguredSources bool
+	mu                                       sync.Mutex
+	sessions                                 map[string]*LivePlaybackSession
+	reconnects                               map[string]int
+	active                                   map[string]map[*livePlaybackActiveRequest]struct{}
+	revoked                                  map[string]struct{}
 }
 
 func NewLivePlaybackService(config LivePlaybackConfig) *LivePlaybackService {
@@ -122,7 +125,7 @@ func NewLivePlaybackService(config LivePlaybackConfig) *LivePlaybackService {
 	if lifetime <= 0 {
 		lifetime = 12 * time.Hour
 	}
-	return &LivePlaybackService{fetch: config.Fetch, proxyOrigin: strings.TrimRight(strings.TrimSpace(config.ProxyOrigin), "/"), now: now, idleTimeout: idle, maxLifetime: lifetime, observer: config.Observer, authority: config.Authority, store: config.Store, sessions: make(map[string]*LivePlaybackSession), reconnects: make(map[string]int), active: make(map[string]map[*livePlaybackActiveRequest]struct{}), revoked: make(map[string]struct{})}
+	return &LivePlaybackService{fetch: config.Fetch, proxyOrigin: strings.TrimRight(strings.TrimSpace(config.ProxyOrigin), "/"), now: now, idleTimeout: idle, maxLifetime: lifetime, observer: config.Observer, authority: config.Authority, store: config.Store, allowPrivateNetworksForConfiguredSources: config.AllowPrivateNetworksForConfiguredSources, sessions: make(map[string]*LivePlaybackSession), reconnects: make(map[string]int), active: make(map[string]map[*livePlaybackActiveRequest]struct{}), revoked: make(map[string]struct{})}
 }
 
 func (s *LivePlaybackService) SetProxyOrigin(origin string) {
@@ -168,12 +171,12 @@ func (s *LivePlaybackService) Start(ctx context.Context, request LivePlaybackReq
 	if channel.LibraryID != request.LibraryID || channel.ID <= 0 || strings.TrimSpace(channel.StreamURL) == "" {
 		return LivePlaybackGrant{}, ErrLivePlaybackUnavailable
 	}
-	validated, err := s.fetch.policy.validateURL(ctx, s.fetch.resolver, channel.StreamURL)
+	validated, err := s.fetch.policy.validateURLWithPrivateNetworks(ctx, s.fetch.resolver, channel.StreamURL, s.allowPrivateNetworksForConfiguredSources)
 	if err != nil {
 		return LivePlaybackGrant{}, err
 	}
 	now := s.now().UTC()
-	session := &LivePlaybackSession{GrantID: uuid.NewString(), UserID: request.UserID, ProfileID: request.ProfileID, LibraryID: request.LibraryID, ChannelID: channel.ID, SessionID: request.SessionID, Mode: request.Mode, IsLive: true, CreatedAt: now, LastSeenAt: now, SourceID: channel.SourceID, SourceKey: string(channel.StableID), providerURL: validated.String(), resources: make(map[string]string)}
+	session := &LivePlaybackSession{GrantID: uuid.NewString(), UserID: request.UserID, ProfileID: request.ProfileID, LibraryID: request.LibraryID, ChannelID: channel.ID, SessionID: request.SessionID, Mode: request.Mode, IsLive: true, CreatedAt: now, LastSeenAt: now, SourceID: channel.SourceID, SourceKey: string(channel.StableID), trustedSource: s.allowPrivateNetworksForConfiguredSources, providerURL: validated.String(), resources: make(map[string]string)}
 	s.mu.Lock()
 	s.sessions[session.GrantID] = session
 	s.mu.Unlock()

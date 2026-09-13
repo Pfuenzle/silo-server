@@ -135,12 +135,13 @@ func (s *LivePlaybackService) authorize(ctx context.Context, grantID, userID, pr
 		s.mu.Unlock()
 		return nil, ErrLivePlaybackUnavailable
 	}
-	validated, err := s.fetch.policy.validateURL(ctx, s.fetch.resolver, channel.StreamURL)
+	validated, err := s.fetch.policy.validateURLWithPrivateNetworks(ctx, s.fetch.resolver, channel.StreamURL, s.allowPrivateNetworksForConfiguredSources)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, ErrLivePlaybackUnavailable
 	}
 	session.providerURL = validated.String()
+	session.trustedSource = s.allowPrivateNetworksForConfiguredSources
 	session.LastSeenAt = now
 	copy := *session
 	s.mu.Unlock()

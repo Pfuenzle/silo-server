@@ -168,6 +168,55 @@ func TestLivePlayback_ServeHLS_rewritesManifestAndRejectsUnauthorizedBeforeUpstr
 	}
 }
 
+func TestLivePlayback_ConfiguredPrivateSource_reachesProxyManifestButRejectsLoopbackResource(t *testing.T) {
+	// Given a configured xTeVe source resolved to a private LAN address and a manifest
+	// that attempts to point a child resource at loopback.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/live.m3u8" {
+			t.Fatalf("upstream path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		_, _ = io.WriteString(w, "#EXTM3U\n#EXT-X-MAP:URI=\"http://loopback.test/secret\"\nsegment.ts\n")
+	}))
+	t.Cleanup(upstream.Close)
+	port := serverPort(t, upstream.URL)
+	service := NewLivePlaybackService(LivePlaybackConfig{
+		Fetch: NewFetchService(FetchConfig{
+			Resolver: fixedResolver{"xteve.test": net.ParseIP("10.100.0.2"), "loopback.test": net.ParseIP("127.0.0.1")},
+			Dialer:   remappedDialer(upstream.URL),
+		}),
+		AllowPrivateNetworksForConfiguredSources: true,
+		ProxyOrigin:                              "https://silo.example",
+		Authority:                                liveTestAuthority{StreamURL: "http://xteve.test:" + port + "/live.m3u8"},
+	})
+
+	// When the owner requests the signed proxy manifest.
+	grant, err := service.Start(context.Background(), LivePlaybackRequest{
+		UserID: 7, ProfileID: "profile-a", LibraryID: 4, SessionID: "session-a",
+		Mode: LivePlaybackModeHLS, ChannelID: SourceQualifiedID("fixture|channel-1"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, grant.ManifestURL, nil)
+	req.Header.Set("X-Live-User-ID", "7")
+	req.Header.Set("X-Live-Profile-ID", "profile-a")
+	response := httptest.NewRecorder()
+	service.ServeHTTP(response, req)
+
+	// Then the trusted private source is reachable, while the untrusted child URL
+	// is omitted and the opaque public resource route remains available.
+	if response.Code != http.StatusOK {
+		t.Fatalf("manifest status = %d, body = %q", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "loopback.test") || strings.Contains(response.Body.String(), "secret") {
+		t.Fatalf("unsafe manifest resource leaked: %q", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "/stream/live/") {
+		t.Fatalf("manifest was not rewritten: %q", response.Body.String())
+	}
+}
+
 func TestLivePlayback_HLSRewriter_rewritesURIAttributes(t *testing.T) {
 	// Given an HLS manifest with a URI-bearing initialization tag.
 	service := NewLivePlaybackService(LivePlaybackConfig{})
@@ -179,6 +228,9 @@ func TestLivePlayback_HLSRewriter_rewritesURIAttributes(t *testing.T) {
 	// Then the initialization resource and segment use opaque Silo routes.
 	if strings.Contains(rewritten, "init.mp4") || strings.Contains(rewritten, "segment.ts") || len(session.resources) != 2 {
 		t.Fatalf("rewritten = %q, resources = %#v", rewritten, session.resources)
+	}
+	if strings.Contains(rewritten, `segment/r-1""`) || !strings.Contains(rewritten, `URI="https://silo.example/stream/live/grant/segment/r-1"`) {
+		t.Fatalf("URI attribute is not valid quoted HLS syntax: %q", rewritten)
 	}
 }
 

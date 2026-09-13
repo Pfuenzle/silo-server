@@ -112,5 +112,8 @@ func (s *LivePlaybackService) rewriteLiveURIAttribute(session *LivePlaybackSessi
 	resourceID := fmt.Sprintf("r-%d", len(session.resources)+1)
 	session.resources[resourceID] = providerURL
 	replacement := origin + "/stream/live/" + session.GrantID + "/segment/" + url.PathEscape(resourceID)
-	return line[:start] + "URI=\"" + replacement + "\"" + line[valueEnd:]
+	if quote != 0 {
+		return line[:start] + "URI=\"" + replacement + "\"" + line[valueEnd+1:]
+	}
+	return line[:start] + "URI=" + replacement + line[valueEnd:]
 }

@@ -998,10 +998,11 @@ func main() {
 		if mode == "proxy" {
 			srv := proxy.NewServer(watcher, tracker)
 			livePlayback := livetv.NewLivePlaybackService(livetv.LivePlaybackConfig{
-				Fetch:       livetv.NewFetchService(livetv.FetchConfig{Policy: livetv.NetworkPolicy{AllowPrivateNetworks: true}}),
-				ProxyOrigin: nodeURL,
-				Authority:   livetv.NewPostgresRepository(pool),
-				Store:       newLivePlaybackStore(redisClient, cfg.Auth.JWTSecret),
+				Fetch:                                    livetv.NewFetchService(livetv.FetchConfig{Policy: livetv.NetworkPolicy{AllowPrivateNetworks: true}}),
+				AllowPrivateNetworksForConfiguredSources: true,
+				ProxyOrigin:                              nodeURL,
+				Authority:                                livetv.NewPostgresRepository(pool),
+				Store:                                    newLivePlaybackStore(redisClient, cfg.Auth.JWTSecret),
 			})
 			livePlayback.StartSweeper(appCtx)
 			srv.SetLivePlayback(livePlayback)
@@ -1191,10 +1192,11 @@ func main() {
 	configureLiveTVRuntime(&deps, liveTVRepo, time.Now, livetv.FetchConfig{})
 	if apiRedisClient != nil {
 		livePlayback := livetv.NewLivePlaybackService(livetv.LivePlaybackConfig{
-			Fetch:       livetv.NewFetchService(livetv.FetchConfig{Policy: livetv.NetworkPolicy{AllowPrivateNetworks: true}}),
-			ProxyOrigin: integratedLivePlaybackOrigin(mode),
-			Authority:   liveTVRepo,
-			Store:       newLivePlaybackStore(apiRedisClient, cfg.Auth.JWTSecret),
+			Fetch:                                    livetv.NewFetchService(livetv.FetchConfig{Policy: livetv.NetworkPolicy{AllowPrivateNetworks: true}}),
+			AllowPrivateNetworksForConfiguredSources: true,
+			ProxyOrigin:                              integratedLivePlaybackOrigin(mode),
+			Authority:                                liveTVRepo,
+			Store:                                    newLivePlaybackStore(apiRedisClient, cfg.Auth.JWTSecret),
 		})
 		livePlayback.StartSweeper(appCtx)
 		deps.LivePlayback = livePlayback

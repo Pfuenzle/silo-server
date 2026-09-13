@@ -79,7 +79,7 @@ func (s *RedisLivePlaybackStore) Put(ctx context.Context, session LivePlaybackSe
 	if len(s.keyMaterial) == 0 {
 		return ErrLivePlaybackGrantIntegrity
 	}
-	stored := livePlaybackStoredSession{Session: session, ProviderURL: session.providerURL, Resources: session.resources}
+	stored := livePlaybackStoredSession{Session: session, ProviderURL: session.providerURL, Resources: session.resources, TrustedSource: session.trustedSource}
 	data, err := json.Marshal(stored)
 	if err != nil {
 		return fmt.Errorf("marshal Live TV playback grant: %w", err)
@@ -118,6 +118,7 @@ func (s *RedisLivePlaybackStore) decode(data []byte) (LivePlaybackSession, error
 	}
 	stored.Session.providerURL = stored.ProviderURL
 	stored.Session.resources = stored.Resources
+	stored.Session.trustedSource = stored.TrustedSource
 	return stored.Session, nil
 }
 
@@ -128,9 +129,10 @@ func (s *RedisLivePlaybackStore) signature(data []byte) []byte {
 }
 
 type livePlaybackStoredSession struct {
-	Session     LivePlaybackSession `json:"session"`
-	ProviderURL string              `json:"provider_url"`
-	Resources   map[string]string   `json:"resources,omitempty"`
+	Session       LivePlaybackSession `json:"session"`
+	ProviderURL   string              `json:"provider_url"`
+	Resources     map[string]string   `json:"resources,omitempty"`
+	TrustedSource bool                `json:"trusted_source,omitempty"`
 }
 
 func (s *RedisLivePlaybackStore) Delete(ctx context.Context, grantID string) error {

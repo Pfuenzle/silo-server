@@ -34,7 +34,7 @@ func (s *LivePlaybackService) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, ErrSourcePolicy.Error(), http.StatusBadGateway)
 		return
 	}
-	validated, err := s.fetch.policy.validateURL(r.Context(), s.fetch.resolver, providerURL)
+	validated, err := s.fetch.policy.validateURLWithPrivateNetworks(r.Context(), s.fetch.resolver, providerURL, session.trustedSource)
 	if err != nil {
 		s.RevokeContext(r.Context(), grantID)
 		http.Error(w, ErrSourcePolicy.Error(), http.StatusBadGateway)
@@ -47,7 +47,7 @@ func (s *LivePlaybackService) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, ErrSourcePolicy.Error(), http.StatusBadGateway)
 		return
 	}
-	client := *s.fetch.client
+	client := *s.fetch.clientFor(session.trustedSource)
 	client.Timeout = 0
 	response, err := client.Do(request)
 	if err != nil {
