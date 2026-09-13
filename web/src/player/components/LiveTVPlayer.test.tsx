@@ -81,6 +81,152 @@ describe("LiveTVPlayer", () => {
     expect(screen.queryByText(/\/\s*\d+:/)).not.toBeInTheDocument();
   });
 
+  it("shows an enabled quality control in compact mode and sends the selected server option", async () => {
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1024);
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          callback([], {} as ResizeObserver);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    apiMock.mockImplementation((path: string) => {
+      if (path.endsWith("/qualities")) {
+        return Promise.resolve({
+          options: [{ id: "q-720-2400000", label: "720p", height: 720, bitrate_kbps: 2400 }],
+          active_id: "q-720-2400000",
+          transcoding_supported: false,
+        });
+      }
+      return Promise.resolve({
+        options: [{ id: "q-720-2400000", label: "720p", height: 720, bitrate_kbps: 2400 }],
+        active_id: "q-720-2400000",
+        transcoding_supported: false,
+      });
+    });
+
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Quality" })).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("player-controls")).toHaveAttribute("data-compact", "true");
+    expect(screen.getByRole("button", { name: "Quality" })).not.toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Quality" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /720p/ }));
+
+    await waitFor(() =>
+      expect(apiMock).toHaveBeenCalledWith("/livetv/playback/grant-1/quality", {
+        method: "POST",
+        body: JSON.stringify({ id: "q-720-2400000" }),
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    expect(screen.queryByRole("button", { name: /seconds/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Chapters" })).not.toBeInTheDocument();
+  });
+
+  it("disables the unavailable control after a successful empty quality response", async () => {
+    apiMock.mockResolvedValue({
+      options: [],
+      transcoding_supported: false,
+      unsupported_reason: "no_variants",
+    });
+
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Quality unavailable" })).toBeDisabled(),
+    );
+    expect(screen.queryByRole("button", { name: "Quality" })).not.toBeInTheDocument();
+  });
+
+  it("shows server-owned live quality options without adding seek controls", async () => {
+    apiMock.mockImplementation((path: string) => {
+      if (path.endsWith("/qualities")) {
+        return Promise.resolve({
+          options: [{ id: "q-720-2400000", label: "720p", height: 720, bitrate_kbps: 2400 }],
+          active_id: "q-720-2400000",
+          transcoding_supported: false,
+        });
+      }
+      return Promise.resolve({
+        options: [{ id: "q-720-2400000", label: "720p", height: 720, bitrate_kbps: 2400 }],
+        active_id: "q-720-2400000",
+        transcoding_supported: false,
+      });
+    });
+
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Quality" })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Quality" })).not.toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Quality" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /720p/ }));
+    await waitFor(() =>
+      expect(apiMock).toHaveBeenCalledWith("/livetv/playback/grant-1/quality", {
+        method: "POST",
+        body: JSON.stringify({ id: "q-720-2400000" }),
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    expect(screen.queryByRole("button", { name: /seconds/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps quality unavailable for direct MPEG-TS even when the server reports variants", async () => {
+    apiMock.mockImplementation((path: string) => {
+      if (path.endsWith("/qualities")) {
+        return Promise.resolve({
+          options: [{ id: "q-720-2400000", label: "720p", height: 720, bitrate_kbps: 2400 }],
+          active_id: "q-720-2400000",
+          transcoding_supported: false,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+        mode="direct"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Quality unavailable" })).toBeDisabled(),
+    );
+    expect(screen.queryByRole("button", { name: "Quality" })).not.toBeInTheDocument();
+  });
+
   it("keeps the localized stop action available in the compact player", () => {
     render(
       <LiveTVPlayer
@@ -115,7 +261,13 @@ describe("LiveTVPlayer", () => {
     );
 
     unmount();
-    expect(apiMock).toHaveBeenCalledTimes(1);
+    expect(apiMock).toHaveBeenCalledWith("/livetv/playback/grant-1", {
+      method: "DELETE",
+      keepalive: true,
+    });
+    expect(apiMock.mock.calls.filter(([path]) => path === "/livetv/playback/grant-1").length).toBe(
+      1,
+    );
   });
 
   it("disables seeking and reports startup failure with retry", async () => {

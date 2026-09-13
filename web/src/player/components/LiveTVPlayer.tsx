@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/api/client";
-import { isSiloPlaybackUrl } from "@/api/livetv";
+import {
+  isSiloPlaybackUrl,
+  liveTVQualityResponseSchema,
+  type LiveTVQualityResponse,
+} from "@/api/livetv";
 import { liveTVT } from "@/lib/i18n";
 import { useCurrentProfile } from "@/hooks/useCurrentProfile";
 import { PlayerControls } from "./PlayerControls";
@@ -35,6 +39,13 @@ export function LiveTVPlayer({
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [quality, setQuality] = useState<LiveTVQualityResponse>({
+    options: [],
+    transcoding_supported: false,
+    unsupported_reason: "loading",
+  });
+  const [qualityError, setQualityError] = useState<string | null>(null);
+  const [qualityRevision, setQualityRevision] = useState(0);
   const { profile } = useCurrentProfile();
   const locale = profile?.language?.startsWith("de") ? "de" : "en";
   const streamIsSafe = isSiloPlaybackUrl(streamUrl);
@@ -126,7 +137,43 @@ export function LiveTVPlayer({
       video.removeEventListener("pause", handlePause);
       video.removeEventListener("error", handleError);
     };
-  }, [mode, startupTimeoutMs, streamIsSafe, streamUrl]);
+  }, [mode, qualityRevision, startupTimeoutMs, streamIsSafe, streamUrl]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.resolve(api<unknown>(`/livetv/playback/${encodeURIComponent(grantId)}/qualities`))
+      .then((value) => {
+        if (!cancelled) setQuality(liveTVQualityResponseSchema.parse(value));
+      })
+      .catch((error: unknown) => {
+        if (!cancelled)
+          setQualityError(
+            error instanceof Error ? error.message : "Live TV quality is unavailable",
+          );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [grantId]);
+
+  const selectQuality = (id: string) => {
+    setQualityError(null);
+    void Promise.resolve(
+      api<unknown>(`/livetv/playback/${encodeURIComponent(grantId)}/quality`, {
+        method: "POST",
+        body: JSON.stringify({ id }),
+        headers: { "Content-Type": "application/json" },
+      }),
+    )
+      .then((value) => {
+        const selected = liveTVQualityResponseSchema.parse(value);
+        setQuality((current) => ({ ...current, active_id: selected.active_id }));
+        setQualityRevision((revision) => revision + 1);
+      })
+      .catch((error: unknown) => {
+        setQualityError(error instanceof Error ? error.message : "Live TV quality change failed");
+      });
+  };
 
   useEffect(() => {
     return () => {
@@ -227,11 +274,27 @@ export function LiveTVPlayer({
           onSubtitleDelayChange={() => {}}
           audioTracks={[]}
           activeAudioIndex={0}
-          qualityOptions={[]}
-          activeQualityId="auto"
+          qualityOptions={
+            mode === "hls"
+              ? quality.options.map((option) => ({
+                  id: option.id,
+                  label: option.label,
+                  sublabel: option.bitrate_kbps ? `${option.bitrate_kbps} kbps` : "Live",
+                  resolution: option.height ? `${option.height}p` : "Live",
+                  bitrateKbps: option.bitrate_kbps ?? 0,
+                  isOriginal: false,
+                }))
+              : []
+          }
+          activeQualityId={quality.active_id ?? "auto"}
           isTranscoding={false}
-          qualityError={null}
-          onQualitySelect={() => {}}
+          qualityError={
+            qualityError ??
+            (quality.unsupported_reason === "server_transcoding_unavailable"
+              ? "Server transcoding unavailable for this live source"
+              : null)
+          }
+          onQualitySelect={selectQuality}
           showPlaybackInfo={false}
           onTogglePlaybackInfo={() => {}}
           onPlayPause={togglePlayback}
