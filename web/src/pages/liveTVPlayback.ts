@@ -2,11 +2,12 @@ type LiveTVPlaybackResponseLike = {
   readonly playable: boolean;
   readonly url?: string;
   readonly grant_id?: string;
+  readonly mode?: "direct" | "hls";
   readonly error_code?: string;
 };
 
 export type LiveTVPlaybackOutcome =
-  | { readonly kind: "playable"; readonly url: string; readonly grantId: string }
+  | { readonly kind: "playable"; readonly url: string; readonly grantId: string; readonly mode: "direct" | "hls" }
   | { readonly kind: "unavailable" }
   | { readonly kind: "error"; readonly error: string };
 
@@ -15,7 +16,7 @@ export function liveTVPlaybackOutcome(
 ): LiveTVPlaybackOutcome {
   if (response instanceof Error) return { kind: "error", error: response.message };
   if (response.playable && response.url && response.grant_id && isSiloPlaybackUrl(response.url)) {
-    return { kind: "playable", url: response.url, grantId: response.grant_id };
+    return { kind: "playable", url: response.url, grantId: response.grant_id, mode: response.mode ?? "hls" };
   }
   return { kind: "unavailable" };
 }

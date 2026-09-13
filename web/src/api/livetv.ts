@@ -72,6 +72,7 @@ export const liveTVPlaybackResponseSchema = z.object({
   playable: z.boolean(),
   url: z.string().optional(),
   grant_id: z.string().optional(),
+  mode: z.enum(["direct", "hls"]).optional(),
   error_code: z.string().optional(),
 });
 export type LiveTVPlaybackResponse = z.infer<typeof liveTVPlaybackResponseSchema>;

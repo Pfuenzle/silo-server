@@ -9,11 +9,13 @@ describe("Live TV playback outcomes", () => {
         playable: true,
         url: "/api/v1/stream/live/grant-1/manifest",
         grant_id: "grant-1",
+        mode: "direct",
       }),
     ).toEqual({
       kind: "playable",
       url: "/api/v1/stream/live/grant-1/manifest",
       grantId: "grant-1",
+      mode: "direct",
     });
   });
 
