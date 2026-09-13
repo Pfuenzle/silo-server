@@ -853,6 +853,20 @@ func (h *SectionHandler) loadResolvedHomeSections(r *http.Request) ([]sections.R
 		return nil, nil, catalog.AccessFilter{}, profileID, err
 	}
 
+	libraries, libraryErr := h.currentLibraries(r.Context())
+	if libraryErr != nil {
+		return nil, nil, catalog.AccessFilter{}, profileID, libraryErr
+	}
+	if err := h.repo.EnsureHomeCurrentlyAiring(r.Context(), libraries); err != nil {
+		return nil, nil, catalog.AccessFilter{}, profileID, err
+	}
+	if len(adminSections) == 0 {
+		adminSections, err = h.repo.ListByScope(r.Context(), "home", nil)
+		if err != nil {
+			return nil, nil, catalog.AccessFilter{}, profileID, err
+		}
+	}
+
 	// Fall back to default sections when none are admin-configured.
 	if len(adminSections) == 0 {
 		adminSections, err = h.defaultHomeSections(r.Context())
@@ -860,12 +874,6 @@ func (h *SectionHandler) loadResolvedHomeSections(r *http.Request) ([]sections.R
 			return nil, nil, catalog.AccessFilter{}, profileID, err
 		}
 	}
-
-	libraries, libraryErr := h.currentLibraries(r.Context())
-	if libraryErr != nil {
-		return nil, nil, catalog.AccessFilter{}, profileID, libraryErr
-	}
-	adminSections = sections.EnsureCurrentlyAiring(adminSections, libraries)
 
 	var overrides []sections.ProfileSectionOverride
 	if h.StoreProvider != nil && profileID != "" {

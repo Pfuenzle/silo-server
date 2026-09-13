@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Silo-Server/silo-server/internal/idgen"
+	"github.com/Silo-Server/silo-server/internal/models"
 )
 
 // ErrSectionNotFound is returned when a section cannot be found.
@@ -133,6 +134,42 @@ func (r *Repository) ListByScopeAll(ctx context.Context, scope string, libraryID
 	defer rows.Close()
 
 	return scanSections(rows)
+}
+
+func (r *Repository) EnsureHomeCurrentlyAiring(ctx context.Context, libraries []*models.MediaFolder) error {
+	for _, library := range libraries {
+		if library == nil || library.Type != "livetv" {
+			continue
+		}
+		var exists bool
+		if err := r.pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM page_sections
+				WHERE scope = 'home' AND library_id IS NULL AND section_type = $1
+			)`, SectionCurrentlyAiring).Scan(&exists); err != nil {
+			return fmt.Errorf("checking currently airing home section: %w", err)
+		}
+		if exists {
+			return nil
+		}
+		position, err := r.nextHomePosition(ctx)
+		if err != nil {
+			return fmt.Errorf("loading currently airing home section position: %w", err)
+		}
+		_, err = r.Create(ctx, &PageSection{
+			Scope:       "home",
+			Position:    position,
+			SectionType: SectionCurrentlyAiring,
+			Title:       "Currently airing",
+			ItemLimit:   20,
+			Enabled:     true,
+		})
+		if err != nil {
+			return fmt.Errorf("creating currently airing home section: %w", err)
+		}
+		return nil
+	}
+	return nil
 }
 
 // ListTrendingDiscoverConfigs returns the config JSON of every enabled
