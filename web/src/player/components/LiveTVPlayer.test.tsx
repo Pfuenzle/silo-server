@@ -3,18 +3,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { LiveTVPlayer } from "./LiveTVPlayer";
 
 const apiMock = vi.hoisted(() => vi.fn());
-const accessTokenMock = vi.hoisted(() => vi.fn(() => null as string | null));
 const profileMock = vi.hoisted(() => ({ profile: null as { language?: string } | null }));
-const storageMock = vi.hoisted(() => ({
-  KEYS: { PROFILE_ID: "profile_id" },
-  get: vi.fn(() => "profile-1"),
-}));
 const hlsConstructorMock = vi.hoisted(() => vi.fn());
 const hlsCallsMock = vi.hoisted(() => vi.fn());
 const hlsSupportedMock = vi.hoisted(() => vi.fn(() => false));
-vi.mock("@/api/client", () => ({ api: apiMock, getAccessToken: accessTokenMock }));
+vi.mock("@/api/client", () => ({ api: apiMock }));
 vi.mock("@/hooks/useCurrentProfile", () => ({ useCurrentProfile: () => profileMock }));
-vi.mock("@/utils/storage", () => ({ storage: storageMock }));
 vi.mock("hls.js", () => ({
   default: class MockHls {
     static isSupported() {
@@ -39,9 +33,6 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   apiMock.mockReset();
-  accessTokenMock.mockReset();
-  accessTokenMock.mockReturnValue(null);
-  storageMock.get.mockReturnValue("profile-1");
   profileMock.profile = null;
   hlsConstructorMock.mockReset();
   hlsCallsMock.mockReset();
@@ -126,8 +117,7 @@ describe("LiveTVPlayer", () => {
     expect(screen.getByText("Live-Wiedergabe wird gestartet…")).toBeInTheDocument();
   });
 
-  it("adds the access token to native stream URLs", async () => {
-    accessTokenMock.mockReturnValue("access-token");
+  it("keeps native stream URLs limited to the opaque server binding", async () => {
 
     render(
       <LiveTVPlayer
@@ -140,8 +130,8 @@ describe("LiveTVPlayer", () => {
 
     await waitFor(() => {
       const source = document.querySelector("video")?.src ?? "";
-      expect(source).toContain("token=access-token");
-      expect(source).toContain("profile_id=profile-1");
+      expect(source).not.toContain("access-token");
+      expect(source).not.toContain("profile_id");
     });
   });
 

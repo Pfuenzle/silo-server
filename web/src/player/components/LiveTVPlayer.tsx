@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, getAccessToken } from "@/api/client";
+import { api } from "@/api/client";
 import { isSiloPlaybackUrl } from "@/api/livetv";
 import { liveTVT } from "@/lib/i18n";
 import { useCurrentProfile } from "@/hooks/useCurrentProfile";
-import { storage } from "@/utils/storage";
 
 interface LiveTVPlayerProps {
   readonly channelId: string;
@@ -58,15 +57,7 @@ export function LiveTVPlayer({
       attachMedia: (element: HTMLVideoElement) => void;
     } | null = null;
     let cancelled = false;
-    const accessToken = getAccessToken();
-    const profileId = storage.get(storage.KEYS.PROFILE_ID);
-    const streamParams = new URLSearchParams();
-    if (accessToken) streamParams.set("token", accessToken);
-    if (profileId) streamParams.set("profile_id", profileId);
-    const query = streamParams.toString();
-    const streamURL = query
-      ? `${streamUrl}${streamUrl.includes("?") ? "&" : "?"}${query}`
-      : streamUrl;
+    const streamURL = streamUrl;
     void import("hls.js")
       .then(({ default: Hls }) => {
         if (cancelled) return;
@@ -75,10 +66,6 @@ export function LiveTVPlayer({
             enableWorker: true,
             lowLatencyMode: true,
             backBufferLength: 0,
-            xhrSetup: (request: XMLHttpRequest) => {
-              if (accessToken) request.setRequestHeader("Authorization", `Bearer ${accessToken}`);
-              if (profileId) request.setRequestHeader("X-Profile-Id", profileId);
-            },
           });
           hls.attachMedia(video);
           hls.loadSource(streamURL);
