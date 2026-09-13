@@ -390,7 +390,8 @@ function Guide({
               className="grid min-w-[42rem] grid-cols-[8rem_1fr] border-b last:border-b-0"
             >
               <div className="text-muted-foreground truncate p-3 text-xs">
-                {programmes.find((item) => item.channel_id === channelId)?.channel_name ?? channelId}
+                {programmes.find((item) => item.channel_id === channelId)?.channel_name ||
+                  liveTVT("unknownChannel", locale)}
               </div>
               <div className="grid grid-cols-4">
                 {programmes
@@ -675,7 +676,7 @@ export function LiveTVLibraryPage({
               onOpen={(item) =>
                 setSelectedItem({
                   channelId: item.channel_id,
-                  channelName: item.channel_name ?? item.channel_id,
+                  channelName: item.channel_name || liveTVT("unknownChannel", locale),
                   title: item.title,
                   artwork: item.artwork,
                   description: item.description,
@@ -738,7 +739,7 @@ export function LiveTVLibraryPage({
               onOpen={(item) =>
                 setSelectedItem({
                   channelId: item.channel_id,
-                  channelName: item.channel_name ?? item.channel_id,
+                  channelName: item.channel_name || liveTVT("unknownChannel", locale),
                   title: item.title,
                   artwork: item.artwork,
                   description: item.description,

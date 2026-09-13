@@ -73,6 +73,7 @@ export function LiveTVHomeSection({
         title={liveTVT("homeCurrent", locale)}
         programmes={sections.currently_airing}
         libraryId={libraryId}
+        locale={locale}
       />
       {currentOnly ? null : (
         <>
@@ -102,10 +103,12 @@ function CurrentlyAiringRail({
   title,
   programmes,
   libraryId,
+  locale,
 }: {
   readonly title: string;
   readonly programmes: readonly LiveTVProgramme[];
   readonly libraryId?: number;
+  readonly locale: LiveTVLocale;
 }) {
   if (programmes.length === 0) return null;
 
@@ -127,7 +130,7 @@ function CurrentlyAiringRail({
             <div className="min-w-0">
               <h3 className="truncate text-sm font-semibold">{programme.title}</h3>
               <p className="text-muted-foreground mt-1 truncate text-xs">
-                {programme.channel_name ?? programme.channel_id}
+                {programme.channel_name || liveTVT("unknownChannel", locale)}
               </p>
               <p className="text-muted-foreground mt-2 text-xs">
                 {formatTime(programme.starts_at)} – {formatTime(programme.ends_at)}

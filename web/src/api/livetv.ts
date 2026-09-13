@@ -18,6 +18,7 @@ export const liveTVChannelSchema = z.object({
   number: z.string().optional(),
   category: z.string().optional(),
   artwork: z.unknown().optional(),
+  provider_logo_supplied: z.boolean().optional(),
   rating: z.unknown().optional(),
   stale: z.boolean().optional(),
 });
@@ -31,6 +32,7 @@ export const liveTVProgrammeSchema = z.object({
   starts_at: z.string(),
   ends_at: z.string(),
   artwork: z.unknown().optional(),
+  provider_logo_supplied: z.boolean().optional(),
   rating: z.unknown().optional(),
 });
 export type LiveTVProgramme = z.infer<typeof liveTVProgrammeSchema>;
