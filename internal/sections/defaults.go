@@ -81,6 +81,37 @@ func DefaultHomeSections(libraries []*models.MediaFolder) []*PageSection {
 	return result
 }
 
+// EnsureCurrentlyAiring adds the Live TV home rail to an existing layout when
+// a deployment predates the section default. Existing section order is kept.
+func EnsureCurrentlyAiring(existing []*PageSection, libraries []*models.MediaFolder) []*PageSection {
+	for _, section := range existing {
+		if section != nil && section.SectionType == SectionCurrentlyAiring {
+			return existing
+		}
+	}
+	for _, library := range libraries {
+		if library == nil || library.Type != "livetv" {
+			continue
+		}
+		position := 0
+		for _, section := range existing {
+			if section != nil && section.Position >= position {
+				position = section.Position + 1
+			}
+		}
+		return append(existing, &PageSection{
+			ID:          "default-currently-airing",
+			Scope:       "home",
+			Position:    position,
+			SectionType: SectionCurrentlyAiring,
+			Title:       "Currently airing",
+			ItemLimit:   20,
+			Enabled:     true,
+		})
+	}
+	return existing
+}
+
 func hasAudiobookLibrary(libraries []*models.MediaFolder) bool {
 	for _, library := range libraries {
 		if library != nil && IsAudiobookLibraryType(library.Type) {

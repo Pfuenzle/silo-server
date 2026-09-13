@@ -861,6 +861,12 @@ func (h *SectionHandler) loadResolvedHomeSections(r *http.Request) ([]sections.R
 		}
 	}
 
+	libraries, libraryErr := h.currentLibraries(r.Context())
+	if libraryErr != nil {
+		return nil, nil, catalog.AccessFilter{}, profileID, libraryErr
+	}
+	adminSections = sections.EnsureCurrentlyAiring(adminSections, libraries)
+
 	var overrides []sections.ProfileSectionOverride
 	if h.StoreProvider != nil && profileID != "" {
 		store, storeErr := h.StoreProvider.ForUser(r.Context(), userID)
@@ -901,10 +907,6 @@ func (h *SectionHandler) loadResolvedHomeSections(r *http.Request) ([]sections.R
 		}
 	}
 
-	libraries, libraryErr := h.currentLibraries(r.Context())
-	if libraryErr != nil {
-		return nil, nil, catalog.AccessFilter{}, profileID, libraryErr
-	}
 	resolved = filterSectionsByLibraryType(resolved, libraries)
 	resolved = filterResolvedSectionsByAccess(resolved, accessFilter)
 

@@ -112,6 +112,33 @@ func TestDefaultHomeSectionsCurrentlyAiringIsOrderedAndLiveTVGated(t *testing.T)
 	}
 }
 
+func TestEnsureCurrentlyAiringAddsMissingRailToExistingLayout(t *testing.T) {
+	existing := []*PageSection{
+		{ID: "custom", Scope: "home", Position: 0, SectionType: SectionContinueWatching, Title: "Continue Watching"},
+		{ID: "recent", Scope: "home", Position: 4, SectionType: SectionRecentlyAdded, Title: "Recently Added"},
+	}
+
+	got := EnsureCurrentlyAiring(existing, []*models.MediaFolder{{ID: 8, Type: "livetv"}})
+
+	if len(got) != len(existing)+1 {
+		t.Fatalf("section count = %d, want %d", len(got), len(existing)+1)
+	}
+	current := got[len(got)-1]
+	if current.ID != "default-currently-airing" || current.SectionType != SectionCurrentlyAiring || current.Position != 5 {
+		t.Fatalf("unexpected currently airing section: %+v", current)
+	}
+}
+
+func TestEnsureCurrentlyAiringDoesNotDuplicateOrAddWithoutLiveTV(t *testing.T) {
+	existing := []*PageSection{{ID: "current", SectionType: SectionCurrentlyAiring, Position: 2}}
+	if got := EnsureCurrentlyAiring(existing, []*models.MediaFolder{{Type: "movies"}}); len(got) != 1 {
+		t.Fatalf("without Live TV section count = %d, want 1", len(got))
+	}
+	if got := EnsureCurrentlyAiring(existing, []*models.MediaFolder{{Type: "livetv"}}); len(got) != 1 {
+		t.Fatalf("with existing rail section count = %d, want 1", len(got))
+	}
+}
+
 func TestDefaultHomeSectionsWithAudiobookLibrary(t *testing.T) {
 	libraries := []*models.MediaFolder{
 		{ID: 7, Name: "Movies", Type: "movies", SortOrder: 1},
