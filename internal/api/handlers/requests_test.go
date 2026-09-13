@@ -3,6 +3,8 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -248,6 +250,27 @@ func TestHandleDiscoverReturnsSafeTMDBProviderError(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "api_key") || strings.Contains(rec.Body.String(), "Invalid API key") {
 		t.Fatalf("response exposed provider detail: %s", rec.Body.String())
+	}
+}
+
+func TestHandleDiscoverMapsWrappedTMDBProviderError(t *testing.T) {
+	svc := &fakeRequestService{discoverAllFn: func() ([]mediarequests.DiscoverySection, error) {
+		return nil, fmt.Errorf("request provider failed: %w", errors.New("tmdb: request failed"))
+	}}
+	h := NewRequestsHandler(svc)
+
+	rec := httptest.NewRecorder()
+	h.HandleDiscover(rec, authedRequest("GET", "/api/v1/requests/discover"))
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["error"] != "tmdb_provider_error" || body["message"] != "TMDB could not complete the request. Check the TMDB provider configuration and try again." {
+		t.Fatalf("body = %#v", body)
 	}
 }
 

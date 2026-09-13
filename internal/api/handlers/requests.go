@@ -685,6 +685,8 @@ func writeRequestServiceError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &tmdbErr):
 		writeError(w, http.StatusBadGateway, "tmdb_provider_error", tmdbProviderErrorMessage(tmdbErr.HTTPStatus))
+	case isWrappedTMDBProviderError(err):
+		writeError(w, http.StatusBadGateway, "tmdb_provider_error", "TMDB could not complete the request. Check the TMDB provider configuration and try again.")
 	case errors.As(err, &quota):
 		writeJSON(w, http.StatusTooManyRequests, struct {
 			Error      string `json:"error"`
@@ -718,6 +720,10 @@ func writeRequestServiceError(w http.ResponseWriter, err error) {
 	default:
 		writeError(w, http.StatusInternalServerError, "internal_error", "Request operation failed")
 	}
+}
+
+func isWrappedTMDBProviderError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "tmdb:")
 }
 
 func tmdbProviderErrorMessage(status int) string {
