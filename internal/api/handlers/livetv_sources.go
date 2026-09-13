@@ -167,7 +167,15 @@ func (h *LiveTVHandler) HandleRefreshSource(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "Live TV refresh is not configured")
 		return
 	}
-	if _, err := h.runtime.RefreshSource(r.Context(), source, nil); err != nil {
+	var mappings map[string]livetv.ChannelMapping
+	if source.Kind == livetv.SourceKindEPG {
+		mappings, err = h.repo.ListEPGChannelMappings(r.Context(), library.ID, source.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load Live TV EPG mappings")
+			return
+		}
+	}
+	if _, err := h.runtime.RefreshSource(r.Context(), source, mappings); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "refresh_failed", "Live TV source refresh failed")
 		return
 	}
