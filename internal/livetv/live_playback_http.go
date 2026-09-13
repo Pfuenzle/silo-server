@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 func (s *LivePlaybackService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +68,11 @@ func (s *LivePlaybackService) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
 	if endpoint == "manifest" && session.Mode == LivePlaybackModeHLS {
+		contentType := response.Header.Get("Content-Type")
+		if strings.HasPrefix(contentType, "video/mp2t") || strings.HasPrefix(contentType, "application/octet-stream") {
+			http.Error(w, "Live TV provider returned MPEG-TS; HLS playback is unavailable", http.StatusUnsupportedMediaType)
+			return
+		}
 		body, readErr := io.ReadAll(io.LimitReader(response.Body, s.fetch.policy.MaxBodyBytes+1))
 		if readErr != nil {
 			s.RevokeContext(r.Context(), grantID)

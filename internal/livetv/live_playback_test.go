@@ -168,6 +168,42 @@ func TestLivePlayback_ServeHLS_rewritesManifestAndRejectsUnauthorizedBeforeUpstr
 	}
 }
 
+func TestLivePlayback_ServeHLS_rejectsRawMPEGTSWithClearFormatError(t *testing.T) {
+	// Given a provider that returns a raw MPEG-TS stream instead of an HLS manifest.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "video/mp2t")
+		_, _ = w.Write([]byte{0x47, 0x00, 0x00, 0x00})
+	}))
+	t.Cleanup(upstream.Close)
+	service := NewLivePlaybackService(LivePlaybackConfig{
+		Fetch:       NewFetchService(FetchConfig{Resolver: liveTestResolver{IP: net.ParseIP("198.51.100.2")}, Dialer: liveDialer(upstream.Listener.Addr().String())}),
+		ProxyOrigin: "https://silo.example",
+		Authority:   liveTestAuthority{},
+	})
+	grant, err := service.Start(context.Background(), LivePlaybackRequest{
+		UserID: 7, ProfileID: "profile-a", LibraryID: 4, SessionID: "session-a", Mode: LivePlaybackModeHLS,
+		ChannelID: SourceQualifiedID("fixture|channel-1"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// When the owner requests the HLS manifest endpoint.
+	request := httptest.NewRequest(http.MethodGet, grant.ManifestURL, nil)
+	request.Header.Set("X-Live-User-ID", "7")
+	request.Header.Set("X-Live-Profile-ID", "profile-a")
+	recorder := httptest.NewRecorder()
+	service.ServeHTTP(recorder, request)
+
+	// Then the proxy reports the actual unsupported format without buffering it as HLS.
+	if recorder.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnsupportedMediaType)
+	}
+	if !strings.Contains(recorder.Body.String(), "MPEG-TS") {
+		t.Fatalf("error = %q, want MPEG-TS explanation", recorder.Body.String())
+	}
+}
+
 func TestLivePlayback_ConfiguredPrivateSource_reachesProxyManifestButRejectsLoopbackResource(t *testing.T) {
 	// Given a configured xTeVe source resolved to a private LAN address and a manifest
 	// that attempts to point a child resource at loopback.
