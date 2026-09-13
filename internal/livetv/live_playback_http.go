@@ -15,7 +15,7 @@ func (s *LivePlaybackService) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, ErrLivePlaybackNotFound.Error(), http.StatusNotFound)
 		return
 	}
-	session, err := s.authorize(r.Context(), grantID, r.Header.Get("X-Live-User-ID"), r.Header.Get("X-Live-Profile-ID"))
+	session, err := s.authorize(r.Context(), grantID, r.Header.Get("X-Live-User-ID"), r.Header.Get("X-Live-Profile-ID"), r.URL.Query().Get("live_token"))
 	if err != nil {
 		status := http.StatusNotFound
 		if errors.Is(err, ErrLivePlaybackForbidden) {

@@ -2,7 +2,7 @@ package livetv
 
 import (
 	"fmt"
-	"net/url"
+	urlpkg "net/url"
 	"path"
 	"strings"
 )
@@ -15,6 +15,21 @@ func (s *LivePlaybackService) resourceURL(session *LivePlaybackSession, resource
 		return providerURL, nil
 	}
 	return "", ErrSourcePolicy
+}
+
+func mediaURL(origin, grantID, endpoint, resource, token string) string {
+	mediaURL := origin + "/stream/live/" + grantID + "/" + endpoint
+	if resource != "" {
+		mediaURL += "/" + urlpkg.PathEscape(resource)
+	}
+	values := urlpkg.Values{}
+	if token != "" {
+		values.Set("live_token", token)
+	}
+	if len(values) == 0 {
+		return mediaURL
+	}
+	return mediaURL + "?" + values.Encode()
 }
 
 func parseLiveRoute(rawPath string) (string, string, string, bool) {
@@ -32,14 +47,14 @@ func parseLiveRoute(rawPath string) (string, string, string, bool) {
 }
 
 func resolveLiveResource(base, resource string) (string, error) {
-	baseURL, err := url.Parse(base)
+	baseURL, err := urlpkg.Parse(base)
 	if err != nil {
 		return "", ErrSourcePolicy
 	}
 	if resource == "" {
 		return baseURL.String(), nil
 	}
-	resolved, err := url.Parse(resource)
+	resolved, err := urlpkg.Parse(resource)
 	if err != nil || strings.Contains(resource, "..") {
 		return "", ErrSourcePolicy
 	}
@@ -76,7 +91,7 @@ func (s *LivePlaybackService) rewriteLiveManifest(session *LivePlaybackSession, 
 			continue
 		}
 		session.resources[resourceID] = providerURL
-		lines[index] = origin + "/stream/live/" + session.GrantID + "/segment/" + url.PathEscape(resourceID)
+		lines[index] = mediaURL(origin, session.GrantID, "segment", resourceID, session.mediaToken)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -111,7 +126,7 @@ func (s *LivePlaybackService) rewriteLiveURIAttribute(session *LivePlaybackSessi
 	}
 	resourceID := fmt.Sprintf("r-%d", len(session.resources)+1)
 	session.resources[resourceID] = providerURL
-	replacement := origin + "/stream/live/" + session.GrantID + "/segment/" + url.PathEscape(resourceID)
+	replacement := mediaURL(origin, session.GrantID, "segment", resourceID, session.mediaToken)
 	if quote != 0 {
 		return line[:start] + "URI=\"" + replacement + "\"" + line[valueEnd+1:]
 	}
