@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 // profileKey is the context key for storing the profile ID.
@@ -15,6 +16,9 @@ const profileKey contextKey = "profile_id"
 func RequireProfile(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		profileID := r.Header.Get("X-Profile-Id")
+		if profileID == "" && strings.HasPrefix(r.URL.Path, "/stream/live/") {
+			profileID = r.URL.Query().Get("profile_id")
+		}
 		if profileID == "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)

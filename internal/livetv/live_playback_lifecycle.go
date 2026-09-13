@@ -126,6 +126,10 @@ func (s *LivePlaybackService) authorize(ctx context.Context, grantID, userID, pr
 		s.mu.Unlock()
 		return nil, ErrLivePlaybackUnavailable
 	}
+	if s.fetch == nil {
+		s.mu.Unlock()
+		return nil, ErrLivePlaybackUnavailable
+	}
 	channel, err := s.authority.ResolveLiveChannel(ctx, session.LibraryID, SourceQualifiedID(session.SourceKey))
 	if err != nil || channel.ID != session.ChannelID || channel.LibraryID != session.LibraryID || channel.SourceID != session.SourceID || strings.TrimSpace(channel.StreamURL) == "" {
 		s.mu.Unlock()

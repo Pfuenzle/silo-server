@@ -3,14 +3,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { LiveTVPlayer } from "./LiveTVPlayer";
 
 const apiMock = vi.hoisted(() => vi.fn());
+const accessTokenMock = vi.hoisted(() => vi.fn(() => null as string | null));
 const profileMock = vi.hoisted(() => ({ profile: null as { language?: string } | null }));
-vi.mock("@/api/client", () => ({ api: apiMock }));
+const storageMock = vi.hoisted(() => ({
+  KEYS: { PROFILE_ID: "profile_id" },
+  get: vi.fn(() => "profile-1"),
+}));
+vi.mock("@/api/client", () => ({ api: apiMock, getAccessToken: accessTokenMock }));
 vi.mock("@/hooks/useCurrentProfile", () => ({ useCurrentProfile: () => profileMock }));
+vi.mock("@/utils/storage", () => ({ storage: storageMock }));
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   apiMock.mockReset();
+  accessTokenMock.mockReset();
+  accessTokenMock.mockReturnValue(null);
+  storageMock.get.mockReturnValue("profile-1");
   profileMock.profile = null;
 });
 
@@ -89,5 +98,24 @@ describe("LiveTVPlayer", () => {
 
     expect(screen.getByRole("button", { name: "Live-Wiedergabe beenden" })).toBeInTheDocument();
     expect(screen.getByText("Live-Wiedergabe wird gestartet…")).toBeInTheDocument();
+  });
+
+  it("adds the access token to native stream URLs", async () => {
+    accessTokenMock.mockReturnValue("access-token");
+
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    await waitFor(() => {
+      const source = document.querySelector("video")?.src ?? "";
+      expect(source).toContain("token=access-token");
+      expect(source).toContain("profile_id=profile-1");
+    });
   });
 });
