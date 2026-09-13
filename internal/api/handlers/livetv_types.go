@@ -103,3 +103,10 @@ type liveTVPlaybackResponse struct {
 	Mode      string `json:"mode,omitempty"`
 	ErrorCode string `json:"error_code,omitempty"`
 }
+
+type liveTVQualityResponse struct {
+	Options              []livetv.LiveQualityOption `json:"options"`
+	ActiveID             string                     `json:"active_id,omitempty"`
+	TranscodingSupported bool                       `json:"transcoding_supported"`
+	UnsupportedReason    string                     `json:"unsupported_reason,omitempty"`
+}

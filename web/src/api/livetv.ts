@@ -79,6 +79,20 @@ export const liveTVPlaybackResponseSchema = z.object({
 });
 export type LiveTVPlaybackResponse = z.infer<typeof liveTVPlaybackResponseSchema>;
 
+export const liveTVQualityOptionSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  height: z.number().optional(),
+  bitrate_kbps: z.number().optional(),
+});
+export const liveTVQualityResponseSchema = z.object({
+  options: z.array(liveTVQualityOptionSchema),
+  active_id: z.string().optional(),
+  transcoding_supported: z.boolean(),
+  unsupported_reason: z.string().optional(),
+});
+export type LiveTVQualityResponse = z.infer<typeof liveTVQualityResponseSchema>;
+
 export function isSiloPlaybackUrl(value: string, apiBaseUrl = "/api/v1"): boolean {
   try {
     const origin = typeof window === "undefined" ? "http://localhost" : window.location.origin;

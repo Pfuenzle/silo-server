@@ -79,7 +79,7 @@ func (s *RedisLivePlaybackStore) Put(ctx context.Context, session LivePlaybackSe
 	if len(s.keyMaterial) == 0 {
 		return ErrLivePlaybackGrantIntegrity
 	}
-	stored := livePlaybackStoredSession{Session: session, ProviderURL: session.providerURL, Resources: session.resources, TrustedSource: session.trustedSource, MediaToken: session.mediaToken, MediaTokenExpiresAt: session.mediaTokenExpiresAt}
+	stored := livePlaybackStoredSession{Session: session, ProviderURL: session.providerURL, QualitySourceURL: session.qualitySourceURL, QualityID: session.qualityID, Resources: session.resources, TrustedSource: session.trustedSource, MediaToken: session.mediaToken, MediaTokenExpiresAt: session.mediaTokenExpiresAt}
 	data, err := json.Marshal(stored)
 	if err != nil {
 		return fmt.Errorf("marshal Live TV playback grant: %w", err)
@@ -117,6 +117,8 @@ func (s *RedisLivePlaybackStore) decode(data []byte) (LivePlaybackSession, error
 		return LivePlaybackSession{}, fmt.Errorf("parse Live TV playback grant: %w", err)
 	}
 	stored.Session.providerURL = stored.ProviderURL
+	stored.Session.qualitySourceURL = stored.QualitySourceURL
+	stored.Session.qualityID = stored.QualityID
 	stored.Session.resources = stored.Resources
 	stored.Session.trustedSource = stored.TrustedSource
 	stored.Session.mediaToken = stored.MediaToken
@@ -133,6 +135,8 @@ func (s *RedisLivePlaybackStore) signature(data []byte) []byte {
 type livePlaybackStoredSession struct {
 	Session             LivePlaybackSession `json:"session"`
 	ProviderURL         string              `json:"provider_url"`
+	QualitySourceURL    string              `json:"quality_source_url,omitempty"`
+	QualityID           string              `json:"quality_id,omitempty"`
 	Resources           map[string]string   `json:"resources,omitempty"`
 	TrustedSource       bool                `json:"trusted_source,omitempty"`
 	MediaToken          string              `json:"media_token,omitempty"`

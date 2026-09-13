@@ -69,7 +69,11 @@ func resolveLiveResource(base, resource string) (string, error) {
 	return baseURL.String(), nil
 }
 
-func (s *LivePlaybackService) rewriteLiveManifest(session *LivePlaybackSession, body, origin string) string {
+func (s *LivePlaybackService) rewriteLiveManifest(session *LivePlaybackSession, body, origin string, bases ...string) string {
+	baseURL := session.providerURL
+	if len(bases) > 0 {
+		baseURL = bases[0]
+	}
 	lines := strings.Split(body, "\n")
 	for index, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -77,7 +81,7 @@ func (s *LivePlaybackService) rewriteLiveManifest(session *LivePlaybackSession, 
 			continue
 		}
 		if strings.HasPrefix(trimmed, "#") {
-			lines[index] = s.rewriteLiveURIAttribute(session, line, origin)
+			lines[index] = s.rewriteLiveURIAttribute(session, line, origin, baseURL)
 			continue
 		}
 		if len(session.resources) >= 4096 {
@@ -85,7 +89,7 @@ func (s *LivePlaybackService) rewriteLiveManifest(session *LivePlaybackSession, 
 			continue
 		}
 		resourceID := fmt.Sprintf("r-%d", len(session.resources)+1)
-		providerURL, err := resolveLiveResource(session.providerURL, trimmed)
+		providerURL, err := resolveLiveResource(baseURL, trimmed)
 		if err != nil {
 			lines[index] = ""
 			continue
@@ -96,7 +100,7 @@ func (s *LivePlaybackService) rewriteLiveManifest(session *LivePlaybackSession, 
 	return strings.Join(lines, "\n")
 }
 
-func (s *LivePlaybackService) rewriteLiveURIAttribute(session *LivePlaybackSession, line, origin string) string {
+func (s *LivePlaybackService) rewriteLiveURIAttribute(session *LivePlaybackSession, line, origin, baseURL string) string {
 	start := strings.Index(strings.ToUpper(line), "URI=")
 	if start < 0 {
 		return line
@@ -117,7 +121,7 @@ func (s *LivePlaybackService) rewriteLiveURIAttribute(session *LivePlaybackSessi
 	if valueEnd == valueStart {
 		return line[:start]
 	}
-	providerURL, err := resolveLiveResource(session.providerURL, line[valueStart:valueEnd])
+	providerURL, err := resolveLiveResource(baseURL, line[valueStart:valueEnd])
 	if err != nil {
 		return line[:start] + line[valueEnd:]
 	}

@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -133,6 +135,74 @@ func (h *LiveTVHandler) HandlePlaybackStream(w http.ResponseWriter, r *http.Requ
 	request := r.WithContext(ctx)
 	request.URL.Path = strings.TrimPrefix(request.URL.Path, "/api/v1")
 	h.playback.ServeHTTP(w, request)
+}
+
+func (h *LiveTVHandler) HandlePlaybackQualities(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.playback == nil {
+		writeError(w, http.StatusServiceUnavailable, "live_playback_unavailable", "Live TV playback is unavailable")
+		return
+	}
+	ctx, err := livePlaybackRequestContext(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+		return
+	}
+	state, err := h.playback.QualityState(ctx, chi.URLParam(r, "grant_id"))
+	if err != nil {
+		writeLiveQualityError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, liveTVQualityResponse{Options: state.Options, ActiveID: state.ActiveID, TranscodingSupported: state.TranscodingSupported, UnsupportedReason: state.UnsupportedReason})
+}
+
+func (h *LiveTVHandler) HandlePlaybackQuality(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.playback == nil {
+		writeError(w, http.StatusServiceUnavailable, "live_playback_unavailable", "Live TV playback is unavailable")
+		return
+	}
+	ctx, err := livePlaybackRequestContext(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+		return
+	}
+	var request struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.ID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "Quality ID is required")
+		return
+	}
+	option, err := h.playback.SelectQuality(ctx, chi.URLParam(r, "grant_id"), request.ID)
+	if err != nil {
+		writeLiveQualityError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, liveTVQualityResponse{Options: []livetv.LiveQualityOption{option}, ActiveID: option.ID, TranscodingSupported: false})
+}
+
+func writeLiveQualityError(w http.ResponseWriter, err error) {
+	status := http.StatusBadGateway
+	code := "live_quality_unavailable"
+	if errors.Is(err, livetv.ErrLivePlaybackForbidden) {
+		status = http.StatusForbidden
+		code = "forbidden"
+	} else if errors.Is(err, livetv.ErrLivePlaybackNotFound) {
+		status = http.StatusNotFound
+		code = "not_found"
+	} else if errors.Is(err, livetv.ErrLivePlaybackExpired) {
+		status = http.StatusGone
+		code = "expired"
+	}
+	writeError(w, status, code, err.Error())
+}
+
+func livePlaybackRequestContext(r *http.Request) (context.Context, error) {
+	claims := apimw.GetClaims(r.Context())
+	profileID := apimw.GetProfileID(r.Context())
+	if claims == nil || claims.UserID <= 0 || strings.TrimSpace(profileID) == "" {
+		return nil, errors.New("missing playback identity")
+	}
+	return livetv.WithLivePlaybackIdentity(r.Context(), livetv.LivePlaybackIdentity{UserID: claims.UserID, ProfileID: profileID, SessionID: claims.SessionID}), nil
 }
 
 func (h *LiveTVHandler) HandleCapability(w http.ResponseWriter, _ *http.Request) {

@@ -151,6 +151,10 @@ func (s *LivePlaybackService) authorize(ctx context.Context, grantID, userID, pr
 		s.mu.Unlock()
 		return nil, ErrLivePlaybackUnavailable
 	}
+	if session.providerURL != validated.String() {
+		session.qualitySourceURL = ""
+		session.qualityID = ""
+	}
 	session.providerURL = validated.String()
 	session.trustedSource = s.allowPrivateNetworksForConfiguredSources
 	session.LastSeenAt = now

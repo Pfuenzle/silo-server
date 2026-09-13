@@ -30,6 +30,9 @@ func (s *LivePlaybackService) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	}
 	s.mu.Lock()
 	providerURL, err := s.resourceURL(session, resource)
+	if endpoint == "manifest" && session.qualitySourceURL != "" {
+		providerURL = session.qualitySourceURL
+	}
 	s.mu.Unlock()
 	if err != nil {
 		http.Error(w, ErrSourcePolicy.Error(), http.StatusBadGateway)
@@ -85,7 +88,7 @@ func (s *LivePlaybackService) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		s.mu.Lock()
-		rewritten := s.rewriteLiveManifest(session, string(body), s.proxyOrigin)
+		rewritten := s.rewriteLiveManifest(session, string(body), s.proxyOrigin, providerURL)
 		stored := cloneLivePlaybackSession(*session)
 		s.mu.Unlock()
 		if s.store != nil {

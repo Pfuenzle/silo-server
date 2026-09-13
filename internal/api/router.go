@@ -2282,6 +2282,8 @@ func NewRouter(deps Dependencies) chi.Router {
 				if liveTVHandler != nil {
 					r.Get("/livetv/capability", liveTVHandler.HandleCapability)
 					r.Delete("/livetv/playback/{grant_id}", liveTVHandler.HandleStopPlayback)
+					r.Get("/livetv/playback/{grant_id}/qualities", liveTVHandler.HandlePlaybackQualities)
+					r.Post("/livetv/playback/{grant_id}/quality", liveTVHandler.HandlePlaybackQuality)
 					r.Route("/livetv/libraries/{library_id}", func(r chi.Router) {
 						r.Use(apimw.RequireProfile)
 						r.Get("/", liveTVHandler.HandleListLibrary)

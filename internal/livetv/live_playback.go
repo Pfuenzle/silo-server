@@ -96,6 +96,8 @@ type LivePlaybackSession struct {
 	mediaTokenExpiresAt   time.Time
 	resources             map[string]string
 	providerURL           string
+	qualitySourceURL      string
+	qualityID             string
 }
 
 type livePlaybackActiveRequest struct {
