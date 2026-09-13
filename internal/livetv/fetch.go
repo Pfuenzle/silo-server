@@ -1,6 +1,7 @@
 package livetv
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -9,6 +10,39 @@ import (
 	"strings"
 	"time"
 )
+
+func (s *FetchService) detectLivePlaybackMode(ctx context.Context, rawURL string, allowPrivateNetworks bool) (LivePlaybackMode, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	u, err := s.policy.validateURLWithPrivateNetworks(probeCtx, s.resolver, rawURL, allowPrivateNetworks)
+	if err != nil {
+		return "", err
+	}
+	request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", ErrSourcePolicy
+	}
+	response, err := s.clientFor(allowPrivateNetworks).Do(request)
+	if err != nil {
+		return "", sourcePolicyError("playback probe", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("Live TV source returned status %d", response.StatusCode)
+	}
+	prefix, err := bufio.NewReader(io.LimitReader(response.Body, 512)).Peek(8)
+	if err != nil && len(prefix) == 0 {
+		return "", sourcePolicyError("playback probe", err)
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
+	if contentType == "application/vnd.apple.mpegurl" || contentType == "application/x-mpegurl" || strings.HasPrefix(string(prefix), "#EXTM3U") {
+		return LivePlaybackModeHLS, nil
+	}
+	if contentType == "video/mp2t" || contentType == "application/octet-stream" || (len(prefix) > 0 && prefix[0] == 0x47) {
+		return LivePlaybackModeDirect, nil
+	}
+	return "", fmt.Errorf("unsupported Live TV stream content type %q", contentType)
+}
 
 type FetchConfig struct {
 	Policy   NetworkPolicy

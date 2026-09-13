@@ -45,6 +45,7 @@ type LivePlaybackMode string
 const (
 	LivePlaybackModeDirect LivePlaybackMode = "direct"
 	LivePlaybackModeHLS    LivePlaybackMode = "hls"
+	LivePlaybackModeAuto   LivePlaybackMode = "auto"
 )
 
 type LivePlaybackRequest struct {
@@ -72,6 +73,7 @@ type LivePlaybackConfig struct {
 
 type LivePlaybackGrant struct {
 	GrantID, ManifestURL string
+	Mode                 LivePlaybackMode
 	IsLive, Seekable     bool
 }
 
@@ -162,7 +164,7 @@ func (s *LivePlaybackService) Start(ctx context.Context, request LivePlaybackReq
 	if identity, ok := ctx.Value(livePlaybackIdentityKey{}).(LivePlaybackIdentity); ok && (identity.UserID != request.UserID || identity.ProfileID != request.ProfileID || identity.SessionID != request.SessionID) {
 		return LivePlaybackGrant{}, ErrLivePlaybackForbidden
 	}
-	if request.Mode != LivePlaybackModeDirect && request.Mode != LivePlaybackModeHLS {
+	if request.Mode != LivePlaybackModeDirect && request.Mode != LivePlaybackModeHLS && request.Mode != LivePlaybackModeAuto {
 		return LivePlaybackGrant{}, fmt.Errorf("unsupported Live TV playback mode %q", request.Mode)
 	}
 	if request.NodeReference != "" {
@@ -178,6 +180,12 @@ func (s *LivePlaybackService) Start(ctx context.Context, request LivePlaybackReq
 	validated, err := s.fetch.policy.validateURLWithPrivateNetworks(ctx, s.fetch.resolver, channel.StreamURL, s.allowPrivateNetworksForConfiguredSources)
 	if err != nil {
 		return LivePlaybackGrant{}, err
+	}
+	if request.Mode == LivePlaybackModeAuto {
+		request.Mode, err = s.fetch.detectLivePlaybackMode(ctx, validated.String(), s.allowPrivateNetworksForConfiguredSources)
+		if err != nil {
+			return LivePlaybackGrant{}, err
+		}
 	}
 	now := s.now().UTC()
 	mediaToken, err := newLiveMediaToken()
@@ -208,7 +216,7 @@ func (s *LivePlaybackService) Start(ctx context.Context, request LivePlaybackReq
 	if s.observer != nil {
 		s.observer.Started(*session)
 	}
-	return LivePlaybackGrant{GrantID: session.GrantID, ManifestURL: mediaURL(s.ProxyOrigin(), session.GrantID, "manifest", "", mediaToken), IsLive: true}, nil
+	return LivePlaybackGrant{GrantID: session.GrantID, ManifestURL: mediaURL(s.ProxyOrigin(), session.GrantID, "manifest", "", mediaToken), Mode: session.Mode, IsLive: true}, nil
 }
 
 func (s *LivePlaybackService) MediaTokenIdentity(ctx context.Context, grantID, token string) (LivePlaybackIdentity, error) {

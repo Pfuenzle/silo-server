@@ -344,6 +344,63 @@ func TestLivePlayback_ServeHLS_rejectsRawMPEGTSWithClearFormatError(t *testing.T
 	}
 }
 
+func TestFetchService_detectLivePlaybackMode_classifiesBoundedMPEGTS(t *testing.T) {
+	// Given an upstream live response that is MPEG-TS rather than an HLS manifest.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write([]byte{0x47, 0x40, 0x11, 0x10, 0x00, 0x42, 0xf0, 0x25})
+	}))
+	t.Cleanup(upstream.Close)
+	service := NewFetchService(FetchConfig{Resolver: liveTestResolver{IP: net.ParseIP("198.51.100.2")}, Dialer: liveDialer(upstream.Listener.Addr().String())})
+
+	// When the configured stream protocol is detected with a bounded probe.
+	mode, err := service.detectLivePlaybackMode(context.Background(), upstream.URL, false)
+
+	// Then the source is classified as direct MPEG-TS playback.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != LivePlaybackModeDirect {
+		t.Fatalf("mode = %q, want %q", mode, LivePlaybackModeDirect)
+	}
+}
+
+func TestLivePlayback_AutoMode_servesMPEGTSWithoutHLS415(t *testing.T) {
+	// Given a configured source that reports a bounded MPEG-TS response.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write([]byte{0x47, 0x40, 0x11, 0x10, 0x00, 0x42, 0xf0, 0x25})
+	}))
+	t.Cleanup(upstream.Close)
+	service := NewLivePlaybackService(LivePlaybackConfig{
+		Fetch:       NewFetchService(FetchConfig{Resolver: liveTestResolver{IP: net.ParseIP("198.51.100.2")}, Dialer: liveDialer(upstream.Listener.Addr().String())}),
+		ProxyOrigin: "https://silo.example",
+		Authority:   liveTestAuthority{StreamURL: upstream.URL},
+	})
+
+	// When playback is negotiated in auto mode and the returned URL is served.
+	grant, err := service.Start(context.Background(), LivePlaybackRequest{
+		UserID: 7, ProfileID: "profile-a", LibraryID: 4, SessionID: "session-a", Mode: LivePlaybackModeAuto,
+		ChannelID: SourceQualifiedID("fixture|channel-1"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, grant.ManifestURL, nil)
+	req.Header.Set("X-Live-User-ID", "7")
+	req.Header.Set("X-Live-Profile-ID", "profile-a")
+	response := httptest.NewRecorder()
+	service.ServeHTTP(response, req)
+
+	// Then the direct stream is returned instead of the HLS-only 415 response.
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %q", response.Code, http.StatusOK, response.Body.String())
+	}
+	if grant.Mode != LivePlaybackModeDirect {
+		t.Fatalf("mode = %q, want %q", grant.Mode, LivePlaybackModeDirect)
+	}
+}
+
 func TestLivePlayback_ConfiguredPrivateSource_reachesProxyManifestButRejectsLoopbackResource(t *testing.T) {
 	// Given a configured xTeVe source resolved to a private LAN address and a manifest
 	// that attempts to point a child resource at loopback.
