@@ -208,12 +208,24 @@ func TestLivePlayback_HLSResourceBinding_allowsNativeRequestsAndRejectsWrongOrMi
 	}
 	segmentURL := strings.TrimSpace(strings.Split(manifestResponse.Body.String(), "\n")[1])
 	segmentResponse := httptest.NewRecorder()
-	service.ServeHTTP(segmentResponse, httptest.NewRequest(http.MethodGet, segmentURL, nil))
+	matchingProfile := httptest.NewRequest(http.MethodGet, segmentURL, nil)
+	matchingProfile.Header.Set("X-Live-User-ID", "7")
+	matchingProfile.Header.Set("X-Live-Profile-ID", "profile-a")
+	service.ServeHTTP(segmentResponse, matchingProfile)
 
 	// Then the opaque binding is sufficient, but it is not replaceable by a
 	// missing or unrelated binding.
 	if segmentResponse.Code != http.StatusOK || segmentResponse.Body.String() != "segment-bytes" {
 		t.Fatalf("native segment response = %d %q", segmentResponse.Code, segmentResponse.Body.String())
+	}
+
+	wrongProfile := httptest.NewRequest(http.MethodGet, segmentURL, nil)
+	wrongProfile.Header.Set("X-Live-User-ID", "7")
+	wrongProfile.Header.Set("X-Live-Profile-ID", "profile-b")
+	wrongProfileResponse := httptest.NewRecorder()
+	service.ServeHTTP(wrongProfileResponse, wrongProfile)
+	if wrongProfileResponse.Code != http.StatusForbidden {
+		t.Fatalf("wrong-profile response = %d, want 403", wrongProfileResponse.Code)
 	}
 	for _, name := range []string{"missing", "wrong"} {
 		t.Run(name, func(t *testing.T) {
