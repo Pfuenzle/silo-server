@@ -44,6 +44,10 @@ func (p NetworkPolicy) withDefaults() NetworkPolicy {
 }
 
 func (p NetworkPolicy) validateURL(ctx context.Context, resolver IPResolver, raw string) (*url.URL, error) {
+	return p.validateURLWithPrivateNetworks(ctx, resolver, raw, p.AllowPrivateNetworks)
+}
+
+func (p NetworkPolicy) validateURLWithPrivateNetworks(ctx context.Context, resolver IPResolver, raw string, allowPrivateNetworks bool) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
 		return nil, ErrSourcePolicy
@@ -60,7 +64,7 @@ func (p NetworkPolicy) validateURL(ctx context.Context, resolver IPResolver, raw
 		return nil, ErrSourcePolicy
 	}
 	for _, ipAddr := range ipAddrs {
-		if !p.allowedIP(ipAddr.IP) {
+		if !p.allowedIPWithPrivateNetworks(ipAddr.IP, allowPrivateNetworks) {
 			return nil, ErrSourcePolicy
 		}
 	}
@@ -80,10 +84,14 @@ func endpointPort(u *url.URL) (int, error) {
 func allowedPort(port int) bool { return port == 80 || port == 443 || port >= 1024 && port <= 65535 }
 
 func (p NetworkPolicy) allowedIP(ip net.IP) bool {
+	return p.allowedIPWithPrivateNetworks(ip, p.AllowPrivateNetworks)
+}
+
+func (p NetworkPolicy) allowedIPWithPrivateNetworks(ip net.IP, allowPrivateNetworks bool) bool {
 	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || isMetadataIP(ip) {
 		return false
 	}
-	if ip.IsPrivate() && !p.AllowPrivateNetworks {
+	if ip.IsPrivate() && !allowPrivateNetworks {
 		return false
 	}
 	return true

@@ -20,6 +20,7 @@ type FetchService struct {
 	policy   NetworkPolicy
 	resolver IPResolver
 	client   *http.Client
+	dialer   DialContextFunc
 }
 
 type FetchResult struct {
@@ -38,39 +39,51 @@ func NewFetchService(config FetchConfig) *FetchService {
 	if dialer == nil {
 		dialer = (&net.Dialer{Timeout: policy.ResponseTimeout, KeepAlive: 30 * time.Second}).DialContext
 	}
+	service := &FetchService{policy: policy, resolver: resolver, dialer: dialer}
+	service.client = service.clientFor(policy.AllowPrivateNetworks)
+	return service
+}
+
+func (s *FetchService) clientFor(allowPrivateNetworks bool) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxResponseHeaderBytes = policy.MaxHeaderBytes
+	transport.MaxResponseHeaderBytes = s.policy.MaxHeaderBytes
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, ErrSourcePolicy
 		}
-		ip, err := resolveAllowedIP(ctx, policy, resolver, host, port)
+		ip, err := resolveAllowedIP(ctx, s.policy, s.resolver, host, port, allowPrivateNetworks)
 		if err != nil {
 			return nil, err
 		}
-		return dialer(ctx, network, net.JoinHostPort(ip.String(), port))
+		return s.dialer(ctx, network, net.JoinHostPort(ip.String(), port))
 	}
-	service := &FetchService{policy: policy, resolver: resolver}
-	service.client = &http.Client{
+	return &http.Client{
 		Transport: transport,
-		Timeout:   policy.ResponseTimeout,
+		Timeout:   s.policy.ResponseTimeout,
 		CheckRedirect: func(req *http.Request, history []*http.Request) error {
-			if len(history) >= policy.MaxRedirects {
+			if len(history) >= s.policy.MaxRedirects {
 				return ErrSourcePolicy
 			}
-			_, err := policy.validateURL(req.Context(), resolver, req.URL.String())
+			_, err := s.policy.validateURLWithPrivateNetworks(req.Context(), s.resolver, req.URL.String(), allowPrivateNetworks)
 			return err
 		},
 	}
-	return service
 }
 
 func (s *FetchService) Fetch(ctx context.Context, source Source) (FetchResult, error) {
+	return s.fetch(ctx, source.Location, s.policy.AllowPrivateNetworks)
+}
+
+func (s *FetchService) FetchConfiguredSource(ctx context.Context, source Source) (FetchResult, error) {
+	return s.fetch(ctx, source.Location, true)
+}
+
+func (s *FetchService) fetch(ctx context.Context, rawURL string, allowPrivateNetworks bool) (FetchResult, error) {
 	if s == nil || s.client == nil {
 		return FetchResult{}, ErrSourcePolicy
 	}
-	u, err := s.policy.validateURL(ctx, s.resolver, source.Location)
+	u, err := s.policy.validateURLWithPrivateNetworks(ctx, s.resolver, rawURL, allowPrivateNetworks)
 	if err != nil {
 		return FetchResult{}, err
 	}
@@ -79,7 +92,7 @@ func (s *FetchService) Fetch(ctx context.Context, source Source) (FetchResult, e
 		return FetchResult{}, ErrSourcePolicy
 	}
 	request.Header.Set("Accept", "application/x-mpegurl, application/xml, text/xml, text/plain")
-	response, err := s.client.Do(request)
+	response, err := s.clientFor(allowPrivateNetworks).Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return FetchResult{}, ctx.Err()
@@ -106,7 +119,7 @@ func (s *FetchService) Fetch(ctx context.Context, source Source) (FetchResult, e
 	return FetchResult{Body: body, StatusCode: response.StatusCode, ContentType: response.Header.Get("Content-Type")}, nil
 }
 
-func resolveAllowedIP(ctx context.Context, policy NetworkPolicy, resolver IPResolver, host, port string) (net.IP, error) {
+func resolveAllowedIP(ctx context.Context, policy NetworkPolicy, resolver IPResolver, host, port string, allowPrivateNetworks bool) (net.IP, error) {
 	portNumber, err := net.LookupPort("tcp", port)
 	if err != nil || !allowedPort(portNumber) {
 		return nil, ErrSourcePolicy
@@ -116,7 +129,7 @@ func resolveAllowedIP(ctx context.Context, policy NetworkPolicy, resolver IPReso
 		return nil, ErrSourcePolicy
 	}
 	for _, ipAddr := range ipAddrs {
-		if !policy.allowedIP(ipAddr.IP) {
+		if !policy.allowedIPWithPrivateNetworks(ipAddr.IP, allowPrivateNetworks) {
 			continue
 		}
 		return ipAddr.IP, nil

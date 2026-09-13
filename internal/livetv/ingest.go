@@ -11,7 +11,7 @@ type SourceIngestor interface {
 }
 
 func (s *FetchService) Ingest(ctx context.Context, source Source, mappings map[string]ChannelMapping) (SourceSnapshot, Diagnostics, error) {
-	result, err := s.Fetch(ctx, source)
+	result, err := s.FetchConfiguredSource(ctx, source)
 	if err != nil {
 		return SourceSnapshot{}, nil, err
 	}
