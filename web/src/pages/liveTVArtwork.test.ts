@@ -14,17 +14,20 @@ describe("Live TV artwork", () => {
     expect(liveTVArtwork({ path: "/api/v1/images/channel-1" })).toBe("/api/v1/images/channel-1");
   });
 
-  it("does not expose arbitrary remote artwork URLs", () => {
-    expect(liveTVArtwork({ logo: "https://provider.example/logo.png" })).toBeNull();
+  it("rejects non-HTTPS artwork URLs", () => {
     expect(liveTVArtwork({ logo: "http://provider.example/logo.png" })).toBeNull();
     expect(liveTVArtwork({ logo: "data:image/png;base64,abc" })).toBeNull();
     expect(liveTVArtwork({ url: "javascript:alert(1)" })).toBeNull();
   });
 
-  it("accepts only signed HTTPS object URLs", () => {
+  it("accepts HTTPS object URLs authorized by the API", () => {
     expect(liveTVArtwork({ url: "https://cdn.example/logo.png?X-Amz-Signature=abc" })).toBe(
       "https://cdn.example/logo.png?X-Amz-Signature=abc",
     );
     expect(liveTVArtwork({ url: "http://cdn.example/logo.png?X-Amz-Signature=abc" })).toBeNull();
+  });
+
+  it("renders HTTPS artwork URLs authorized by the API public CDN", () => {
+    expect(liveTVArtwork({ url: "https://cdn.example/logo.png" })).toBe("https://cdn.example/logo.png");
   });
 });
