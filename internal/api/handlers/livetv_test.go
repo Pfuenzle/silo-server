@@ -300,14 +300,37 @@ func TestAuthorizeArtwork_usesConfiguredObjectStoreWithoutImageResolver(t *testi
 	}
 }
 
+func TestAuthorizeArtwork_omitsOnlyFieldsWhosePresignFails(t *testing.T) {
+	// Given cached artwork with one working and one failing object-store key.
+	handler := &LiveTVHandler{objectStore: fakeLiveTVArtworkStore{urls: map[string]string{"livetv/ok.webp": "https://cdn.example/ok.webp?verify=ok"}}}
+
+	// When the API authorizes both cached fields.
+	got := handler.authorizeArtwork(context.Background(), json.RawMessage(`{"logo":"livetv/ok.webp","poster":"livetv/fail.webp"}`))
+
+	// Then only the successfully authorized image remains and no provider path leaks.
+	if string(got) != `{"logo":"https://cdn.example/ok.webp?verify=ok"}` {
+		t.Fatalf("artwork = %s", got)
+	}
+}
+
 type fakeLiveTVArtworkResolver struct{ url string }
 
 func (f fakeLiveTVArtworkResolver) PresignURL(context.Context, string, string) string { return f.url }
 
-type fakeLiveTVArtworkStore struct{ url string }
+type fakeLiveTVArtworkStore struct {
+	url  string
+	urls map[string]string
+}
 
 func (f fakeLiveTVArtworkStore) Bucket() string { return "artwork" }
 
-func (f fakeLiveTVArtworkStore) PresignGetURL(context.Context, string, string, time.Duration) (string, error) {
+func (f fakeLiveTVArtworkStore) PresignGetURL(_ context.Context, _, key string, _ time.Duration) (string, error) {
+	if f.urls != nil {
+		url := f.urls[key]
+		if url == "" {
+			return "", errors.New("presign unavailable")
+		}
+		return url, nil
+	}
 	return f.url, nil
 }

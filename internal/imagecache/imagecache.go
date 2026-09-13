@@ -212,7 +212,7 @@ func (c *Cacher) CacheLiveTVArtwork(ctx context.Context, sourceURL, kind, identi
 		ImageType:        imageType,
 		KeyDiscriminator: hex.EncodeToString(urlDigest[:8]),
 	}
-	result, err := c.Cache(ctx, request)
+	result, err := c.cache(ctx, request, true)
 	if err != nil {
 		return "", err
 	}
@@ -292,6 +292,10 @@ func (c *Cacher) CacheBytes(ctx context.Context, data []byte, req CacheRequest) 
 // Cache downloads the image at req.SourceURL and stores it through the same
 // variant, revision-tracking, and upload pipeline as CacheBytes.
 func (c *Cacher) Cache(ctx context.Context, req CacheRequest) (*CacheResult, error) {
+	return c.cache(ctx, req, false)
+}
+
+func (c *Cacher) cache(ctx context.Context, req CacheRequest, allowPrivateNetworks bool) (*CacheResult, error) {
 	if err := validateCacheRequest(req); err != nil {
 		return nil, err
 	}
@@ -309,7 +313,7 @@ func (c *Cacher) Cache(ctx context.Context, req CacheRequest) (*CacheResult, err
 		}
 	}
 
-	data, err := c.downloadImage(ctx, url)
+	data, err := c.downloadImage(ctx, url, allowPrivateNetworks)
 	if err != nil {
 		return nil, fmt.Errorf("imagecache: download %s: %w", url, err)
 	}
@@ -514,12 +518,16 @@ func normalizeImageLanguage(language string) string {
 
 // downloadImage fetches the image at the given URL, enforcing size, timeout,
 // and public-network limits.
-func (c *Cacher) downloadImage(ctx context.Context, rawURL string) ([]byte, error) {
+func (c *Cacher) downloadImage(ctx context.Context, rawURL string, allowPrivateNetworks bool) ([]byte, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse URL: %w", err)
 	}
-	if c.enforcePublicURLs {
+	if allowPrivateNetworks {
+		if err := validateConfiguredImageURL(parsed); err != nil {
+			return nil, err
+		}
+	} else if c.enforcePublicURLs {
 		if err := validatePublicImageURL(parsed); err != nil {
 			return nil, err
 		}
@@ -533,6 +541,9 @@ func (c *Cacher) downloadImage(ctx context.Context, rawURL string) ([]byte, erro
 	}
 
 	client := c.httpClient
+	if allowPrivateNetworks {
+		client = newConfiguredImageHTTPClient()
+	}
 	if client == nil {
 		client = newSecureHTTPClient()
 	}
@@ -573,6 +584,65 @@ func newSecureHTTPClient() *http.Client {
 			return validatePublicImageURL(req.URL)
 		},
 	}
+}
+
+func newConfiguredImageHTTPClient() *http.Client {
+	transport := &http.Transport{Proxy: nil, DialContext: configuredImageDialContext, TLSHandshakeTimeout: 10 * time.Second}
+	return &http.Client{Transport: transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return http.ErrUseLastResponse
+		}
+		return validateConfiguredImageURL(req.URL)
+	}}
+}
+
+func validateConfiguredImageURL(u *url.URL) error {
+	if err := validatePublicImageURL(u); err == nil {
+		return nil
+	}
+	if u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return fmt.Errorf("invalid configured image URL")
+	}
+	if u.User != nil {
+		return fmt.Errorf("configured image URL userinfo is not allowed")
+	}
+	if port := u.Port(); port != "" {
+		parsed, err := net.LookupPort("tcp", port)
+		if err != nil || !allowedImagePort(parsed) {
+			return fmt.Errorf("configured image URL port is not allowed")
+		}
+	}
+	return nil
+}
+
+func configuredImageDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range ips {
+		ip := candidate.IP
+		if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || isImageMetadataIP(ip) {
+			continue
+		}
+		if !ip.IsPrivate() && !ip.IsGlobalUnicast() {
+			continue
+		}
+		dialer := &net.Dialer{Timeout: downloadTimeout}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+	return nil, fmt.Errorf("configured image host is not permitted")
+}
+
+func allowedImagePort(port int) bool {
+	return port == 80 || port == 443 || port >= 1024 && port <= 65535
+}
+func isImageMetadataIP(ip net.IP) bool {
+	return ip.Equal(net.ParseIP("169.254.169.254")) || ip.Equal(net.ParseIP("100.100.100.200")) || ip.Equal(net.ParseIP("fd00:ec2::254"))
 }
 
 func validatePublicImageURL(u *url.URL) error {

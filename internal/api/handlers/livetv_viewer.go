@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -282,9 +283,16 @@ func (h *LiveTVHandler) authorizeArtwork(ctx context.Context, raw []byte) json.R
 		resolved := ""
 		fromObjectStore := h.objectStore != nil && !strings.Contains(path, "://") && !strings.HasPrefix(path, "/")
 		if fromObjectStore {
-			resolved, _ = h.objectStore.PresignGetURL(ctx, h.objectStore.Bucket(), path, 15*time.Minute)
+			var err error
+			resolved, err = h.objectStore.PresignGetURL(ctx, h.objectStore.Bucket(), path, 15*time.Minute)
+			if err != nil {
+				slog.WarnContext(ctx, "Live TV artwork presign failed", "component", "api", "field", key)
+			}
 		} else if h.artwork != nil {
 			resolved = h.artwork.PresignURL(ctx, path, "card")
+			if resolved == "" {
+				slog.WarnContext(ctx, "Live TV artwork resolve failed", "component", "api", "field", key)
+			}
 		}
 		if resolved == "" || (!fromObjectStore && !isAuthorizedArtworkURL(resolved)) {
 			delete(value, key)

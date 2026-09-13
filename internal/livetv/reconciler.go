@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -106,6 +107,7 @@ func (r *Reconciler) cacheArtworkValue(ctx context.Context, source Source, raw [
 	for key, url := range value {
 		cached, err := r.artwork.CacheLiveTVArtwork(ctx, url, kind, source.SourceKey+"|"+identity+"|"+key)
 		if err != nil || cached == "" {
+			slog.WarnContext(ctx, "Live TV artwork cache failed", "source_key", source.SourceKey, "kind", kind, "field", key)
 			delete(value, key)
 			continue
 		}
