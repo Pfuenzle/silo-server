@@ -74,6 +74,7 @@ interface PlayerControlsProps {
   audioTracks: PlayerAudioTrack[];
   activeAudioIndex: number;
   onAudioSelect?: (index: number, currentPosition: number) => void;
+  audioUnavailable?: boolean;
   // Quality
   qualityOptions: QualityOption[];
   activeQualityId: string;
@@ -87,6 +88,7 @@ interface PlayerControlsProps {
   onTogglePiP?: () => void;
   // Playback info
   showPlaybackInfo: boolean;
+  playbackInfoAvailable?: boolean;
   onTogglePlaybackInfo: () => void;
   // Episode navigation
   hasPrevEpisode?: boolean;
@@ -143,6 +145,7 @@ export function PlayerControls({
   audioTracks,
   activeAudioIndex,
   onAudioSelect,
+  audioUnavailable = false,
   qualityOptions,
   activeQualityId,
   isTranscoding,
@@ -152,6 +155,7 @@ export function PlayerControls({
   onSwitchVersion,
   onTogglePiP,
   showPlaybackInfo,
+  playbackInfoAvailable = true,
   onTogglePlaybackInfo,
   hasPrevEpisode = false,
   hasNextEpisode = false,
@@ -359,6 +363,16 @@ export function PlayerControls({
               getSubtitleStartPosition={getSubtitleStartPosition}
               audioTracks={audioTracks}
             />
+            {audioUnavailable && !onAudioSelect ? (
+              <button
+                type="button"
+                className="player-utility-btn cursor-default opacity-40"
+                disabled
+                aria-label="Audio unavailable"
+              >
+                <AudioLines className="h-[18px] w-[18px]" />
+              </button>
+            ) : null}
             {!live ? (
               qualityMenu
             ) : qualityControlAvailable ? (
@@ -538,6 +552,16 @@ export function PlayerControls({
                   currentPosition={currentTime}
                 />
               )}
+              {audioUnavailable && !onAudioSelect && (
+                <button
+                  type="button"
+                  className="player-utility-btn cursor-default opacity-40"
+                  disabled
+                  aria-label="Audio unavailable"
+                >
+                  <AudioLines className="h-[18px] w-[18px]" />
+                </button>
+              )}
 
               {!live ? (
                 <ChaptersMenu chapters={chapters ?? []} currentTime={currentTime} onSeek={onSeek} />
@@ -587,15 +611,17 @@ export function PlayerControls({
                 </button>
               )}
 
-              <button
-                type="button"
-                className="player-utility-btn"
-                onClick={onTogglePlaybackInfo}
-                aria-label="Playback info"
-                data-active={showPlaybackInfo ? "true" : "false"}
-              >
-                <Info className="h-[18px] w-[18px]" />
-              </button>
+              {playbackInfoAvailable && (
+                <button
+                  type="button"
+                  className="player-utility-btn"
+                  onClick={onTogglePlaybackInfo}
+                  aria-label="Playback info"
+                  data-active={showPlaybackInfo ? "true" : "false"}
+                >
+                  <Info className="h-[18px] w-[18px]" />
+                </button>
+              )}
               {onTogglePiP && document.pictureInPictureEnabled && (
                 <button
                   type="button"
@@ -680,15 +706,17 @@ export function PlayerControls({
                 }}
               />
             )}
-            <OverflowAction
-              icon={<Info className="h-5 w-5" />}
-              label="Playback info"
-              active={showPlaybackInfo}
-              onClick={() => {
-                onTogglePlaybackInfo();
-                setOverflowOpen(false);
-              }}
-            />
+            {playbackInfoAvailable && (
+              <OverflowAction
+                icon={<Info className="h-5 w-5" />}
+                label="Playback info"
+                active={showPlaybackInfo}
+                onClick={() => {
+                  onTogglePlaybackInfo();
+                  setOverflowOpen(false);
+                }}
+              />
+            )}
             {onTogglePiP && document.pictureInPictureEnabled && (
               <OverflowAction
                 icon={<PictureInPicture2 className="h-5 w-5" />}

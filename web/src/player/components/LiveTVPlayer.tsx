@@ -22,6 +22,16 @@ interface LiveTVPlayerProps {
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 
+interface WebKitFullscreenVideo extends HTMLVideoElement {
+  webkitDisplayingFullscreen?: boolean;
+  webkitEnterFullscreen?: () => void;
+  webkitExitFullscreen?: () => void;
+}
+
+function supportsWebKitFullscreen(video: HTMLVideoElement): video is WebKitFullscreenVideo {
+  return "webkitEnterFullscreen" in video;
+}
+
 export function LiveTVPlayer({
   channelId,
   title,
@@ -32,7 +42,9 @@ export function LiveTVPlayer({
   onStop,
 }: LiveTVPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
   const retryPlayerRef = useRef<(() => void) | undefined>(undefined);
+  const audioTrackSwitchRef = useRef<((index: number) => boolean) | undefined>(undefined);
   const stoppedRef = useRef(false);
   const [state, setState] = useState<"starting" | "playing" | "error" | "reconnecting">("starting");
   const [playing, setPlaying] = useState(false);
@@ -49,6 +61,8 @@ export function LiveTVPlayer({
   const [qualityRevision, setQualityRevision] = useState(0);
   const [audioTracks, setAudioTracks] = useState<PlayerAudioTrack[]>([]);
   const [activeAudioIndex, setActiveAudioIndex] = useState(0);
+  const [audioSwitchSupported, setAudioSwitchSupported] = useState(false);
+  const [livePaused, setLivePaused] = useState(false);
   const { profile } = useCurrentProfile();
   const locale = profile?.language?.startsWith("de") ? "de" : "en";
   const streamIsSafe = isSiloPlaybackUrl(streamUrl);
@@ -75,8 +89,12 @@ export function LiveTVPlayer({
     const handlePlaying = () => {
       setState("playing");
       setPlaying(true);
+      setLivePaused(false);
     };
-    const handlePause = () => setPlaying(false);
+    const handlePause = () => {
+      setPlaying(false);
+      setLivePaused(true);
+    };
     const handleError = () => setState("error");
     let destroyPlayer: (() => void) | undefined;
     let cancelled = false;
@@ -109,6 +127,7 @@ export function LiveTVPlayer({
         .then(({ default: Hls }) => {
           if (cancelled) return;
           if (Hls.isSupported()) {
+            setAudioSwitchSupported(true);
             const player = new Hls({
               enableWorker: true,
               lowLatencyMode: true,
@@ -116,11 +135,18 @@ export function LiveTVPlayer({
             });
             player.attachMedia(video);
             player.loadSource(streamURL);
+            audioTrackSwitchRef.current = (index) => {
+              if (index < 0 || index >= player.audioTracks.length) return false;
+              player.audioTrack = index;
+              return true;
+            };
             player.on(Hls.Events.ERROR, () => setState("error"));
             destroyPlayer = () => player.destroy();
             retryPlayerRef.current = () => player.startLoad();
             void Promise.resolve(video.play()).catch(() => setState("error"));
           } else {
+            setAudioSwitchSupported(false);
+            audioTrackSwitchRef.current = undefined;
             video.src = streamURL;
             void Promise.resolve(video.play()).catch(() => setState("error"));
           }
@@ -140,13 +166,14 @@ export function LiveTVPlayer({
       cancelled = true;
       window.clearTimeout(timeout);
       destroyPlayer?.();
+      audioTrackSwitchRef.current = undefined;
       retryPlayerRef.current = undefined;
-      video.pause();
-      video.removeAttribute("src");
-      video.load();
       video.removeEventListener("playing", handlePlaying);
       video.removeEventListener("pause", handlePause);
       video.removeEventListener("error", handleError);
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
     };
   }, [mode, qualityRevision, startupTimeoutMs, streamIsSafe, streamUrl]);
 
@@ -240,21 +267,30 @@ export function LiveTVPlayer({
   };
 
   const toggleFullscreen = () => {
+    const surface = surfaceRef.current;
     const video = videoRef.current;
-    if (!video) return;
+    if (!surface) return;
     if (document.fullscreenElement) {
       void document.exitFullscreen();
       setIsFullscreen(false);
       return;
     }
-    void video
-      .requestFullscreen()
-      .then(() => setIsFullscreen(true))
-      .catch(() => setIsFullscreen(false));
+    if (typeof surface.requestFullscreen === "function") {
+      void surface
+        .requestFullscreen()
+        .then(() => setIsFullscreen(true))
+        .catch(() => setIsFullscreen(false));
+      return;
+    }
+    if (video && supportsWebKitFullscreen(video)) {
+      video.webkitEnterFullscreen?.();
+      setIsFullscreen(true);
+    }
   };
 
   return (
     <div
+      ref={surfaceRef}
       className="player-container absolute inset-0 flex items-center justify-center bg-black"
       data-channel-id={channelId}
       data-testid="player-surface"
@@ -271,14 +307,24 @@ export function LiveTVPlayer({
         }}
         onClick={() => setControlsVisible((visible) => !visible)}
       />
+      {livePaused ? (
+        <div className="pointer-events-none absolute inset-x-0 top-4 z-20 flex justify-center px-4">
+          <p className="rounded-lg border border-amber-300/40 bg-black/75 px-4 py-2 text-center text-xs text-white/90 shadow-lg backdrop-blur">
+            Live playback is paused. Resume starts at the provider&apos;s live edge; this player
+            cannot go back behind the live window.
+          </p>
+        </div>
+      ) : null}
       <p role="status" aria-label={liveTVT("playerPlaying", locale)} className="sr-only">
-        {!streamIsSafe || state === "error"
-          ? liveTVT("playerError", locale)
-          : state === "playing"
-            ? liveTVT("playerPlaying", locale)
-            : state === "reconnecting"
-              ? liveTVT("playerReconnecting", locale)
-              : liveTVT("playerStarting", locale)}
+        {livePaused
+          ? `${liveTVT("playerPlaying", locale)} (paused)`
+          : !streamIsSafe || state === "error"
+            ? liveTVT("playerError", locale)
+            : state === "playing"
+              ? liveTVT("playerPlaying", locale)
+              : state === "reconnecting"
+                ? liveTVT("playerReconnecting", locale)
+                : liveTVT("playerStarting", locale)}
       </p>
       {controlsVisible ? (
         <PlayerControls
@@ -299,7 +345,14 @@ export function LiveTVPlayer({
           onSubtitleDelayChange={() => {}}
           audioTracks={audioTracks}
           activeAudioIndex={activeAudioIndex}
-          onAudioSelect={(index) => setActiveAudioIndex(index)}
+          onAudioSelect={
+            audioTracks.length > 0 && audioSwitchSupported
+              ? (index) => {
+                  if (audioTrackSwitchRef.current?.(index)) setActiveAudioIndex(index);
+                }
+              : undefined
+          }
+          audioUnavailable={audioTracks.length === 0 || !audioSwitchSupported}
           qualityOptions={
             mode === "hls"
               ? quality.options.map((option) => ({
@@ -322,6 +375,7 @@ export function LiveTVPlayer({
           }
           onQualitySelect={selectQuality}
           showPlaybackInfo={false}
+          playbackInfoAvailable={false}
           onTogglePlaybackInfo={() => {}}
           onPlayPause={togglePlayback}
           onSeek={() => {}}

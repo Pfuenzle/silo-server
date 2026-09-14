@@ -24,6 +24,9 @@ vi.mock("hls.js", () => ({
       hlsConstructorMock();
     }
 
+    audioTracks = [{}, {}];
+    audioTrack = 0;
+
     on(_event: string, handler: () => void) {
       hlsCallsMock("onError");
       hlsErrorHandlerMock.mockImplementation(handler);
@@ -106,7 +109,7 @@ describe("LiveTVPlayer", () => {
     expect(screen.getByTestId("player-surface")).toHaveClass("absolute");
   });
 
-  it("passes negotiated audio tracks to the normal player controls", async () => {
+  it("shows negotiated audio metadata as unavailable when the active engine cannot switch tracks", async () => {
     apiMock.mockResolvedValue({
       options: [],
       transcoding_supported: false,
@@ -121,7 +124,79 @@ describe("LiveTVPlayer", () => {
       />,
     );
 
-    await waitFor(() => expect(screen.getByRole("button", { name: /Audio/i })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Audio unavailable" })).toBeDisabled();
+  });
+
+  it("exposes negotiated audio selection only when the HLS engine can switch tracks", async () => {
+    hlsSupportedMock.mockReturnValue(true);
+    apiMock.mockResolvedValue({
+      options: [],
+      transcoding_supported: false,
+      audio_tracks: [
+        { id: "audio-en", language: "en", name: "English", default: true },
+        { id: "audio-de", language: "de", name: "Deutsch", default: false },
+      ],
+    });
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Audio tracks" })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: "Audio unavailable" })).not.toBeInTheDocument();
+  });
+
+  it("pauses and resumes the live media element with visible state and limitation", () => {
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    const video = document.querySelector("video");
+    expect(video).not.toBeNull();
+    if (!video) return;
+    const play = vi.spyOn(video, "play").mockResolvedValue(undefined);
+
+    fireEvent.playing(video);
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    fireEvent.pause(video);
+    expect(screen.getByRole("status", { name: "Live" })).toHaveTextContent("paused");
+    expect(screen.getByText(/resume starts at the provider's live edge/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Play" }));
+    expect(play).toHaveBeenCalled();
+  });
+
+  it("uses the player shell as the fullscreen target and keeps controls available", async () => {
+    const requestFullscreen = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(HTMLElement.prototype, "requestFullscreen", {
+      configurable: true,
+      value: requestFullscreen,
+    });
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Fullscreen" }));
+
+    expect(requestFullscreen).toHaveBeenCalledWith();
+    expect(screen.getByTestId("player-controls")).toBeInTheDocument();
   });
 
   it("uses the normal player chrome without VOD transport controls", () => {
@@ -140,6 +215,33 @@ describe("LiveTVPlayer", () => {
     expect(screen.getByRole("slider", { name: "Volume" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /seconds/i })).not.toBeInTheDocument();
     expect(screen.queryByText(/\/\s*\d+:/)).not.toBeInTheDocument();
+  });
+
+  it("opens the shared settings menu instead of a bespoke Live TV overlay", () => {
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1024);
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          callback([], {} as ResizeObserver);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "More player options" }));
+
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Playback info" })).not.toBeInTheDocument();
   });
 
   it("shows an enabled quality control in compact mode and sends the selected server option", async () => {
@@ -345,7 +447,9 @@ describe("LiveTVPlayer", () => {
       );
       expect(screen.queryByRole("button", { name: /seek/i })).not.toBeInTheDocument();
       act(() => vi.advanceTimersByTime(11));
-      expect(screen.getByTestId("live-player-error")).toHaveTextContent("Live playback could not start");
+      expect(screen.getByTestId("live-player-error")).toHaveTextContent(
+        "Live playback could not start",
+      );
       expect(screen.getByTestId("live-player-error")).not.toHaveClass("sr-only");
       expect(screen.getByRole("button", { name: "Retry live playback" })).toBeInTheDocument();
     } finally {
