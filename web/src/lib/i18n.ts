@@ -63,6 +63,7 @@ export const liveTVTranslations = {
     playerReconnecting: "Verbindung wird wiederhergestellt…",
     playerError: "Live-Wiedergabe konnte nicht gestartet werden",
     playerRetry: "Live-Wiedergabe erneut versuchen",
+    playerRetryExplanation: "Der Stream konnte nicht gestartet werden. Erneut versuchen, um die Verbindung wiederherzustellen.",
     playerStop: "Live-Wiedergabe beenden",
   },
   en: {
@@ -129,6 +130,7 @@ export const liveTVTranslations = {
     playerReconnecting: "Reconnecting…",
     playerError: "Live playback could not start",
     playerRetry: "Retry live playback",
+    playerRetryExplanation: "The stream did not start. Retry to reconnect.",
     playerStop: "Stop live playback",
   },
 } as const;

@@ -344,9 +344,17 @@ export function LiveTVPlayer({
       ) : null}
       {state === "error" || !streamIsSafe ? (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/70">
-          <button type="button" onClick={retry}>
-            {liveTVT("playerRetry", locale)}
-          </button>
+          <div className="surface-panel-subtle flex max-w-sm flex-col items-center gap-3 rounded-xl px-6 py-5 text-center">
+            <p data-testid="live-player-error" role="alert" className="text-sm text-white">
+              {liveTVT("playerError", locale)}
+            </p>
+            <p className="text-xs text-white/60">{liveTVT("playerRetryExplanation", locale)}</p>
+            {streamIsSafe ? (
+              <button type="button" onClick={retry}>
+                {liveTVT("playerRetry", locale)}
+              </button>
+            ) : null}
+          </div>
         </div>
       ) : null}
     </div>

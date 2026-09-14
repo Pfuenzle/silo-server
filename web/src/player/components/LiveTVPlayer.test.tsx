@@ -316,7 +316,8 @@ describe("LiveTVPlayer", () => {
       );
       expect(screen.queryByRole("button", { name: /seek/i })).not.toBeInTheDocument();
       act(() => vi.advanceTimersByTime(11));
-      expect(screen.getByText("Live playback could not start")).toBeInTheDocument();
+      expect(screen.getByTestId("live-player-error")).toHaveTextContent("Live playback could not start");
+      expect(screen.getByTestId("live-player-error")).not.toHaveClass("sr-only");
       expect(screen.getByRole("button", { name: "Retry live playback" })).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
