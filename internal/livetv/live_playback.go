@@ -34,6 +34,9 @@ type LivePlaybackObserver interface {
 type LivePlaybackSourceAuthority interface {
 	ResolveLiveChannel(context.Context, int, SourceQualifiedID) (Channel, error)
 }
+type LivePlaybackSessionValidator interface {
+	IsValid(context.Context, string) (bool, error)
+}
 type livePlaybackIdentityKey struct{}
 
 func WithLivePlaybackIdentity(ctx context.Context, identity LivePlaybackIdentity) context.Context {
@@ -67,6 +70,7 @@ type LivePlaybackConfig struct {
 	MaxLifetime                              time.Duration
 	Observer                                 LivePlaybackObserver
 	Authority                                LivePlaybackSourceAuthority
+	SessionValidator                         LivePlaybackSessionValidator
 	Store                                    LivePlaybackStore
 	AllowPrivateNetworksForConfiguredSources bool
 }
@@ -111,6 +115,7 @@ type LivePlaybackService struct {
 	idleTimeout, maxLifetime                 time.Duration
 	observer                                 LivePlaybackObserver
 	authority                                LivePlaybackSourceAuthority
+	sessionValidator                         LivePlaybackSessionValidator
 	store                                    LivePlaybackStore
 	allowPrivateNetworksForConfiguredSources bool
 	mu                                       sync.Mutex
@@ -133,7 +138,7 @@ func NewLivePlaybackService(config LivePlaybackConfig) *LivePlaybackService {
 	if lifetime <= 0 {
 		lifetime = 12 * time.Hour
 	}
-	return &LivePlaybackService{fetch: config.Fetch, proxyOrigin: strings.TrimRight(strings.TrimSpace(config.ProxyOrigin), "/"), now: now, idleTimeout: idle, maxLifetime: lifetime, observer: config.Observer, authority: config.Authority, store: config.Store, allowPrivateNetworksForConfiguredSources: config.AllowPrivateNetworksForConfiguredSources, sessions: make(map[string]*LivePlaybackSession), reconnects: make(map[string]int), active: make(map[string]map[*livePlaybackActiveRequest]struct{}), revoked: make(map[string]struct{})}
+	return &LivePlaybackService{fetch: config.Fetch, proxyOrigin: strings.TrimRight(strings.TrimSpace(config.ProxyOrigin), "/"), now: now, idleTimeout: idle, maxLifetime: lifetime, observer: config.Observer, authority: config.Authority, sessionValidator: config.SessionValidator, store: config.Store, allowPrivateNetworksForConfiguredSources: config.AllowPrivateNetworksForConfiguredSources, sessions: make(map[string]*LivePlaybackSession), reconnects: make(map[string]int), active: make(map[string]map[*livePlaybackActiveRequest]struct{}), revoked: make(map[string]struct{})}
 }
 
 func (s *LivePlaybackService) SetProxyOrigin(origin string) {

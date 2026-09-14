@@ -122,6 +122,20 @@ func (s *LivePlaybackService) authorize(ctx context.Context, grantID, userID, pr
 			userID, profileID = fmt.Sprintf("%d", session.UserID), session.ProfileID
 		}
 	}
+	sessionID := session.SessionID
+	if s.sessionValidator != nil {
+		s.mu.Unlock()
+		valid, err := s.sessionValidator.IsValid(ctx, sessionID)
+		if err != nil || !valid {
+			return nil, ErrLivePlaybackForbidden
+		}
+		s.mu.Lock()
+		session = s.sessions[grantID]
+		if session == nil {
+			s.mu.Unlock()
+			return nil, ErrLivePlaybackForbidden
+		}
+	}
 	if identity, ok := ctx.Value(livePlaybackIdentityKey{}).(LivePlaybackIdentity); ok {
 		userID, profileID = fmt.Sprintf("%d", identity.UserID), identity.ProfileID
 		if identity.SessionID != session.SessionID {

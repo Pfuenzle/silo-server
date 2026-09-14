@@ -1002,6 +1002,7 @@ func main() {
 				AllowPrivateNetworksForConfiguredSources: true,
 				ProxyOrigin:                              nodeURL,
 				Authority:                                livetv.NewPostgresRepository(pool),
+				SessionValidator:                         auth.NewSessionRepository(pool),
 				Store:                                    newLivePlaybackStore(redisClient, cfg.Auth.JWTSecret),
 			})
 			livePlayback.StartSweeper(appCtx)
@@ -1196,6 +1197,7 @@ func main() {
 			AllowPrivateNetworksForConfiguredSources: true,
 			ProxyOrigin:                              integratedLivePlaybackOrigin(mode),
 			Authority:                                liveTVRepo,
+			SessionValidator:                         auth.NewSessionRepository(pool),
 			Store:                                    newLivePlaybackStore(apiRedisClient, cfg.Auth.JWTSecret),
 		})
 		livePlayback.StartSweeper(appCtx)

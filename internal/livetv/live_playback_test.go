@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -120,6 +121,93 @@ func TestLivePlayback_ServeHTTP_rejectsSameOwnerDifferentSession(t *testing.T) {
 	// Then the proxy refuses access before contacting the provider.
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", recorder.Code)
+	}
+}
+
+type livePlaybackSessionValidator struct {
+	valid bool
+	err   error
+}
+
+func (v *livePlaybackSessionValidator) IsValid(context.Context, string) (bool, error) {
+	return v.valid, v.err
+}
+
+func TestLivePlayback_MediaTokenIdentity_rejectsRevokedLoginSession(t *testing.T) {
+	validator := &livePlaybackSessionValidator{valid: true}
+	service := NewLivePlaybackService(LivePlaybackConfig{
+		Fetch:            NewFetchService(FetchConfig{Resolver: liveTestResolver{}}),
+		ProxyOrigin:      "https://silo.example",
+		Authority:        liveTestAuthority{},
+		SessionValidator: validator,
+	})
+	grant, err := service.Start(context.Background(), LivePlaybackRequest{
+		UserID: 7, ProfileID: "profile-a", LibraryID: 4, ChannelID: SourceQualifiedID("fixture|channel-1"),
+		SessionID: "session-a", Mode: LivePlaybackModeHLS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator.valid = false
+
+	manifestURL, parseErr := url.Parse(grant.ManifestURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	_, err = service.MediaTokenIdentity(context.Background(), grant.GrantID, manifestURL.Query().Get("live_token"))
+	if !errors.Is(err, ErrLivePlaybackForbidden) {
+		t.Fatalf("error = %v, want %v", err, ErrLivePlaybackForbidden)
+	}
+}
+
+func TestLivePlayback_ServeHTTP_rejectsRevokedLoginSessionBeforeProvider(t *testing.T) {
+	validator := &livePlaybackSessionValidator{valid: true}
+	service := NewLivePlaybackService(LivePlaybackConfig{
+		Fetch:            NewFetchService(FetchConfig{Resolver: liveTestResolver{}}),
+		ProxyOrigin:      "https://silo.example",
+		Authority:        liveTestAuthority{},
+		SessionValidator: validator,
+	})
+	grant, err := service.Start(context.Background(), LivePlaybackRequest{
+		UserID: 7, ProfileID: "profile-a", LibraryID: 4, ChannelID: SourceQualifiedID("fixture|channel-1"),
+		SessionID: "session-a", Mode: LivePlaybackModeDirect,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator.valid = false
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, grant.ManifestURL, nil)
+	service.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", recorder.Code)
+	}
+}
+
+func TestLivePlayback_MediaTokenIdentity_rejectsSessionValidatorError(t *testing.T) {
+	validator := &livePlaybackSessionValidator{valid: true, err: errors.New("session store unavailable")}
+	service := NewLivePlaybackService(LivePlaybackConfig{
+		Fetch:            NewFetchService(FetchConfig{Resolver: liveTestResolver{}}),
+		ProxyOrigin:      "https://silo.example",
+		Authority:        liveTestAuthority{},
+		SessionValidator: validator,
+	})
+	grant, err := service.Start(context.Background(), LivePlaybackRequest{
+		UserID: 7, ProfileID: "profile-a", LibraryID: 4, ChannelID: SourceQualifiedID("fixture|channel-1"),
+		SessionID: "session-a", Mode: LivePlaybackModeHLS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestURL, parseErr := url.Parse(grant.ManifestURL)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+
+	_, err = service.MediaTokenIdentity(context.Background(), grant.GrantID, manifestURL.Query().Get("live_token"))
+	if !errors.Is(err, ErrLivePlaybackForbidden) {
+		t.Fatalf("error = %v, want %v", err, ErrLivePlaybackForbidden)
 	}
 }
 
