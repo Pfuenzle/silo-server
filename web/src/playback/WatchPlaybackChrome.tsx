@@ -241,7 +241,7 @@ export function WatchPlaybackProvider({ children }: { children: ReactNode }) {
 
         // When transitioning from post-roll, explicitly set foreground state
         // before navigating so the new route picks up the correct mode immediately.
-        if (current.mode === "post-roll") {
+        if (current.mode === "post-roll" || isLivePlaybackRequest(request)) {
           dispatch({
             type: "START_PLAYBACK",
             request,
