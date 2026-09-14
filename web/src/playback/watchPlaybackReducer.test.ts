@@ -17,6 +17,19 @@ function makeRequest(overrides: Partial<ReturnType<typeof createWatchRouteReques
   };
 }
 
+function makeLiveRequest() {
+  return {
+    ...createWatchRouteRequest({ contentId: "" }),
+    kind: "live-tv" as const,
+    channelId: "channel-1",
+    title: "News",
+    streamUrl: "/api/v1/stream/live/grant-1/manifest",
+    grantId: "grant-1",
+    mode: "direct" as const,
+    returnHref: "/library/7",
+  };
+}
+
 function makeState(overrides: Partial<WatchPlaybackHostState> = {}): WatchPlaybackHostState {
   return {
     ...createEmptyPlaybackState(),
@@ -27,6 +40,17 @@ function makeState(overrides: Partial<WatchPlaybackHostState> = {}): WatchPlayba
 }
 
 describe("watchPlaybackReducer", () => {
+  it("keeps a live playback start in the foreground", () => {
+    const request = makeLiveRequest();
+    const next = watchPlaybackReducer(createEmptyPlaybackState(), {
+      type: "START_PLAYBACK",
+      request,
+    });
+
+    expect(next.request).toEqual(request);
+    expect(next.mode).toBe("foreground");
+  });
+
   it("clears the active playback state on explicit exit", () => {
     const next = watchPlaybackReducer(
       makeState({
