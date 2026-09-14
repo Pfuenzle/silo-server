@@ -115,6 +115,7 @@ export function LiveTVPlayer({
             });
             player.attachMedia(video);
             player.loadSource(streamURL);
+            player.on(Hls.Events.ERROR, () => setState("error"));
             destroyPlayer = () => player.destroy();
             retryPlayerRef.current = () => player.startLoad();
             void Promise.resolve(video.play()).catch(() => setState("error"));

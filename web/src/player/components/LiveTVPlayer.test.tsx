@@ -7,16 +7,24 @@ const profileMock = vi.hoisted(() => ({ profile: null as { language?: string } |
 const hlsConstructorMock = vi.hoisted(() => vi.fn());
 const hlsCallsMock = vi.hoisted(() => vi.fn());
 const hlsSupportedMock = vi.hoisted(() => vi.fn(() => false));
+const hlsErrorHandlerMock = vi.hoisted(() => vi.fn());
 vi.mock("@/api/client", () => ({ api: apiMock }));
 vi.mock("@/hooks/useCurrentProfile", () => ({ useCurrentProfile: () => profileMock }));
 vi.mock("hls.js", () => ({
   default: class MockHls {
+    static Events = { ERROR: "hlsError" };
+
     static isSupported() {
       return hlsSupportedMock();
     }
 
     constructor() {
       hlsConstructorMock();
+    }
+
+    on(_event: string, handler: () => void) {
+      hlsCallsMock("onError");
+      hlsErrorHandlerMock.mockImplementation(handler);
     }
 
     attachMedia() {
@@ -40,6 +48,7 @@ afterEach(() => {
   hlsConstructorMock.mockReset();
   hlsCallsMock.mockReset();
   hlsSupportedMock.mockReset();
+  hlsErrorHandlerMock.mockReset();
   hlsSupportedMock.mockReturnValue(false);
 });
 
@@ -369,7 +378,30 @@ describe("LiveTVPlayer", () => {
     );
 
     await waitFor(() => expect(hlsConstructorMock).toHaveBeenCalled());
-    expect(hlsCallsMock.mock.calls.map(([name]) => name)).toEqual(["attachMedia", "loadSource"]);
+    expect(hlsCallsMock.mock.calls.map(([name]) => name)).toEqual([
+      "attachMedia",
+      "loadSource",
+      "onError",
+    ]);
+  });
+
+  it("shows the retry overlay when HLS reports a media error", async () => {
+    hlsSupportedMock.mockReturnValue(true);
+
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    await waitFor(() => expect(hlsCallsMock).toHaveBeenCalledWith("onError"));
+    act(() => hlsErrorHandlerMock());
+
+    expect(screen.getByTestId("live-player-error")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry live playback" })).toBeInTheDocument();
   });
 
   it("starts the attached HLS media element with audio enabled", async () => {
