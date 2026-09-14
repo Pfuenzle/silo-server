@@ -8,6 +8,8 @@ const hlsConstructorMock = vi.hoisted(() => vi.fn());
 const hlsCallsMock = vi.hoisted(() => vi.fn());
 const hlsSupportedMock = vi.hoisted(() => vi.fn(() => false));
 const hlsErrorHandlerMock = vi.hoisted(() => vi.fn());
+const mpegtsErrorHandlerMock = vi.hoisted(() => vi.fn());
+const mpegtsCallsMock = vi.hoisted(() => vi.fn());
 vi.mock("@/api/client", () => ({ api: apiMock }));
 vi.mock("@/hooks/useCurrentProfile", () => ({ useCurrentProfile: () => profileMock }));
 vi.mock("hls.js", () => ({
@@ -39,6 +41,22 @@ vi.mock("hls.js", () => ({
     }
   },
 }));
+vi.mock("mpegts.js", () => ({
+  default: {
+    Events: { ERROR: "mpegtsError" },
+    createPlayer: () => ({
+      attachMediaElement: () => mpegtsCallsMock("attachMediaElement"),
+      destroy: () => {},
+      load: () => mpegtsCallsMock("load"),
+      on: (_event: string, handler: () => void) => {
+        mpegtsCallsMock("onError");
+        mpegtsErrorHandlerMock.mockImplementation(handler);
+      },
+      play: () => Promise.resolve(),
+      unload: () => mpegtsCallsMock("unload"),
+    }),
+  },
+}));
 
 afterEach(() => {
   cleanup();
@@ -49,6 +67,8 @@ afterEach(() => {
   hlsCallsMock.mockReset();
   hlsSupportedMock.mockReset();
   hlsErrorHandlerMock.mockReset();
+  mpegtsErrorHandlerMock.mockReset();
+  mpegtsCallsMock.mockReset();
   hlsSupportedMock.mockReturnValue(false);
 });
 
@@ -476,6 +496,24 @@ describe("LiveTVPlayer", () => {
     );
 
     await waitFor(() => expect(screen.getByRole("status", { name: "Live" })).toBeInTheDocument());
+  });
+
+  it("shows the retry overlay when direct MPEG-TS reports a media error", async () => {
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+        mode="direct"
+      />,
+    );
+
+    await waitFor(() => expect(mpegtsCallsMock).toHaveBeenCalledWith("onError"));
+    act(() => mpegtsErrorHandlerMock());
+
+    expect(screen.getByTestId("live-player-error")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry live playback" })).toBeInTheDocument();
   });
 
   it("does not initialize HLS after the player unmounts", async () => {

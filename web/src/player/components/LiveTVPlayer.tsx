@@ -93,6 +93,7 @@ export function LiveTVPlayer({
           destroyPlayer = () => player.destroy();
           player.attachMediaElement(video);
           player.load();
+          player.on(MPEGts.Events.ERROR, () => setState("error"));
           retryPlayerRef.current = () => {
             player.unload();
             player.load();
