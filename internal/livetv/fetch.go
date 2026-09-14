@@ -30,15 +30,18 @@ func (s *FetchService) detectLivePlaybackMode(ctx context.Context, rawURL string
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return "", fmt.Errorf("Live TV source returned status %d", response.StatusCode)
 	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
+	if contentType == "video/mp2t" || contentType == "application/octet-stream" {
+		return LivePlaybackModeDirect, nil
+	}
 	prefix, err := bufio.NewReader(io.LimitReader(response.Body, 512)).Peek(8)
 	if err != nil && len(prefix) == 0 {
 		return "", sourcePolicyError("playback probe", err)
 	}
-	contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
 	if contentType == "application/vnd.apple.mpegurl" || contentType == "application/x-mpegurl" || strings.HasPrefix(string(prefix), "#EXTM3U") {
 		return LivePlaybackModeHLS, nil
 	}
-	if contentType == "video/mp2t" || contentType == "application/octet-stream" || (len(prefix) > 0 && prefix[0] == 0x47) {
+	if len(prefix) > 0 && prefix[0] == 0x47 {
 		return LivePlaybackModeDirect, nil
 	}
 	return "", fmt.Errorf("unsupported Live TV stream content type %q", contentType)
