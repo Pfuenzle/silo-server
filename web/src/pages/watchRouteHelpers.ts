@@ -138,6 +138,10 @@ export function buildWatchItemHref(request: WatchRouteRequest): string {
 }
 
 export function buildWatchHref(request: WatchRouteRequest): string {
+  if ("kind" in request && request.kind === "live-tv") {
+    return "/watch/live";
+  }
+
   const searchParams = new URLSearchParams();
   if (request.fileId != null) searchParams.set("fileId", String(request.fileId));
   if (request.libraryId != null) searchParams.set("libraryId", String(request.libraryId));

@@ -9,6 +9,7 @@ import {
   buildWatchPageProps,
   buildWatchRouteRequest,
 } from "./watchRouteHelpers";
+import type { LiveTVPlaybackStartInput } from "./watchRouteHelpers";
 
 const profile = {
   id: "profile-1",
@@ -94,6 +95,21 @@ describe("buildWatchRouteRequest", () => {
       "/watch/movie-1?fileId=42&libraryId=7&restart=1",
     );
     expect(buildWatchHref(makeRequest())).toBe("/watch/movie-1");
+  });
+
+  it("keeps live playback on the player route instead of creating an empty item route", () => {
+    const request = {
+      ...createWatchRouteRequest({ contentId: "" }),
+      kind: "live-tv",
+      channelId: "channel-1",
+      title: "News",
+      streamUrl: "/api/v1/stream/live/grant-1/manifest",
+      grantId: "grant-1",
+      mode: "hls",
+      returnHref: "/library/7",
+    } satisfies LiveTVPlaybackStartInput;
+
+    expect(buildWatchHref(request)).toBe("/watch/live");
   });
 });
 

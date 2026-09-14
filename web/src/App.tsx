@@ -491,6 +491,14 @@ function AppRoutes() {
                   }
                 />
                 <Route
+                  path="/watch/live"
+                  element={
+                    <RequireProfile>
+                      <div data-testid="live-tv-watch-route" />
+                    </RequireProfile>
+                  }
+                />
+                <Route
                   path="/watch/:id"
                   element={
                     <RequireProfile>
