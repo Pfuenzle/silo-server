@@ -45,7 +45,9 @@ export function LiveTVPlayer({
   const surfaceRef = useRef<HTMLDivElement>(null);
   const retryPlayerRef = useRef<(() => void) | undefined>(undefined);
   const audioTrackSwitchRef = useRef<((index: number) => boolean) | undefined>(undefined);
-  const stoppedRef = useRef(false);
+  const audioTracksRef = useRef<PlayerAudioTrack[]>([]);
+  const audioTrackIdsRef = useRef<string[]>([]);
+  const revokedGrantRef = useRef<string | null>(null);
   const [state, setState] = useState<"starting" | "playing" | "error" | "reconnecting">("starting");
   const [playing, setPlaying] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -68,8 +70,8 @@ export function LiveTVPlayer({
   const streamIsSafe = isSiloPlaybackUrl(streamUrl);
 
   const revokePlayback = useCallback(() => {
-    if (stoppedRef.current) return;
-    stoppedRef.current = true;
+    if (revokedGrantRef.current === grantId) return;
+    revokedGrantRef.current = grantId;
     void Promise.resolve(
       api(`/livetv/playback/${encodeURIComponent(grantId)}`, {
         method: "DELETE",
@@ -127,25 +129,59 @@ export function LiveTVPlayer({
         .then(({ default: Hls }) => {
           if (cancelled) return;
           if (Hls.isSupported()) {
-            setAudioSwitchSupported(true);
+            setAudioSwitchSupported(false);
             const player = new Hls({
               enableWorker: true,
               lowLatencyMode: true,
               backBufferLength: 0,
             });
             player.attachMedia(video);
-            player.loadSource(streamURL);
+            const updateAudioTracks = () => {
+              const availableTracks = player.audioTracks;
+              setAudioSwitchSupported(availableTracks.length > 0);
+              if (availableTracks.length === 0) return;
+              const activeTrack = availableTracks[player.audioTrack];
+              const activeId = activeTrack?.groupId;
+              const negotiatedIndex = audioTrackIdsRef.current.findIndex(
+                (id) => id === activeTrack?.groupId,
+              );
+              if (negotiatedIndex >= 0) setActiveAudioIndex(negotiatedIndex);
+              if (activeId) {
+                audioTrackSwitchRef.current = (index) => {
+                  const requested = audioTracksRef.current[index];
+                  if (!requested) return false;
+                  const engineIndex = availableTracks.findIndex(
+                    (track) => track.groupId === audioTrackIdsRef.current[index],
+                  );
+                  if (engineIndex < 0) return false;
+                  player.audioTrack = engineIndex;
+                  return true;
+                };
+              }
+            };
+            player.on(Hls.Events.MANIFEST_PARSED, updateAudioTracks);
+            player.on(Hls.Events.AUDIO_TRACKS_UPDATED, updateAudioTracks);
             audioTrackSwitchRef.current = (index) => {
-              if (index < 0 || index >= player.audioTracks.length) return false;
-              player.audioTrack = index;
+              const requested = audioTracksRef.current[index];
+              if (!requested) return false;
+              const engineIndex = player.audioTracks.findIndex(
+                (track) => track.groupId === audioTrackIdsRef.current[index],
+              );
+              if (engineIndex < 0) return false;
+              player.audioTrack = engineIndex;
               return true;
             };
             player.on(Hls.Events.ERROR, () => setState("error"));
             destroyPlayer = () => player.destroy();
             retryPlayerRef.current = () => player.startLoad();
+            player.loadSource(streamURL);
             void Promise.resolve(video.play()).catch(() => setState("error"));
           } else {
             setAudioSwitchSupported(false);
+            setAudioTracks([]);
+            audioTracksRef.current = [];
+            audioTrackIdsRef.current = [];
+            setActiveAudioIndex(0);
             audioTrackSwitchRef.current = undefined;
             video.src = streamURL;
             void Promise.resolve(video.play()).catch(() => setState("error"));
@@ -185,13 +221,14 @@ export function LiveTVPlayer({
           const parsed = liveTVQualityResponseSchema.parse(value);
           setQuality(parsed);
           const negotiatedAudioTracks = parsed.audio_tracks ?? [];
-          setAudioTracks(
-            negotiatedAudioTracks.map((track) => ({
-              language: track.language,
-              title: track.name,
-              default: track.default,
-            })),
-          );
+          const playerAudioTracks = negotiatedAudioTracks.map((track) => ({
+            language: track.language,
+            title: track.name,
+            default: track.default,
+          }));
+          audioTrackIdsRef.current = negotiatedAudioTracks.map((track) => track.id);
+          audioTracksRef.current = playerAudioTracks;
+          setAudioTracks(playerAudioTracks);
           const defaultAudioIndex = negotiatedAudioTracks.findIndex((track) => track.default);
           setActiveAudioIndex(defaultAudioIndex >= 0 ? defaultAudioIndex : 0);
         }
@@ -234,8 +271,21 @@ export function LiveTVPlayer({
 
   useEffect(() => {
     const handleFullscreenChange = () => setIsFullscreen(document.fullscreenElement !== null);
+    const handleWebKitFullscreenChange = (event: Event) => {
+      const video = event.currentTarget;
+      if (video instanceof HTMLVideoElement && supportsWebKitFullscreen(video)) {
+        setIsFullscreen(Boolean(video.webkitDisplayingFullscreen));
+      }
+    };
     document.addEventListener("fullscreenchange", handleFullscreenChange);
-    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    const video = videoRef.current;
+    video?.addEventListener("webkitbeginfullscreen", handleWebKitFullscreenChange);
+    video?.addEventListener("webkitendfullscreen", handleWebKitFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      video?.removeEventListener("webkitbeginfullscreen", handleWebKitFullscreenChange);
+      video?.removeEventListener("webkitendfullscreen", handleWebKitFullscreenChange);
+    };
   }, []);
 
   const stop = () => {
@@ -258,6 +308,9 @@ export function LiveTVPlayer({
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
+      if (video.seekable.length > 0) {
+        video.currentTime = video.seekable.end(video.seekable.length - 1);
+      }
       void Promise.resolve(video.play()).catch((error: unknown) => {
         if (error instanceof Error) setState("error");
       });
@@ -275,11 +328,23 @@ export function LiveTVPlayer({
       setIsFullscreen(false);
       return;
     }
+    if (video && supportsWebKitFullscreen(video) && video.webkitDisplayingFullscreen) {
+      video.webkitExitFullscreen?.();
+      setIsFullscreen(false);
+      return;
+    }
     if (typeof surface.requestFullscreen === "function") {
       void surface
         .requestFullscreen()
         .then(() => setIsFullscreen(true))
-        .catch(() => setIsFullscreen(false));
+        .catch(() => {
+          if (video && supportsWebKitFullscreen(video)) {
+            video.webkitEnterFullscreen?.();
+            setIsFullscreen(true);
+          } else {
+            setIsFullscreen(false);
+          }
+        });
       return;
     }
     if (video && supportsWebKitFullscreen(video)) {

@@ -8,13 +8,18 @@ const hlsConstructorMock = vi.hoisted(() => vi.fn());
 const hlsCallsMock = vi.hoisted(() => vi.fn());
 const hlsSupportedMock = vi.hoisted(() => vi.fn(() => false));
 const hlsErrorHandlerMock = vi.hoisted(() => vi.fn());
+const hlsEventHandlersMock = vi.hoisted(() => new Map<string, () => void>());
 const mpegtsErrorHandlerMock = vi.hoisted(() => vi.fn());
 const mpegtsCallsMock = vi.hoisted(() => vi.fn());
 vi.mock("@/api/client", () => ({ api: apiMock }));
 vi.mock("@/hooks/useCurrentProfile", () => ({ useCurrentProfile: () => profileMock }));
 vi.mock("hls.js", () => ({
   default: class MockHls {
-    static Events = { ERROR: "hlsError" };
+    static Events = {
+      ERROR: "hlsError",
+      MANIFEST_PARSED: "manifestParsed",
+      AUDIO_TRACKS_UPDATED: "audioTracksUpdated",
+    };
 
     static isSupported() {
       return hlsSupportedMock();
@@ -24,12 +29,16 @@ vi.mock("hls.js", () => ({
       hlsConstructorMock();
     }
 
-    audioTracks = [{}, {}];
+    audioTracks = [
+      { groupId: "audio-en", name: "English" },
+      { groupId: "audio-de", name: "Deutsch" },
+    ];
     audioTrack = 0;
 
-    on(_event: string, handler: () => void) {
-      hlsCallsMock("onError");
-      hlsErrorHandlerMock.mockImplementation(handler);
+    on(event: string, handler: () => void) {
+      hlsCallsMock(event);
+      hlsEventHandlersMock.set(event, handler);
+      if (event === "hlsError") hlsErrorHandlerMock.mockImplementation(handler);
     }
 
     attachMedia() {
@@ -38,6 +47,7 @@ vi.mock("hls.js", () => ({
     destroy() {}
     loadSource() {
       hlsCallsMock("loadSource");
+      hlsEventHandlersMock.get("manifestParsed")?.();
     }
     startLoad() {
       hlsCallsMock("startLoad");
@@ -70,6 +80,7 @@ afterEach(() => {
   hlsCallsMock.mockReset();
   hlsSupportedMock.mockReset();
   hlsErrorHandlerMock.mockReset();
+  hlsEventHandlersMock.clear();
   mpegtsErrorHandlerMock.mockReset();
   mpegtsCallsMock.mockReset();
   hlsSupportedMock.mockReturnValue(false);
@@ -150,6 +161,9 @@ describe("LiveTVPlayer", () => {
       expect(screen.getByRole("button", { name: "Audio tracks" })).toBeInTheDocument(),
     );
     expect(screen.queryByRole("button", { name: "Audio unavailable" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Deutsch/ }));
+    expect(screen.getByRole("button", { name: "Audio tracks" })).toBeInTheDocument();
   });
 
   it("pauses and resumes the live media element with visible state and limitation", () => {
@@ -178,6 +192,30 @@ describe("LiveTVPlayer", () => {
     expect(play).toHaveBeenCalled();
   });
 
+  it("resumes from the newest seekable live edge", () => {
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+    const video = document.querySelector("video");
+    if (!video) return;
+    const play = vi.spyOn(video, "play").mockResolvedValue(undefined);
+    Object.defineProperty(video, "paused", { configurable: true, value: true });
+    Object.defineProperty(video, "seekable", {
+      configurable: true,
+      value: { length: 1, end: () => 720 },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Play" }));
+
+    expect(video.currentTime).toBe(720);
+    expect(play).toHaveBeenCalled();
+  });
+
   it("uses the player shell as the fullscreen target and keeps controls available", async () => {
     const requestFullscreen = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(HTMLElement.prototype, "requestFullscreen", {
@@ -197,6 +235,33 @@ describe("LiveTVPlayer", () => {
 
     expect(requestFullscreen).toHaveBeenCalledWith();
     expect(screen.getByTestId("player-controls")).toBeInTheDocument();
+  });
+
+  it("falls back to WebKit fullscreen when the shell request is rejected", async () => {
+    const requestFullscreen = vi.fn().mockRejectedValue(new Error("unsupported"));
+    Object.defineProperty(HTMLElement.prototype, "requestFullscreen", {
+      configurable: true,
+      value: requestFullscreen,
+    });
+    const enterFullscreen = vi.fn();
+    const videoPrototype = HTMLVideoElement.prototype as HTMLVideoElement & {
+      webkitEnterFullscreen?: () => void;
+    };
+    Object.defineProperty(videoPrototype, "webkitEnterFullscreen", {
+      configurable: true,
+      value: enterFullscreen,
+    });
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Fullscreen" }));
+    await waitFor(() => expect(enterFullscreen).toHaveBeenCalled());
   });
 
   it("uses the normal player chrome without VOD transport controls", () => {
@@ -433,6 +498,39 @@ describe("LiveTVPlayer", () => {
     );
   });
 
+  it("revokes both grants when the player receives a replacement grant", async () => {
+    apiMock.mockResolvedValue(undefined);
+    const { rerender, unmount } = render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+    rerender(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-2/manifest"
+        grantId="grant-2"
+      />,
+    );
+    await waitFor(() =>
+      expect(apiMock).toHaveBeenCalledWith("/livetv/playback/grant-1", {
+        method: "DELETE",
+        keepalive: true,
+      }),
+    );
+    unmount();
+    await waitFor(() =>
+      expect(apiMock).toHaveBeenCalledWith("/livetv/playback/grant-2", {
+        method: "DELETE",
+        keepalive: true,
+      }),
+    );
+  });
+
   it("disables seeking and reports startup failure with retry", async () => {
     vi.useFakeTimers();
     try {
@@ -504,8 +602,10 @@ describe("LiveTVPlayer", () => {
     await waitFor(() => expect(hlsConstructorMock).toHaveBeenCalled());
     expect(hlsCallsMock.mock.calls.map(([name]) => name)).toEqual([
       "attachMedia",
+      "manifestParsed",
+      "audioTracksUpdated",
+      "hlsError",
       "loadSource",
-      "onError",
     ]);
   });
 
@@ -521,7 +621,7 @@ describe("LiveTVPlayer", () => {
       />,
     );
 
-    await waitFor(() => expect(hlsCallsMock).toHaveBeenCalledWith("onError"));
+    await waitFor(() => expect(hlsCallsMock).toHaveBeenCalledWith("hlsError"));
     act(() => hlsErrorHandlerMock());
 
     expect(screen.getByTestId("live-player-error")).toBeInTheDocument();
