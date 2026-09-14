@@ -369,6 +369,7 @@ describe("LiveTVLibraryPage", () => {
         kind: "live-tv",
         channelId: "source|one",
         grantId: "grant-1",
+        returnHref: "/",
       }),
     );
   });
@@ -412,7 +413,7 @@ describe("LiveTVLibraryPage", () => {
     });
 
     expect(mocks.startPlayback).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "live-tv", grantId: "grant-1" }),
+      expect.objectContaining({ kind: "live-tv", grantId: "grant-1", returnHref: "/" }),
     );
     expect(mocks.toastError).not.toHaveBeenCalled();
   });
