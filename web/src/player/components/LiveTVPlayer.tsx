@@ -7,6 +7,7 @@ import {
 } from "@/api/livetv";
 import { liveTVT } from "@/lib/i18n";
 import { useCurrentProfile } from "@/hooks/useCurrentProfile";
+import type { PlayerAudioTrack } from "../types";
 import { PlayerControls } from "./PlayerControls";
 
 interface LiveTVPlayerProps {
@@ -46,6 +47,8 @@ export function LiveTVPlayer({
   });
   const [qualityError, setQualityError] = useState<string | null>(null);
   const [qualityRevision, setQualityRevision] = useState(0);
+  const [audioTracks, setAudioTracks] = useState<PlayerAudioTrack[]>([]);
+  const [activeAudioIndex, setActiveAudioIndex] = useState(0);
   const { profile } = useCurrentProfile();
   const locale = profile?.language?.startsWith("de") ? "de" : "en";
   const streamIsSafe = isSiloPlaybackUrl(streamUrl);
@@ -82,7 +85,11 @@ export function LiveTVPlayer({
       void import("mpegts.js")
         .then(({ default: MPEGts }) => {
           if (cancelled) return;
-          const player = MPEGts.createPlayer({ type: "mpegts", url: streamURL, isLive: true });
+          const player = MPEGts.createPlayer({
+            type: "mpegts",
+            url: streamURL,
+            isLive: true,
+          });
           destroyPlayer = () => player.destroy();
           player.attachMediaElement(video);
           player.load();
@@ -110,8 +117,10 @@ export function LiveTVPlayer({
             player.loadSource(streamURL);
             destroyPlayer = () => player.destroy();
             retryPlayerRef.current = () => player.startLoad();
+            void Promise.resolve(video.play()).catch(() => setState("error"));
           } else {
             video.src = streamURL;
+            void Promise.resolve(video.play()).catch(() => setState("error"));
           }
         })
         .catch((error: unknown) => {
@@ -143,7 +152,20 @@ export function LiveTVPlayer({
     let cancelled = false;
     void Promise.resolve(api<unknown>(`/livetv/playback/${encodeURIComponent(grantId)}/qualities`))
       .then((value) => {
-        if (!cancelled) setQuality(liveTVQualityResponseSchema.parse(value));
+        if (!cancelled) {
+          const parsed = liveTVQualityResponseSchema.parse(value);
+          setQuality(parsed);
+          const negotiatedAudioTracks = parsed.audio_tracks ?? [];
+          setAudioTracks(
+            negotiatedAudioTracks.map((track) => ({
+              language: track.language,
+              title: track.name,
+              default: track.default,
+            })),
+          );
+          const defaultAudioIndex = negotiatedAudioTracks.findIndex((track) => track.default);
+          setActiveAudioIndex(defaultAudioIndex >= 0 ? defaultAudioIndex : 0);
+        }
       })
       .catch((error: unknown) => {
         if (!cancelled)
@@ -231,8 +253,9 @@ export function LiveTVPlayer({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black"
+      className="player-container absolute inset-0 flex items-center justify-center bg-black"
       data-channel-id={channelId}
+      data-testid="player-surface"
     >
       <video
         ref={videoRef}
@@ -272,8 +295,9 @@ export function LiveTVPlayer({
           onSubtitleSelect={() => {}}
           subtitleDelayMs={0}
           onSubtitleDelayChange={() => {}}
-          audioTracks={[]}
-          activeAudioIndex={0}
+          audioTracks={audioTracks}
+          activeAudioIndex={activeAudioIndex}
+          onAudioSelect={(index) => setActiveAudioIndex(index)}
           qualityOptions={
             mode === "hls"
               ? quality.options.map((option) => ({

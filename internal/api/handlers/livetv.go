@@ -152,7 +152,7 @@ func (h *LiveTVHandler) HandlePlaybackQualities(w http.ResponseWriter, r *http.R
 		writeLiveQualityError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, liveTVQualityResponse{Options: state.Options, ActiveID: state.ActiveID, TranscodingSupported: state.TranscodingSupported, UnsupportedReason: state.UnsupportedReason})
+	writeJSON(w, http.StatusOK, liveTVQualityResponse{Options: state.Options, ActiveID: state.ActiveID, TranscodingSupported: state.TranscodingSupported, UnsupportedReason: state.UnsupportedReason, AudioTracks: state.AudioTracks})
 }
 
 func (h *LiveTVHandler) HandlePlaybackQuality(w http.ResponseWriter, r *http.Request) {

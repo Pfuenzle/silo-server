@@ -1,4 +1,6 @@
 import type { WatchRouteRequest } from "@/pages/watchRouteHelpers";
+import type { LiveTVPlaybackStartInput } from "@/pages/watchRouteHelpers";
+export type WatchPlaybackRequest = WatchRouteRequest | LiveTVPlaybackStartInput;
 
 export type WatchPlaybackMode =
   | "foreground"
@@ -20,7 +22,7 @@ export interface WatchPlaybackTransportControls {
 }
 
 export interface WatchPlaybackHostState {
-  request: WatchRouteRequest | null;
+  request: WatchPlaybackRequest | null;
   mode: WatchPlaybackMode;
   pictureInPictureActive: boolean;
   pendingReturnNavigation: string | null;
@@ -34,10 +36,10 @@ export interface WatchPlaybackHostState {
 export type WatchPlaybackAction =
   | {
       type: "START_PLAYBACK";
-      request: WatchRouteRequest;
+      request: WatchPlaybackRequest;
       mode?: Extract<WatchPlaybackMode, "foreground" | "background-bar">;
     }
-  | { type: "SYNC_ROUTE_REQUEST"; request: WatchRouteRequest }
+  | { type: "SYNC_ROUTE_REQUEST"; request: WatchPlaybackRequest }
   | { type: "ROUTE_LEFT"; requestKey: string }
   | { type: "EXIT_PLAYBACK" }
   | { type: "MINIMIZE_PLAYBACK"; requestKey: string }
@@ -79,7 +81,7 @@ export function createEmptyPlaybackState(): WatchPlaybackHostState {
 }
 
 function createPlaybackState(
-  request: WatchRouteRequest,
+  request: WatchPlaybackRequest,
   mode: Extract<WatchPlaybackMode, "foreground" | "background-bar"> = "foreground",
 ): WatchPlaybackHostState {
   return {

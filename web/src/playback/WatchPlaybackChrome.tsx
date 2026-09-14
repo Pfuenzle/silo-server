@@ -54,12 +54,18 @@ import { storage } from "@/utils/storage";
 import { WatchPlaybackControllerContext } from "./watchPlaybackContext";
 import type { WatchPlaybackControllerValue } from "./watchPlaybackContext";
 import type { WatchPlaybackSnapshot, WatchPlaybackTransportControls } from "./watchPlaybackReducer";
-import { createEmptyPlaybackState, watchPlaybackReducer } from "./watchPlaybackReducer";
+import {
+  createEmptyPlaybackState,
+  watchPlaybackReducer,
+  type WatchPlaybackRequest,
+} from "./watchPlaybackReducer";
+import { LiveTVPlayer } from "@/player/components/LiveTVPlayer";
 import {
   buildWatchHref,
   buildWatchItemHref,
   buildWatchPageProps,
   createWatchRouteRequest,
+  type LiveTVPlaybackStartInput,
   type WatchPlaybackStartInput,
   type WatchRouteRequest,
 } from "@/pages/watchRouteHelpers";
@@ -70,9 +76,14 @@ const WatchPage = lazy(() =>
 );
 
 function normalizeWatchPlaybackRequest(
-  input: WatchPlaybackStartInput | WatchRouteRequest,
-): WatchRouteRequest {
+  input: WatchPlaybackStartInput | WatchRouteRequest | LiveTVPlaybackStartInput,
+): WatchPlaybackRequest {
+  if ("kind" in input) return input;
   return "requestKey" in input ? input : createWatchRouteRequest(input);
+}
+
+function isLivePlaybackRequest(request: WatchPlaybackRequest): request is LiveTVPlaybackStartInput {
+  return "kind" in request && request.kind === "live-tv";
 }
 
 function buildPlaybackSubtitle(
@@ -204,7 +215,7 @@ export function WatchPlaybackProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const startPlayback = useCallback(
-    (input: WatchPlaybackStartInput | WatchRouteRequest) => {
+    (input: WatchPlaybackStartInput | WatchRouteRequest | LiveTVPlaybackStartInput) => {
       const request = normalizeWatchPlaybackRequest(input);
       const current = stateRef.current;
       const currentRequestKey = current.request?.requestKey ?? null;
@@ -460,11 +471,13 @@ export function WatchPlaybackHost() {
     ],
   });
   const request = state.request;
+  const liveRequest = request && isLivePlaybackRequest(request) ? request : null;
+  const vodRequest = request && !isLivePlaybackRequest(request) ? request : null;
   const isForegroundMode = request != null && state.mode === "foreground";
   const { data: item, error } = useWatchDetail(
-    request?.contentId,
-    request?.fileId,
-    request?.libraryId,
+    vodRequest?.contentId,
+    vodRequest?.fileId,
+    vodRequest?.libraryId,
   );
   const [renderedSession, setRenderedSession] = useState<{
     request: WatchRouteRequest;
@@ -859,6 +872,22 @@ export function WatchPlaybackHost() {
 
   if (!request) {
     return null;
+  }
+
+  if (liveRequest) {
+    return (
+      <LiveTVPlayer
+        channelId={liveRequest.channelId}
+        title={liveRequest.title}
+        streamUrl={liveRequest.streamUrl}
+        grantId={liveRequest.grantId}
+        mode={liveRequest.mode}
+        onStop={() => {
+          controller.stopPlayback();
+          navigate(liveRequest.returnHref, { replace: true });
+        }}
+      />
+    );
   }
 
   if (!activeRequest || !activeItem) {

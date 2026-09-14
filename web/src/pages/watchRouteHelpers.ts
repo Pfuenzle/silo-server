@@ -41,6 +41,16 @@ export interface WatchPlaybackStartInput {
   returnHref?: string;
 }
 
+export interface LiveTVPlaybackStartInput extends WatchRouteRequest {
+  readonly kind: "live-tv";
+  readonly channelId: string;
+  readonly title: string;
+  readonly streamUrl: string;
+  readonly grantId: string;
+  readonly mode: "direct" | "hls";
+  readonly returnHref: string;
+}
+
 function parseOptionalInt(value: string | null): number | undefined {
   if (!value) return undefined;
 

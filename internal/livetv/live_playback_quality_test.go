@@ -48,6 +48,28 @@ func TestLivePlayback_QualityOptions_returnsServerOwnedVariants(t *testing.T) {
 	}
 }
 
+func TestParseLiveAudioTracks_readsProviderAudioRenditions(t *testing.T) {
+	// Given a provider master playlist with two declared audio renditions.
+	body := `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="de",NAME="Deutsch",DEFAULT=YES
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="commentary",LANGUAGE="en",NAME="Commentary",DEFAULT=NO
+`
+
+	// When the provider audio inventory is parsed.
+	tracks := parseLiveAudioTracks(body)
+
+	// Then both provider-owned tracks and their defaults are preserved.
+	if len(tracks) != 2 {
+		t.Fatalf("tracks = %d, want 2", len(tracks))
+	}
+	if tracks[0].Language != "de" || tracks[0].Name != "Deutsch" || !tracks[0].Default {
+		t.Fatalf("first track = %#v, want German default", tracks[0])
+	}
+	if tracks[1].Language != "en" || tracks[1].Name != "Commentary" || tracks[1].Default {
+		t.Fatalf("second track = %#v, want English non-default", tracks[1])
+	}
+}
+
 func TestLivePlayback_SelectQuality_rebindsGrantWithoutExposingSource(t *testing.T) {
 	// Given a live HLS grant with two server-known variants.
 	service := newQualityTestService(t, "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nlow.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720\nhigh.m3u8\n")

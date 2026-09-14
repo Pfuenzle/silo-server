@@ -1,6 +1,10 @@
 import { createContext, useContext } from "react";
 import type { PlayerPictureInPictureChange } from "@/player";
-import type { WatchPlaybackStartInput, WatchRouteRequest } from "@/pages/watchRouteHelpers";
+import type {
+  LiveTVPlaybackStartInput,
+  WatchPlaybackStartInput,
+  WatchRouteRequest,
+} from "@/pages/watchRouteHelpers";
 import type {
   WatchPlaybackHostState,
   WatchPlaybackSnapshot,
@@ -11,7 +15,9 @@ export interface WatchPlaybackControllerValue {
   state: WatchPlaybackHostState;
   hasDetachedPlayback: boolean;
   isBackgroundBarVisible: boolean;
-  startPlayback: (input: WatchPlaybackStartInput | WatchRouteRequest) => void;
+  startPlayback: (
+    input: WatchPlaybackStartInput | WatchRouteRequest | LiveTVPlaybackStartInput,
+  ) => void;
   minimizePlayback: () => void;
   exitPlayback: (options?: { destinationHref?: string }) => void;
   stopPlayback: () => void;

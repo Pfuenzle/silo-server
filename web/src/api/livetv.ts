@@ -90,6 +90,16 @@ export const liveTVQualityResponseSchema = z.object({
   active_id: z.string().optional(),
   transcoding_supported: z.boolean(),
   unsupported_reason: z.string().optional(),
+  audio_tracks: z
+    .array(
+      z.object({
+        id: z.string(),
+        language: z.string().optional(),
+        name: z.string().optional(),
+        default: z.boolean(),
+      }),
+    )
+    .optional(),
 });
 export type LiveTVQualityResponse = z.infer<typeof liveTVQualityResponseSchema>;
 

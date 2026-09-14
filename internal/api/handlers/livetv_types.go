@@ -109,4 +109,5 @@ type liveTVQualityResponse struct {
 	ActiveID             string                     `json:"active_id,omitempty"`
 	TranscodingSupported bool                       `json:"transcoding_supported"`
 	UnsupportedReason    string                     `json:"unsupported_reason,omitempty"`
+	AudioTracks          []livetv.LiveAudioTrack    `json:"audio_tracks,omitempty"`
 }

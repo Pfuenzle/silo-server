@@ -63,6 +63,38 @@ describe("LiveTVPlayer", () => {
     expect(screen.getByRole("button", { name: "Quality unavailable" })).toBeDisabled();
   });
 
+  it("uses the normal watch player surface instead of a fixed fullscreen overlay", () => {
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    expect(screen.getByTestId("player-surface")).not.toHaveClass("fixed");
+    expect(screen.getByTestId("player-surface")).toHaveClass("absolute");
+  });
+
+  it("passes negotiated audio tracks to the normal player controls", async () => {
+    apiMock.mockResolvedValue({
+      options: [],
+      transcoding_supported: false,
+      audio_tracks: [{ id: "audio-de", language: "de", name: "Deutsch", default: true }],
+    });
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /Audio/i })).toBeInTheDocument());
+  });
+
   it("uses the normal player chrome without VOD transport controls", () => {
     render(
       <LiveTVPlayer
@@ -337,6 +369,23 @@ describe("LiveTVPlayer", () => {
 
     await waitFor(() => expect(hlsConstructorMock).toHaveBeenCalled());
     expect(hlsCallsMock.mock.calls.map(([name]) => name)).toEqual(["attachMedia", "loadSource"]);
+  });
+
+  it("starts the attached HLS media element with audio enabled", async () => {
+    hlsSupportedMock.mockReturnValue(true);
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+
+    render(
+      <LiveTVPlayer
+        channelId="source:news-1"
+        title="News"
+        streamUrl="/api/v1/stream/live/grant-1/manifest"
+        grantId="grant-1"
+      />,
+    );
+
+    await waitFor(() => expect(play).toHaveBeenCalled());
+    expect(document.querySelector("video")).toHaveProperty("muted", false);
   });
 
   it("restarts the negotiated HLS engine from the retry control", async () => {

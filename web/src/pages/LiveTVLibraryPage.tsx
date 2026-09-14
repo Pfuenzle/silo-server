@@ -23,7 +23,7 @@ import {
 } from "@/hooks/queries/livetv";
 import { formatTime } from "@/lib/datetime";
 import { liveTVT } from "@/lib/i18n";
-import { LiveTVPlayer } from "@/player/components/LiveTVPlayer";
+import { useWatchPlaybackController } from "@/playback/watchPlaybackContext";
 import type { LiveTVChannel, LiveTVProgramme } from "@/api/livetv";
 import { useCurrentProfile } from "@/hooks/useCurrentProfile";
 import {
@@ -450,13 +450,6 @@ export function LiveTVLibraryPage({
     latestSearchParamsRef.current = new URLSearchParams(searchParams);
   }, [searchParams]);
   const { tab, view } = parseLiveTVSearchParams(searchParams);
-  const [live, setLive] = useState<{
-    readonly title: string;
-    readonly channelId: string;
-    readonly streamUrl: string;
-    readonly grantId: string;
-    readonly mode: "direct" | "hls";
-  } | null>(null);
   const [playbackFailure, setPlaybackFailure] = useState<{
     readonly channelId: string;
     readonly title: string;
@@ -478,6 +471,7 @@ export function LiveTVLibraryPage({
   const toggle = useToggleLiveTVFavorite(libraryId, "channels");
   const toggleProgrammes = useToggleLiveTVFavorite(libraryId, "programmes");
   const { profile } = useCurrentProfile();
+  const playbackController = useWatchPlaybackController();
   const locale = profile?.language?.startsWith("de") ? "de" : "en";
   const channels = channelsQuery.data?.items ?? [];
   const favoriteIds = new Set((favoriteChannelsQuery.data ?? []).map((item) => item.id));
@@ -497,7 +491,18 @@ export function LiveTVLibraryPage({
     try {
       const outcome = liveTVPlaybackOutcome(await resolveLiveTVPlayback(libraryId, channelId));
       if (outcome.kind === "playable") {
-        setLive({ title, channelId, streamUrl: outcome.url, grantId: outcome.grantId, mode: outcome.mode });
+        playbackController.startPlayback({
+          kind: "live-tv",
+          channelId,
+          title,
+          streamUrl: outcome.url,
+          grantId: outcome.grantId,
+          mode: outcome.mode,
+          returnHref: `${window.location.pathname}${window.location.search}`,
+          requestKey: `live-tv:${outcome.grantId}`,
+          contentId: "",
+          restart: false,
+        });
         return;
       }
       const message =
@@ -513,7 +518,6 @@ export function LiveTVLibraryPage({
     }
   };
   const playProgramme = (item: LiveTVProgramme) => void playChannel(item.channel_id, item.title);
-  if (live) return <LiveTVPlayer {...live} onStop={() => setLive(null)} />;
   if (channelsQuery.isLoading)
     return (
       <div className="page-shell space-y-6 py-6" data-testid="live-tv-loading">
@@ -635,7 +639,10 @@ export function LiveTVLibraryPage({
             </div>
           ) : null}
           {favoriteQueryError ? (
-            <div className="border-destructive/30 bg-destructive/10 rounded-xl border p-4" role="alert">
+            <div
+              className="border-destructive/30 bg-destructive/10 rounded-xl border p-4"
+              role="alert"
+            >
               <p className="font-semibold">{liveTVT("favoritesError", locale)}</p>
               <Button
                 type="button"

@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   playback: vi.fn(),
   toastError: vi.fn(),
   toggleChannel: vi.fn(),
+  startPlayback: vi.fn(),
   channels: [
     { id: "source|one", name: "One", category: "News", artwork: { url: "/api/artwork/one" } },
   ],
@@ -34,6 +35,9 @@ vi.mock("react-router", () => ({
 }));
 vi.mock("sonner", () => ({ toast: { error: mocks.toastError } }));
 vi.mock("@/hooks/useCurrentProfile", () => ({ useCurrentProfile: () => ({ profile: null }) }));
+vi.mock("@/playback/watchPlaybackContext", () => ({
+  useWatchPlaybackController: () => ({ startPlayback: mocks.startPlayback }),
+}));
 vi.mock("@/hooks/queries/livetv", () => ({
   resolveLiveTVPlayback: (...args: unknown[]) => mocks.playback(...args),
   useLiveTVChannels: () => ({
@@ -71,9 +75,6 @@ vi.mock("@/components/LibraryHeader", () => ({
 vi.mock("@/components/ui/tabs", () => ({
   Tabs: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));
-vi.mock("@/player/components/LiveTVPlayer", () => ({
-  LiveTVPlayer: () => <div data-testid="player" />,
-}));
 
 import { LiveTVLibraryPage } from "./LiveTVLibraryPage";
 
@@ -90,6 +91,7 @@ describe("LiveTVLibraryPage", () => {
     mocks.playback.mockReset();
     mocks.toastError.mockReset();
     mocks.toggleChannel.mockReset();
+    mocks.startPlayback.mockReset();
     mocks.channels = [
       { id: "source|one", name: "One", category: "News", artwork: { url: "/api/artwork/one" } },
     ];
@@ -170,7 +172,9 @@ describe("LiveTVLibraryPage", () => {
 
     await renderPage();
 
-    expect(container.querySelector('[data-testid="live-tv-guide"]')?.textContent).toContain("Nikola");
+    expect(container.querySelector('[data-testid="live-tv-guide"]')?.textContent).toContain(
+      "Nikola",
+    );
     expect(container.querySelector('[data-testid="live-tv-guide"]')?.textContent).not.toContain(
       "TS|86a-stable-channel-id",
     );
@@ -360,7 +364,13 @@ describe("LiveTVLibraryPage", () => {
     await act(async () => watch?.click());
 
     expect(mocks.playback).toHaveBeenCalledWith(7, "source|one");
-    expect(container.querySelector('[data-testid="player"]')).not.toBeNull();
+    expect(mocks.startPlayback).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "live-tv",
+        channelId: "source|one",
+        grantId: "grant-1",
+      }),
+    );
   });
 
   it("keeps the popup open and reports a Watch Channel failure", async () => {
@@ -401,7 +411,9 @@ describe("LiveTVLibraryPage", () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector('[data-testid="player"]')).not.toBeNull();
+    expect(mocks.startPlayback).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "live-tv", grantId: "grant-1" }),
+    );
     expect(mocks.toastError).not.toHaveBeenCalled();
   });
 

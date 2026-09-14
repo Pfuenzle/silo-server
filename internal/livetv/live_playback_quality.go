@@ -26,6 +26,14 @@ type LiveQualityState struct {
 	ActiveID             string              `json:"active_id,omitempty"`
 	TranscodingSupported bool                `json:"transcoding_supported"`
 	UnsupportedReason    string              `json:"unsupported_reason,omitempty"`
+	AudioTracks          []LiveAudioTrack    `json:"audio_tracks,omitempty"`
+}
+
+type LiveAudioTrack struct {
+	ID       string `json:"id"`
+	Language string `json:"language,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Default  bool   `json:"default"`
 }
 
 type liveQualityVariant struct {
@@ -101,11 +109,44 @@ func (s *LivePlaybackService) QualityState(ctx context.Context, grantID string) 
 	if err != nil {
 		return LiveQualityState{}, err
 	}
-	state := LiveQualityState{Options: options, ActiveID: session.qualityID, TranscodingSupported: false}
+	body, err := s.fetchLiveMaster(ctx, session.providerURL, session.trustedSource)
+	if err != nil {
+		return LiveQualityState{}, fmt.Errorf("load Live TV audio tracks: %w", err)
+	}
+	state := LiveQualityState{Options: options, ActiveID: session.qualityID, TranscodingSupported: false, AudioTracks: parseLiveAudioTracks(body)}
 	if len(options) == 0 {
 		state.UnsupportedReason = "provider_did_not_publish_quality_variants"
 	}
 	return state, nil
+}
+
+func parseLiveAudioTracks(body string) []LiveAudioTrack {
+	tracks := make([]LiveAudioTrack, 0)
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "#EXT-X-MEDIA:") || !strings.Contains(line, "TYPE=AUDIO") {
+			continue
+		}
+		attrs := parseHLSAttributes(strings.TrimPrefix(line, "#EXT-X-MEDIA:"))
+		id := attrs["GROUP-ID"]
+		if id == "" {
+			continue
+		}
+		tracks = append(tracks, LiveAudioTrack{ID: id, Language: attrs["LANGUAGE"], Name: attrs["NAME"], Default: attrs["DEFAULT"] == "YES"})
+	}
+	return tracks
+}
+
+func parseHLSAttributes(raw string) map[string]string {
+	attrs := make(map[string]string)
+	for _, field := range strings.Split(raw, ",") {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		attrs[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), "\"")
+	}
+	return attrs
 }
 
 func (s *LivePlaybackService) fetchLiveMaster(ctx context.Context, sourceURL string, private bool) (string, error) {
