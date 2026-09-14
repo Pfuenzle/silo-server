@@ -150,6 +150,9 @@ function buildPlaybackReturnHref(request: WatchRouteRequest): string {
 }
 
 function buildWatchLocationState(request: WatchRouteRequest) {
+  if ("kind" in request && request.kind === "live-tv") {
+    return { livePlayback: request };
+  }
   if (
     request.returnHref == null &&
     request.audioTrackIndex == null &&

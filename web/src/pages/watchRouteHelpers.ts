@@ -51,6 +51,22 @@ export interface LiveTVPlaybackStartInput extends WatchRouteRequest {
   readonly returnHref: string;
 }
 
+export function isLiveTVPlaybackStartInput(value: unknown): value is LiveTVPlaybackStartInput {
+  if (!value || typeof value !== "object") return false;
+  return (
+    "kind" in value && value.kind === "live-tv" &&
+    "channelId" in value && typeof value.channelId === "string" &&
+    "title" in value && typeof value.title === "string" &&
+    "streamUrl" in value && typeof value.streamUrl === "string" &&
+    "grantId" in value && typeof value.grantId === "string" &&
+    "mode" in value && (value.mode === "direct" || value.mode === "hls") &&
+    "returnHref" in value && typeof value.returnHref === "string" &&
+    "requestKey" in value && typeof value.requestKey === "string" &&
+    "contentId" in value && value.contentId === "" &&
+    "restart" in value && value.restart === false
+  );
+}
+
 function parseOptionalInt(value: string | null): number | undefined {
   if (!value) return undefined;
 

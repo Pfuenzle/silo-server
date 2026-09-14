@@ -148,6 +148,7 @@ const AccountSettings = lazy(() => import("@/pages/settings/AccountSettings"));
 const WatchTogetherJoin = lazy(() => import("@/pages/WatchTogetherJoin"));
 const WatchTogetherRoomPage = lazy(() => import("@/pages/WatchTogetherRoomPage"));
 const WatchRoute = lazy(() => import("@/pages/WatchRoute"));
+const LiveTVWatchRoute = lazy(() => import("@/pages/LiveTVWatchRoute"));
 const ProfileCustomizeHome = lazy(() => import("@/pages/ProfileCustomizeHome"));
 
 /**
@@ -494,7 +495,7 @@ function AppRoutes() {
                   path="/watch/live"
                   element={
                     <RequireProfile>
-                      <div data-testid="live-tv-watch-route" />
+                      <LiveTVWatchRoute />
                     </RequireProfile>
                   }
                 />

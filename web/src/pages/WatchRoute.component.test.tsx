@@ -2,12 +2,14 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WatchPlaybackControllerContext } from "@/playback/watchPlaybackContext";
 import type { WatchPlaybackControllerValue } from "@/playback/watchPlaybackContext";
 import { createEmptyPlaybackState } from "@/playback/watchPlaybackReducer";
 import WatchRoute from "./WatchRoute";
+import LiveTVWatchRoute from "./LiveTVWatchRoute";
 
 describe("WatchRoute", () => {
   let container: HTMLDivElement;
@@ -80,5 +82,54 @@ describe("WatchRoute", () => {
     });
 
     expect(controller.handleRouteExit).toHaveBeenCalledWith(requestKey);
+  });
+
+  it("restores the live route request from history state and cleans it on back", async () => {
+    const request = {
+      kind: "live-tv" as const,
+      contentId: "",
+      channelId: "source:news-1",
+      title: "News",
+      streamUrl: "/api/v1/stream/live/grant-1/manifest?live_token=token-1",
+      grantId: "grant-1",
+      mode: "hls" as const,
+      returnHref: "/livetv/libraries/4",
+      requestKey: "live-tv:grant-1",
+      restart: false,
+    };
+    await act(async () => {
+      root.render(
+        <WatchPlaybackControllerContext.Provider value={controller}>
+          <MemoryRouter initialEntries={[{ pathname: "/watch/live", state: { livePlayback: request } }]}>
+            <Routes>
+              <Route path="/watch/live" element={<LiveTVWatchRoute />} />
+            </Routes>
+          </MemoryRouter>
+        </WatchPlaybackControllerContext.Provider>,
+      );
+    });
+
+    expect(controller.syncRouteRequest).toHaveBeenCalledWith(request);
+    await act(async () => {
+      root.unmount();
+    });
+    expect(controller.handleRouteExit).toHaveBeenCalledWith(request.requestKey);
+  });
+
+  it("redirects a direct live route without playback state instead of rendering a blank host", async () => {
+    await act(async () => {
+      root.render(
+        <WatchPlaybackControllerContext.Provider value={controller}>
+          <MemoryRouter initialEntries={["/watch/live"]}>
+            <Routes>
+              <Route path="/watch/live" element={<LiveTVWatchRoute />} />
+              <Route path="/" element={<div data-testid="safe-live-fallback" />} />
+            </Routes>
+          </MemoryRouter>
+        </WatchPlaybackControllerContext.Provider>,
+      );
+    });
+
+    expect(screen.getByTestId("safe-live-fallback")).toBeInTheDocument();
   });
 });
