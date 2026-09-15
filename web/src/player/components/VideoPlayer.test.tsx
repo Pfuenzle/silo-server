@@ -45,7 +45,7 @@ vi.mock("../hooks/usePlaybackRealtime", () => ({
   }),
 }));
 vi.mock("../hooks/useWatchProgress", () => ({
-  useWatchProgress: () => vi.fn().mockResolvedValue(undefined),
+  useWatchProgress: vi.fn(() => vi.fn().mockResolvedValue(undefined)),
 }));
 vi.mock("../hooks/useKeyboardShortcuts", () => ({ useKeyboardShortcuts: vi.fn() }));
 vi.mock("../hooks/useRemuxSeeking", () => ({
@@ -486,6 +486,46 @@ describe("VideoPlayer plan failure recovery", () => {
     rerenderPlayer({ replanError: "Silo could not apply the subtitle selection." });
     await waitFor(() => expect(controls.current?.activeSubtitleIndex).toBeNull());
     expect(toastError).toHaveBeenCalledOnce();
+  });
+});
+
+describe("VideoPlayer live presentation", () => {
+  it("shows live transport without VOD seeking or progress persistence", async () => {
+    const { useWatchProgress } = await import("../hooks/useWatchProgress");
+    const livePlan = fixturePlanV3({
+      delivery: "original_http",
+      stream: {
+        url: "/api/v1/stream/live/grant-1/manifest",
+        protocol: "mpegts",
+        headers: {},
+        header_refresh: "none",
+      },
+      timeline: {
+        source_start_seconds: 0,
+        stream_origin_seconds: 0,
+        player_start_seconds: 0,
+        timeline_offset_seconds: 0,
+        can_seek_anywhere: false,
+        seek_restoration: "player_position",
+      },
+      source: { ...fixturePlanV3().source, duration_seconds: undefined },
+      available_qualities: [],
+    });
+
+    renderPlayer({
+      plan: livePlan,
+      live: { mode: "direct" },
+      sessionId: "grant-1",
+      shouldAutoPlay: false,
+    });
+
+    expect(controls.current?.activeSubtitleIndex).toBeNull();
+    expect(screen.queryByRole("slider")).not.toBeInTheDocument();
+    expect(vi.mocked(useWatchProgress)).toHaveBeenCalledWith(
+      null,
+      expect.anything(),
+      expect.anything(),
+    );
   });
 });
 

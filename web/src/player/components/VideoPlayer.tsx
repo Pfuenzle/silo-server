@@ -56,6 +56,7 @@ import type {
   MarkerRegionView,
   SeriesContext,
   SubtitleMode,
+  LivePlayerPresentation,
 } from "../types";
 import type { FailureV3, PlanV3, SubtitleInventoryItemV3 } from "../protocol-v3";
 import {
@@ -185,6 +186,7 @@ interface VideoPlayerProps {
   onRealtimeConnectionStateChange?: (state: "disconnected" | "connecting" | "connected") => void;
   watchTogetherRoomId?: string | null;
   watchTogetherConnection?: WatchTogetherRoomConnectionResult;
+  live?: LivePlayerPresentation;
 }
 
 const EXIT_PROGRESS_FLUSH_TIMEOUT_MS = 1_000;
@@ -293,6 +295,7 @@ export function VideoPlayer({
   onRealtimeConnectionStateChange,
   watchTogetherRoomId,
   watchTogetherConnection,
+  live,
 }: VideoPlayerProps) {
   const playerConfig = usePlayerConfig();
   const isDetached = displayMode !== "foreground";
@@ -421,6 +424,7 @@ export function VideoPlayer({
   // The plan names its own protocol and timeline; nothing here is inferred from
   // codec strings or from what the engine reports.
   const isHlsStream = plan.stream.protocol === "hls";
+  const isMpegtsStream = plan.stream.protocol === "mpegts";
   const effectiveStreamUrl = streamUrl;
   const isPlayerReady = effectiveStreamUrl !== "";
   const reportCurrentPlanFailure = useCallback(
@@ -487,7 +491,12 @@ export function VideoPlayer({
   // The menu is the plan's; which entry is lit is the session's own preference,
   // since `auto` is a valid preference that names no rung.
   const activeQualityId = qualityPreference;
-  const qualityOptions = useMemo(() => qualityOptionsFromPlanV3(plan), [plan]);
+  const qualityOptions = useMemo(
+    () => [...(live?.qualityOptions ?? qualityOptionsFromPlanV3(plan))],
+    [live?.qualityOptions, plan],
+  );
+  const liveAudioTracks = live?.audioTracks ? [...live.audioTracks] : audioTracks;
+  const liveActiveAudioIndex = live?.activeAudioIndex ?? activeAudioIndex;
 
   // The file the server actually planned against, which is not necessarily the
   // one that was asked for — a fallback to an alternate version shows up here.
@@ -782,6 +791,7 @@ export function VideoPlayer({
 
   const handlePlayerSeek = useCallback(
     (seconds: number): boolean => {
+      if (live) return false;
       if (
         watchTogetherRoomId &&
         !watchTogether.closedReason &&
@@ -814,6 +824,7 @@ export function VideoPlayer({
       return performPlayerSeek(seconds);
     },
     [
+      live,
       performPlayerSeek,
       sessionId,
       showWatchTogetherNotice,
@@ -839,7 +850,7 @@ export function VideoPlayer({
   );
 
   // -- Watch progress reporting --
-  const flushWatchProgress = useWatchProgress(sessionId, videoRef, timelineOffsetRef);
+  const flushWatchProgress = useWatchProgress(live ? null : sessionId, videoRef, timelineOffsetRef);
 
   const buildExitState = useCallback((): PlaybackExitState => {
     const video = videoRef.current;
@@ -1661,6 +1672,26 @@ export function VideoPlayer({
             setError("Failed to load video player.");
           }
         }
+      } else if (isMpegtsStream) {
+        const module = await import("mpegts.js");
+        if (destroyed) return;
+        const MPEGts = module.default;
+        if (!MPEGts.isSupported()) {
+          setError("MPEG-TS playback is not supported in this browser.");
+          return;
+        }
+        const mpegts = MPEGts.createPlayer({
+          type: "mpegts",
+          url: effectiveStreamUrl,
+          isLive: true,
+        });
+        mpegts.attachMediaElement(video);
+        mpegts.on(MPEGts.Events.ERROR, () => {
+          setError("Playback failed. The live stream could not be loaded.");
+        });
+        mpegts.load();
+        attemptAutoplayWhenReady();
+        liveTransportCleanup = () => mpegts.destroy();
       } else {
         // Direct play — set video src directly. Starting playback goes through
         // the same readiness gate as HLS rather than calling play() against a
@@ -1673,10 +1704,16 @@ export function VideoPlayer({
       }
     }
 
-    init();
+    let liveTransportCleanup: (() => void) | undefined;
+    init().catch((error: unknown) => {
+      if (!destroyed) {
+        setError(error instanceof Error ? error.message : "Failed to initialize playback.");
+      }
+    });
 
     return () => {
       destroyed = true;
+      liveTransportCleanup?.();
       cleanupStartupListeners();
       if (hls) {
         hls.destroy();
@@ -1696,6 +1733,7 @@ export function VideoPlayer({
     effectiveStreamUrl,
     effectiveInitialPosition,
     isHlsStream,
+    isMpegtsStream,
     isPlayerReady,
     planRevision,
     plannedBitrateKbps,
@@ -2501,7 +2539,7 @@ export function VideoPlayer({
     videoRef,
     containerRef,
     handlePlayPause,
-    handleKeyboardSeek,
+    live ? () => {} : handleKeyboardSeek,
     toggleCaptions,
     handleTogglePiP,
     displayMode === "foreground",
@@ -2510,9 +2548,30 @@ export function VideoPlayer({
   // The id is the plan's own quality label, handed back to the server verbatim.
   const handleQualitySelect = useCallback(
     (id: string) => {
+      if (live) {
+        live.onQualitySelect?.(id);
+        return;
+      }
       onQualitySelect?.(id, currentTime);
     },
-    [currentTime, onQualitySelect],
+    [currentTime, live, onQualitySelect],
+  );
+
+  const handleAudioSelect = useCallback(
+    (index: number, position: number) => {
+      if (live) {
+        const engine = hlsRef.current;
+        const trackId = live.audioTrackIds?.[index];
+        if (engine && trackId) {
+          const engineIndex = engine.audioTracks.findIndex((track) => track.groupId === trackId);
+          if (engineIndex >= 0) engine.audioTrack = engineIndex;
+        }
+        live.onAudioSelect?.(index);
+        return;
+      }
+      onAudioSelect?.(index, position);
+    },
+    [live, onAudioSelect],
   );
 
   const handlePlayPauseRef = useRef(handlePlayPause);
@@ -2553,12 +2612,14 @@ export function VideoPlayer({
         handlePlayPauseRef.current();
       },
       seekBy: (secondsDelta: number) => {
+        if (live) return;
         const nextCurrentTime = currentTimeRef.current;
         const nextDuration = durationRef.current;
         const maxTime = nextDuration > 0 ? nextDuration : nextCurrentTime + Math.abs(secondsDelta);
         handlePlayerSeekRef.current(Math.max(0, Math.min(maxTime, nextCurrentTime + secondsDelta)));
       },
       seekTo: (seconds: number) => {
+        if (live) return;
         handlePlayerSeekRef.current(seconds);
       },
       togglePictureInPicture: () => handleTogglePiPRef.current(),
@@ -2566,7 +2627,7 @@ export function VideoPlayer({
 
     onPlaybackTransportReady(transport);
     return () => onPlaybackTransportReady(null);
-  }, [onPlaybackTransportReady]);
+  }, [live, onPlaybackTransportReady]);
 
   const executeRealtimeCommand = useCallback(
     async (command: PlaybackRealtimeCommandEnvelope) => {
@@ -3075,9 +3136,9 @@ export function VideoPlayer({
           }
           sessionId={sessionId}
           getSubtitleStartPosition={getSubtitleStartPosition}
-          audioTracks={audioTracks}
-          activeAudioIndex={activeAudioIndex}
-          onAudioSelect={onAudioSelect}
+          audioTracks={liveAudioTracks}
+          activeAudioIndex={liveActiveAudioIndex}
+          onAudioSelect={live ? handleAudioSelect : onAudioSelect}
           qualityOptions={qualityOptions}
           activeQualityId={activeQualityId}
           isTranscoding={replanning}
@@ -3113,6 +3174,8 @@ export function VideoPlayer({
           onNextEpisode={nextEpisode.skipToNext}
           title={hudTitle}
           subtitleLabel={hudSubtitle}
+          live={live !== undefined}
+          liveLabel="LIVE"
         />
       )}
 
@@ -3123,6 +3186,7 @@ export function VideoPlayer({
           containerRef={containerRef}
           streamUrl={effectiveStreamUrl}
           plan={plan}
+          live={live}
           currentSourceVersion={effectiveVersion}
           requestedVersion={selectedVersion}
           onClose={() => setShowPlaybackInfo(false)}

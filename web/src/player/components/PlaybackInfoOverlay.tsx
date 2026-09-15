@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
-import { buildPlaybackInfoSections, type RuntimePlaybackStats } from "../playback-info";
+import {
+  buildPlaybackInfoSections,
+  formatDimensions,
+  formatFrameCount,
+  type RuntimePlaybackStats,
+} from "../playback-info";
 import type { PlanV3 } from "../protocol-v3";
 import type { PlayerFileVersion } from "../types";
 
@@ -9,7 +14,11 @@ interface PlaybackInfoOverlayProps {
   containerRef: React.RefObject<HTMLDivElement | null>;
   streamUrl: string;
   /** The route the server chose, and the only description of what is on the wire. */
-  plan: PlanV3;
+  plan?: PlanV3;
+  live?: {
+    readonly mode: "direct" | "hls";
+    readonly qualityLabel?: string;
+  };
   currentSourceVersion?: PlayerFileVersion;
   requestedVersion?: PlayerFileVersion;
   onClose: () => void;
@@ -20,6 +29,7 @@ export function PlaybackInfoOverlay({
   containerRef,
   streamUrl,
   plan,
+  live,
   currentSourceVersion,
   requestedVersion,
   onClose,
@@ -52,17 +62,44 @@ export function PlaybackInfoOverlay({
     return () => clearInterval(id);
   }, [videoRef, containerRef]);
 
-  const sections = useMemo(
-    () =>
-      buildPlaybackInfoSections({
-        streamUrl,
-        plan,
-        currentSourceVersion,
-        requestedVersion,
-        runtimeStats,
-      }),
-    [streamUrl, plan, currentSourceVersion, requestedVersion, runtimeStats],
-  );
+  const sections = useMemo(() => {
+    if (live) {
+      return [
+        {
+          title: "Player",
+          rows: [
+            { label: "Player", value: "HTML Video Player" },
+            { label: "Source", value: "Live TV" },
+            { label: "Protocol", value: live.mode === "hls" ? "HLS" : "MPEG-TS" },
+            ...(live.qualityLabel ? [{ label: "Quality", value: live.qualityLabel }] : []),
+          ],
+        },
+        {
+          title: "Video Info",
+          rows: [
+            {
+              label: "Player dimensions",
+              value: formatDimensions(runtimeStats.playerWidth, runtimeStats.playerHeight),
+            },
+            {
+              label: "Video resolution",
+              value: formatDimensions(runtimeStats.videoWidth, runtimeStats.videoHeight),
+            },
+            { label: "Dropped frames", value: formatFrameCount(runtimeStats.droppedFrames) },
+            { label: "Corrupted frames", value: formatFrameCount(runtimeStats.corruptedFrames) },
+          ],
+        },
+      ];
+    }
+    if (!plan) return [];
+    return buildPlaybackInfoSections({
+      streamUrl,
+      plan,
+      currentSourceVersion,
+      requestedVersion,
+      runtimeStats,
+    });
+  }, [currentSourceVersion, live, plan, requestedVersion, runtimeStats, streamUrl]);
 
   return (
     <div className="absolute top-12 left-4 z-50 max-h-[calc(100%-6rem)] w-80 overflow-y-auto rounded-lg bg-black/85 text-sm text-white shadow-lg backdrop-blur-sm">
