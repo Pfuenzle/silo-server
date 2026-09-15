@@ -230,8 +230,42 @@ export interface PlayerPlaybackTransport {
   togglePictureInPicture: () => void | Promise<void>;
 }
 
-/** Props for the top-level WatchPage component. */
-export interface WatchPageProps {
+export interface LiveTVPlaybackDescriptor {
+  readonly kind: "live-tv";
+  readonly channelId: string;
+  readonly title: string;
+  readonly streamUrl: string;
+  readonly grantId: string;
+  readonly mode: "direct" | "hls";
+  readonly returnHref: string;
+}
+
+export interface LiveTVWatchPageProps {
+  readonly livePlayback: LiveTVPlaybackDescriptor;
+  readonly onExit: (state?: PlaybackExitState) => void | Promise<void>;
+  readonly onMinimize?: (state?: PlaybackExitState) => void | Promise<void>;
+  readonly displayMode?: PlayerDisplayMode;
+  readonly onPictureInPictureChange?: (change: PlayerPictureInPictureChange) => void;
+  readonly autoEnterPictureInPicture?: boolean;
+  readonly onPlaybackStateChange?: (state: PlayerPlaybackStateChange) => void;
+  readonly onPlaybackTransportReady?: (transport: PlayerPlaybackTransport | null) => void;
+}
+
+export interface LivePlayerPresentation {
+  readonly mode: "direct" | "hls";
+  readonly qualityOptions?: readonly QualityOption[];
+  readonly activeQualityId?: string;
+  readonly qualityError?: string | null;
+  readonly qualityLabel?: string;
+  readonly audioTracks?: readonly PlayerAudioTrack[];
+  readonly audioTrackIds?: readonly string[];
+  readonly activeAudioIndex?: number;
+  readonly onQualitySelect?: (id: string) => void;
+  readonly onAudioSelect?: (index: number) => void;
+}
+
+/** Props for the catalog-backed top-level WatchPage component. */
+export interface VodWatchPageProps {
   contentId: string;
   title: string;
   year?: number;
@@ -284,6 +318,8 @@ export interface WatchPageProps {
   onPlaybackTransportReady?: (transport: PlayerPlaybackTransport | null) => void;
   onReturnFromPostRoll?: () => void;
 }
+
+export type WatchPageProps = LiveTVWatchPageProps | VodWatchPageProps;
 
 /** A quality option shown in the player settings menu. */
 export interface QualityOption {

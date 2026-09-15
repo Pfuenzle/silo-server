@@ -77,7 +77,7 @@ export type ReplanOperationV3 =
   | "output_change";
 
 /** Transport protocol of a plan's stream URL. */
-export type StreamProtocolV3 = "http_progressive" | "hls";
+export type StreamProtocolV3 = "http_progressive" | "hls" | "mpegts";
 
 /** Whether the plan's stream headers need periodic refresh. */
 export type HeaderRefreshModeV3 = "none" | "session";

@@ -6,6 +6,9 @@ export type { PlayerConfig } from "./context/PlayerConfigContext";
 export { WatchPage } from "./components/WatchPage";
 export type {
   WatchPageProps,
+  LiveTVPlaybackDescriptor,
+  LiveTVWatchPageProps,
+  VodWatchPageProps,
   PlayerChapter,
   PlayerFileVersion,
   PlayerSubtitleInfo,
