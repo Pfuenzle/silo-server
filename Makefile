@@ -30,6 +30,7 @@ GO_LDFLAGS := -X $(BUILDINFO_PKG).revisionOverride=$(BUILD_REVISION) -X $(BUILDI
 # Build the frontend (requires pnpm)
 frontend:
 	cd web && pnpm install --frozen-lockfile && pnpm run build
+	./scripts/verify-frontend-dist.sh web/dist
 
 # Build the Go binary (depends on frontend)
 build: frontend

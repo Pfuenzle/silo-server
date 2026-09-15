@@ -4,10 +4,11 @@ RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 WORKDIR /app/web
 COPY web/package.json web/pnpm-lock.yaml ./
 COPY web/vendor/foliate-js ./vendor/foliate-js
+COPY scripts/verify-frontend-dist.sh /usr/local/bin/verify-frontend-dist
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 COPY web/ .
-RUN pnpm run build
+RUN pnpm run build && /usr/local/bin/verify-frontend-dist /app/web/dist
 
 # Allow CI to inject prebuilt frontend assets via a named `frontend_dist`
 # context while local builds keep using the in-Docker frontend stage.
@@ -29,6 +30,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     go mod download
 COPY web/embed.go web/embed.go
 COPY --from=frontend_dist / web/dist
+COPY scripts/verify-frontend-dist.sh /usr/local/bin/verify-frontend-dist
+RUN /usr/local/bin/verify-frontend-dist /app/web/dist
 COPY cmd/ cmd/
 COPY internal/ internal/
 COPY migrations/ migrations/
