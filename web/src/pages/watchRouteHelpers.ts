@@ -8,8 +8,9 @@ import type {
   PlayerTimeRange,
   ResumeHints,
   SubtitleMode,
-  WatchPageProps,
+  VodWatchPageProps,
 } from "@/player";
+import type { LiveTVPlaybackDescriptor } from "@/player";
 import { resolveVersionAudioLanguage } from "@/player/utils/effectiveAudioLanguage";
 import { isBitmapCodec } from "@/player/utils/subtitleCodecs";
 import { resolveSubtitleAutoSelect } from "@/player/utils/subtitleSort";
@@ -41,29 +42,31 @@ export interface WatchPlaybackStartInput {
   returnHref?: string;
 }
 
-export interface LiveTVPlaybackStartInput extends WatchRouteRequest {
-  readonly kind: "live-tv";
-  readonly channelId: string;
-  readonly title: string;
-  readonly streamUrl: string;
-  readonly grantId: string;
-  readonly mode: "direct" | "hls";
-  readonly returnHref: string;
-}
+export type LiveTVPlaybackStartInput = LiveTVPlaybackDescriptor & WatchRouteRequest;
 
 export function isLiveTVPlaybackStartInput(value: unknown): value is LiveTVPlaybackStartInput {
   if (!value || typeof value !== "object") return false;
   return (
-    "kind" in value && value.kind === "live-tv" &&
-    "channelId" in value && typeof value.channelId === "string" &&
-    "title" in value && typeof value.title === "string" &&
-    "streamUrl" in value && typeof value.streamUrl === "string" &&
-    "grantId" in value && typeof value.grantId === "string" &&
-    "mode" in value && (value.mode === "direct" || value.mode === "hls") &&
-    "returnHref" in value && typeof value.returnHref === "string" &&
-    "requestKey" in value && typeof value.requestKey === "string" &&
-    "contentId" in value && value.contentId === "" &&
-    "restart" in value && value.restart === false
+    "kind" in value &&
+    value.kind === "live-tv" &&
+    "channelId" in value &&
+    typeof value.channelId === "string" &&
+    "title" in value &&
+    typeof value.title === "string" &&
+    "streamUrl" in value &&
+    typeof value.streamUrl === "string" &&
+    "grantId" in value &&
+    typeof value.grantId === "string" &&
+    "mode" in value &&
+    (value.mode === "direct" || value.mode === "hls") &&
+    "returnHref" in value &&
+    typeof value.returnHref === "string" &&
+    "requestKey" in value &&
+    typeof value.requestKey === "string" &&
+    "contentId" in value &&
+    value.contentId === "" &&
+    "restart" in value &&
+    value.restart === false
   );
 }
 
@@ -184,7 +187,7 @@ export function parseWatchHref(href: string): WatchRouteRequest | null {
 }
 
 type DerivedWatchPageProps = Omit<
-  WatchPageProps,
+  VodWatchPageProps,
   | "playbackRequestKey"
   | "onExit"
   | "onNavigateEpisode"

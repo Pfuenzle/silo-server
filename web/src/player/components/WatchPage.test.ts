@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,9 +11,13 @@ import { WatchPage } from "./WatchPage";
 const playbackSessionMock = vi.hoisted(() => vi.fn());
 const videoPlayerMock = vi.hoisted(() => vi.fn());
 const toastErrorMock = vi.hoisted(() => vi.fn());
+const playerFetchMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 
 vi.mock("../hooks/usePlaybackSession", () => ({
   usePlaybackSession: playbackSessionMock,
+}));
+vi.mock("../player-fetch", () => ({
+  playerFetch: playerFetchMock,
 }));
 vi.mock("./VideoPlayer", () => ({
   VideoPlayer: (props: unknown) => {
@@ -107,6 +111,8 @@ beforeEach(() => {
   playbackSessionMock.mockReset();
   videoPlayerMock.mockReset();
   toastErrorMock.mockReset();
+  playerFetchMock.mockReset();
+  playerFetchMock.mockResolvedValue(undefined);
 });
 
 describe("derivePersistedSubtitleMode", () => {
@@ -116,6 +122,55 @@ describe("derivePersistedSubtitleMode", () => {
 
   it("persists off when subtitles are disabled", () => {
     expect(derivePersistedSubtitleMode(null)).toBe("off");
+  });
+});
+
+describe("WatchPage Live TV entry", () => {
+  it("mounts the live descriptor without invoking the VOD session", async () => {
+    playerFetchMock.mockResolvedValueOnce({
+      options: [{ id: "q-720", label: "720p", height: 720, bitrate_kbps: 2500 }],
+      active_id: "q-720",
+      transcoding_supported: false,
+      audio_tracks: [{ id: "eng", language: "en", name: "English", default: true }],
+    });
+    const liveProps: WatchPageProps = {
+      livePlayback: {
+        kind: "live-tv",
+        channelId: "channel-1",
+        title: "News",
+        streamUrl: "/api/v1/stream/live/grant-1/manifest",
+        grantId: "grant-1",
+        mode: "hls",
+        returnHref: "/live-tv",
+      },
+      onExit: vi.fn(),
+    };
+
+    const { unmount } = render(createElement(WatchPage, liveProps));
+
+    expect(screen.getByText("Mounted video player")).toBeInTheDocument();
+    expect(videoPlayerMock).toHaveBeenCalledWith(
+      expect.objectContaining({ live: expect.anything() }),
+    );
+    expect(playbackSessionMock).not.toHaveBeenCalled();
+    await waitFor(() => {
+      const live = vi.mocked(videoPlayerMock).mock.lastCall?.[0].live;
+      expect(live.qualityOptions).toEqual([
+        expect.objectContaining({ id: "q-720", label: "720p", bitrateKbps: 2500 }),
+      ]);
+      expect(live.audioTracks).toEqual([
+        expect.objectContaining({ language: "en", title: "English", default: true }),
+      ]);
+      expect(live.activeQualityId).toBe("q-720");
+      expect(live.activeAudioIndex).toBe(0);
+    });
+
+    unmount();
+    expect(playerFetchMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "/livetv/playback/grant-1",
+      expect.objectContaining({ method: "DELETE", keepalive: true }),
+    );
   });
 });
 

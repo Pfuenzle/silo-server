@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import type { PlayerFileVersion, PlayerPlaybackStateChange, WatchPageProps } from "../types";
+import type {
+  PlayerFileVersion,
+  PlayerPlaybackStateChange,
+  LiveTVPlaybackDescriptor,
+  LiveTVWatchPageProps,
+  LivePlayerPresentation,
+  VodWatchPageProps,
+  WatchPageProps,
+  QualityOption,
+  PlayerAudioTrack,
+} from "../types";
+import { liveTVQualityResponseSchema } from "@/api/livetv";
 import type { PlaybackRealtimeEventEnvelope } from "../realtime-protocol";
 import type { SubtitleInventoryItemV3 } from "../protocol-v3";
 import { usePlaybackSession } from "../hooks/usePlaybackSession";
@@ -15,6 +26,57 @@ import { itemKeys } from "@/hooks/queries/keys";
 import { useWatchPlaybackController } from "@/playback/watchPlaybackContext";
 import { useWatchTogetherRoomConnection } from "../hooks/useWatchTogetherRoomConnection";
 import { toast } from "sonner";
+import type { PlanV3 } from "../protocol-v3";
+
+function livePlan(
+  livePlayback: LiveTVPlaybackDescriptor,
+  qualityOptions: readonly QualityOption[],
+  playerStartSeconds: number,
+): PlanV3 {
+  const protocol = livePlayback.mode === "direct" ? "mpegts" : "hls";
+  return {
+    protocol_version: 3,
+    plan_id: `live:${livePlayback.grantId}`,
+    plan_attempt_key: livePlayback.grantId,
+    delivery: livePlayback.mode === "direct" ? "original_http" : "server_transcode_hls",
+    stream: {
+      url: livePlayback.streamUrl,
+      protocol,
+      headers: {},
+      header_refresh: "none",
+    },
+    timeline: {
+      source_start_seconds: 0,
+      stream_origin_seconds: 0,
+      player_start_seconds: playerStartSeconds,
+      timeline_offset_seconds: 0,
+      can_seek_anywhere: false,
+      seek_restoration: "player_position",
+    },
+    selected_tracks: {},
+    effective_recipe: {},
+    claims: {
+      video: { hdr10: false, hdr10_plus: false, hlg: false, dolby_vision: false },
+      audio: { passthrough: false, atmos_preserved: false },
+      subtitles: { ass_styling_preserved: false, bitmap_overlay: false, bitmap_sidecar: false },
+    },
+    subtitle: { mode: "off", inventory: [] },
+    transformations: [],
+    applied_quirks: [],
+    runtime_corrections: [],
+    available_qualities: qualityOptions.map((quality) => ({
+      label: quality.id,
+      bitrate_kbps: quality.bitrateKbps || undefined,
+      preserves_source: false,
+    })),
+    degradation_warnings: [],
+    decision_reason: "live_tv",
+    requested_media_file_id: 0,
+    effective_media_file_id: 0,
+    source: { media_file_id: 0, hdr10_plus: false, dv_enhancement_layer: "none" },
+    subtitle_fidelity_policy: "off",
+  };
+}
 
 function patchChapterThumbnail(
   versions: PlayerFileVersion[],
@@ -59,7 +121,152 @@ function patchChapterThumbnail(
  * WatchPage is the top-level player component.
  * Starts a playback session, then renders the VideoPlayer once the stream is ready.
  */
-export function WatchPage({
+export function WatchPage(props: WatchPageProps) {
+  if ("livePlayback" in props) {
+    return <LiveWatchPage {...props} />;
+  }
+
+  return <VodWatchPage {...props} />;
+}
+
+function LiveWatchPage({ livePlayback, ...props }: LiveTVWatchPageProps) {
+  const config = usePlayerConfig();
+  const [qualityOptions, setQualityOptions] = useState<QualityOption[]>([]);
+  const [activeQualityId, setActiveQualityId] = useState<string | undefined>();
+  const [qualityError, setQualityError] = useState<string | null>(null);
+  const [audioTracks, setAudioTracks] = useState<PlayerAudioTrack[]>([]);
+  const [audioTrackIds, setAudioTrackIds] = useState<string[]>([]);
+  const [activeAudioIndex, setActiveAudioIndex] = useState(0);
+  const [planRevision, setPlanRevision] = useState(1);
+  const [playerPositionSeconds, setPlayerPositionSeconds] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    void playerFetch<unknown>(
+      config,
+      `/livetv/playback/${encodeURIComponent(livePlayback.grantId)}/qualities`,
+    )
+      .then((value) => {
+        if (cancelled) return;
+        const response = liveTVQualityResponseSchema.parse(value);
+        setQualityOptions(
+          response.options.map((option) => ({
+            id: option.id,
+            label: option.label,
+            sublabel: option.bitrate_kbps ? `${option.bitrate_kbps} kbps` : "",
+            resolution: option.height ? `${option.height}p` : "",
+            bitrateKbps: option.bitrate_kbps ?? 0,
+            isOriginal: false,
+          })),
+        );
+        setActiveQualityId(response.active_id);
+        const tracks = response.audio_tracks ?? [];
+        setAudioTrackIds(tracks.map((track) => track.id));
+        setAudioTracks(
+          tracks.map((track) => ({
+            language: track.language,
+            title: track.name,
+            default: track.default,
+          })),
+        );
+        const defaultIndex = tracks.findIndex((track) => track.default);
+        setActiveAudioIndex(defaultIndex >= 0 ? defaultIndex : 0);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setQualityError(
+            error instanceof Error ? error.message : "Live TV quality is unavailable",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [config, livePlayback.grantId]);
+
+  const selectQuality = useCallback(
+    (id: string) => {
+      setQualityError(null);
+      void playerFetch<unknown>(
+        config,
+        `/livetv/playback/${encodeURIComponent(livePlayback.grantId)}/quality`,
+        {
+          method: "POST",
+          body: JSON.stringify({ id }),
+        },
+      )
+        .then((value) => {
+          const response = liveTVQualityResponseSchema.parse(value);
+          setActiveQualityId(response.active_id ?? id);
+          setPlanRevision((revision) => revision + 1);
+        })
+        .catch((error: unknown) => {
+          setQualityError(error instanceof Error ? error.message : "Live TV quality change failed");
+        });
+    },
+    [config, livePlayback.grantId],
+  );
+
+  const selectAudio = useCallback((index: number) => {
+    setActiveAudioIndex(index);
+  }, []);
+
+  const live: LivePlayerPresentation = {
+    mode: livePlayback.mode,
+    qualityOptions,
+    activeQualityId,
+    qualityError,
+    qualityLabel: qualityOptions.find((option) => option.id === activeQualityId)?.label,
+    audioTracks,
+    audioTrackIds,
+    activeAudioIndex,
+    onQualitySelect: selectQuality,
+    onAudioSelect: selectAudio,
+  };
+
+  const handlePlaybackStateChange = useCallback(
+    (state: PlayerPlaybackStateChange) => {
+      setPlayerPositionSeconds(state.currentTime);
+      props.onPlaybackStateChange?.(state);
+    },
+    [props.onPlaybackStateChange],
+  );
+  useEffect(() => {
+    return () => {
+      void playerFetch(config, `/livetv/playback/${encodeURIComponent(livePlayback.grantId)}`, {
+        method: "DELETE",
+        keepalive: true,
+      }).catch((error: unknown) => {
+        if (error instanceof Error) console.warn("Live playback cleanup failed", error.message);
+      });
+    };
+  }, [config, livePlayback.grantId]);
+
+  return (
+    <VideoPlayer
+      title={livePlayback.title}
+      streamUrl={livePlayback.streamUrl}
+      plan={livePlan(livePlayback, qualityOptions, playerPositionSeconds)}
+      planRevision={planRevision}
+      sessionId={livePlayback.grantId}
+      subtitleUrls={[]}
+      initialPosition={0}
+      intro={null}
+      credits={null}
+      qualityPreference={activeQualityId ?? ""}
+      onExit={props.onExit}
+      onMinimize={props.onMinimize}
+      displayMode={props.displayMode}
+      onPictureInPictureChange={props.onPictureInPictureChange}
+      autoEnterPictureInPicture={props.autoEnterPictureInPicture}
+      onPlaybackStateChange={handlePlaybackStateChange}
+      onPlaybackTransportReady={props.onPlaybackTransportReady}
+      live={live}
+    />
+  );
+}
+
+function VodWatchPage({
   contentId,
   title,
   year,
@@ -99,7 +306,7 @@ export function WatchPage({
   onReturnFromPostRoll,
   watchTogetherRoomId,
   watchTogetherRoomToken,
-}: WatchPageProps) {
+}: VodWatchPageProps) {
   const config = usePlayerConfig();
   const queryClient = useQueryClient();
   const playbackController = useWatchPlaybackController();
