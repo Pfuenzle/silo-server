@@ -59,7 +59,6 @@ import {
   watchPlaybackReducer,
   type WatchPlaybackRequest,
 } from "./watchPlaybackReducer";
-import { LiveTVPlayer } from "@/player/components/LiveTVPlayer";
 import {
   buildWatchHref,
   buildWatchItemHref,
@@ -879,17 +878,32 @@ export function WatchPlaybackHost() {
 
   if (liveRequest) {
     return (
-      <LiveTVPlayer
-        channelId={liveRequest.channelId}
-        title={liveRequest.title}
-        streamUrl={liveRequest.streamUrl}
-        grantId={liveRequest.grantId}
-        mode={liveRequest.mode}
-        onStop={() => {
-          controller.stopPlayback();
-          navigate(liveRequest.returnHref, { replace: true });
-        }}
-      />
+      <PlayerConfigProvider config={playerConfig}>
+        <Suspense fallback={<PlaybackPreparingScreen />}>
+          <WatchPage
+            livePlayback={liveRequest}
+            onExit={() => {
+              controller.stopPlayback();
+              navigate(liveRequest.returnHref, { replace: true });
+            }}
+            onMinimize={() => {
+              controller.minimizePlayback();
+              navigate(liveRequest.returnHref, { replace: true });
+            }}
+            displayMode={state.mode === "foreground" ? "foreground" : "detached"}
+            autoEnterPictureInPicture={state.autoEnterPictureInPicture}
+            onPictureInPictureChange={(change) =>
+              controller.setPictureInPictureActive(liveRequest.requestKey, change)
+            }
+            onPlaybackStateChange={(snapshot) =>
+              controller.updatePlaybackSnapshot(liveRequest.requestKey, snapshot)
+            }
+            onPlaybackTransportReady={(transport) =>
+              controller.setTransportControls(liveRequest.requestKey, transport)
+            }
+          />
+        </Suspense>
+      </PlayerConfigProvider>
     );
   }
 
@@ -1033,6 +1047,7 @@ export function WatchPlaybackBar() {
 
   const { state, isBackgroundBarVisible, returnToWatch, stopPlayback } = controller;
   const request = state.request;
+  const isLive = request ? isLivePlaybackRequest(request) : false;
   const snapshot = state.snapshot;
   const transport = state.transport;
   const { data: item } = useWatchDetail(request?.contentId, request?.fileId, request?.libraryId);
@@ -1069,42 +1084,43 @@ export function WatchPlaybackBar() {
               )}
             </div>
 
-            <div className="mt-3 space-y-1.5">
-              <Slider
-                value={[displayedTime]}
-                min={0}
-                max={Math.max(snapshot?.duration ?? 0, 0)}
-                step={1}
-                thumbLabels={["Playback position"]}
-                disabled={!transport || !snapshot || snapshot.duration <= 0}
-                className="[&_[data-slot=slider-range]]:bg-primary -my-2 py-2 [&_[data-slot=slider-thumb]]:size-4 [&_[data-slot=slider-thumb]]:border-white/60 [&_[data-slot=slider-thumb]]:bg-white [&_[data-slot=slider-thumb]]:shadow-[0_2px_10px_rgba(0,0,0,0.35)] [&_[data-slot=slider-track]]:h-1.5 [&_[data-slot=slider-track]]:bg-white/10"
-                onValueChange={([value]) => {
-                  setScrubValue(value ?? 0);
-                }}
-                onValueCommit={([value]) => {
-                  const nextValue = value ?? 0;
-                  setScrubValue(null);
-                  transport?.seekTo(nextValue);
-                }}
-              />
-              <div className="flex items-center justify-between text-[11px] text-white/55 tabular-nums">
-                <span>{formatTime(displayedTime)}</span>
-                <span>{snapshot ? formatTime(snapshot.duration) : "0:00"}</span>
+            {!isLive && (
+              <div className="mt-3 space-y-1.5">
+                <Slider
+                  value={[displayedTime]}
+                  min={0}
+                  max={Math.max(snapshot?.duration ?? 0, 0)}
+                  step={1}
+                  thumbLabels={["Playback position"]}
+                  disabled={!transport || !snapshot || snapshot.duration <= 0}
+                  className="[&_[data-slot=slider-range]]:bg-primary -my-2 py-2 [&_[data-slot=slider-thumb]]:size-4 [&_[data-slot=slider-thumb]]:border-white/60 [&_[data-slot=slider-thumb]]:bg-white [&_[data-slot=slider-thumb]]:shadow-[0_2px_10px_rgba(0,0,0,0.35)] [&_[data-slot=slider-track]]:h-1.5 [&_[data-slot=slider-track]]:bg-white/10"
+                  onValueChange={([value]) => setScrubValue(value ?? 0)}
+                  onValueCommit={([value]) => {
+                    setScrubValue(null);
+                    transport?.seekTo(value ?? 0);
+                  }}
+                />
+                <div className="flex items-center justify-between text-[11px] text-white/55 tabular-nums">
+                  <span>{formatTime(displayedTime)}</span>
+                  <span>{snapshot ? formatTime(snapshot.duration) : "0:00"}</span>
+                </div>
               </div>
-            </div>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
-            <Button
-              variant="glass"
-              size="icon"
-              className="h-10 w-10 rounded-full"
-              onClick={() => transport?.seekBy(-10)}
-              disabled={!transport}
-              title="Back 10 seconds"
-            >
-              <SkipBack className="h-4 w-4" />
-            </Button>
+            {!isLive && (
+              <Button
+                variant="glass"
+                size="icon"
+                className="h-10 w-10 rounded-full"
+                onClick={() => transport?.seekBy(-10)}
+                disabled={!transport}
+                title="Back 10 seconds"
+              >
+                <SkipBack className="h-4 w-4" />
+              </Button>
+            )}
             <Button
               className="h-10 rounded-full px-4"
               onClick={() => transport?.playPause()}
@@ -1117,16 +1133,18 @@ export function WatchPlaybackBar() {
               )}
               {snapshot?.playing ? "Pause" : "Play"}
             </Button>
-            <Button
-              variant="glass"
-              size="icon"
-              className="h-10 w-10 rounded-full"
-              onClick={() => transport?.seekBy(10)}
-              disabled={!transport}
-              title="Forward 10 seconds"
-            >
-              <SkipForward className="h-4 w-4" />
-            </Button>
+            {!isLive && (
+              <Button
+                variant="glass"
+                size="icon"
+                className="h-10 w-10 rounded-full"
+                onClick={() => transport?.seekBy(10)}
+                disabled={!transport}
+                title="Forward 10 seconds"
+              >
+                <SkipForward className="h-4 w-4" />
+              </Button>
+            )}
             <Button
               variant="glass"
               className="h-10 rounded-full px-4"
