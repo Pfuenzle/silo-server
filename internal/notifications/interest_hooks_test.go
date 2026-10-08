@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"testing"
@@ -13,6 +14,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
 	"github.com/Silo-Server/silo-server/internal/userdb"
 	"github.com/Silo-Server/silo-server/internal/userstore"
+	"github.com/Silo-Server/silo-server/internal/watchstate"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type preferenceTransactionTestProvider struct {
@@ -58,6 +61,22 @@ func TestInterestTrackingStorePreservesSettingCapabilities(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("transaction callback was not invoked")
+	}
+
+	snapshotter, ok := wrapped.(userstore.PreferenceSettingsSnapshotter)
+	if !ok {
+		t.Fatal("interest-tracking wrapper dropped PreferenceSettingsSnapshotter")
+	}
+	called = false
+	if err := snapshotter.WithPreferenceSettingsSnapshot(t.Context(), func(reader userstore.PreferenceSettingsReader) error {
+		called = true
+		_, err := reader.GetAudioPreference(t.Context(), "missing", "missing")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("snapshot callback was not invoked")
 	}
 
 	cas, ok := wrapped.(userstore.SettingValueCompareAndSetter)
@@ -271,6 +290,45 @@ func TestInterestTrackingStoreQueuesMutationsOnBatchFallback(t *testing.T) {
 	}
 }
 
+// TestInterestTrackingStoreQueuesWatchlistAddAt covers the explicit-time add
+// that imports and watchlist-title promotion use: a new row queues an interest
+// recompute, and an add that changes nothing does not.
+func TestInterestTrackingStoreQueuesWatchlistAddAt(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := userdb.InitSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	updater := &InterestUpdater{pending: map[interestMutation]int{}}
+	provider := WrapUserStoreProvider(preferenceTransactionTestProvider{store: userdb.NewSQLiteUserStore(db)}, &System{Interest: updater})
+	store, err := provider.ForUser(t.Context(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateProfile(t.Context(), userstore.Profile{ID: "p1", Name: "Test"}); err != nil {
+		t.Fatal(err)
+	}
+	addedAt := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	inserted, err := store.AddToWatchlistAt(t.Context(), "p1", "series-1", addedAt)
+	if err != nil || !inserted {
+		t.Fatalf("AddToWatchlistAt = %v, %v; want inserted", inserted, err)
+	}
+	key := interestMutation{userID: 7, profileID: "p1", itemID: "series-1"}
+	if _, queued := updater.pending[key]; !queued {
+		t.Fatal("watchlist add bypassed the interest hook")
+	}
+	clear(updater.pending)
+	if inserted, err := store.AddToWatchlistAt(t.Context(), "p1", "series-1", addedAt); err != nil || inserted {
+		t.Fatalf("repeat AddToWatchlistAt = %v, %v; want no insert", inserted, err)
+	}
+	if len(updater.pending) != 0 {
+		t.Fatalf("an add that inserted nothing queued %v", updater.pending)
+	}
+}
+
 // rollupCapableStore is a UserStore that also implements the series rollup,
 // standing in for the Postgres backend.
 type rollupCapableStore struct {
@@ -287,48 +345,78 @@ func (s *rollupCapableStore) SeriesEpisodeWatchCounts(_ context.Context, _ strin
 	return counts, nil
 }
 
-// TestInterestTrackingStoreForwardsRollupWhenSupported is the other half of the
-// conditional: a backend that can do the rollup must keep advertising it
-// through the wrapper, and calls must reach it. Losing this would silently
-// push jellycompat back onto the per-episode rollup for every series.
-func TestInterestTrackingStoreForwardsRollupWhenSupported(t *testing.T) {
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := userdb.InitSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
+func (s *rollupCapableStore) SeriesSeasonWatchCounts(context.Context, string, string) (map[int]userstore.SeriesWatchCounts, error) {
+	return map[int]userstore.SeriesWatchCounts{}, nil
+}
 
-	inner := &rollupCapableStore{UserStore: userdb.NewSQLiteUserStore(db)}
-	provider := WrapUserStoreProvider(preferenceTransactionTestProvider{store: inner}, &System{})
-	wrapped, err := provider.ForUser(context.Background(), 1)
-	if err != nil {
-		t.Fatalf("ForUser: %v", err)
-	}
+func (s *rollupCapableStore) SeasonEpisodeWatchCounts(context.Context, string, []string) (map[string]userstore.SeriesWatchCounts, error) {
+	return map[string]userstore.SeriesWatchCounts{}, nil
+}
 
-	rollup, ok := wrapped.(userstore.SeriesEpisodeRollupStore)
-	if !ok {
-		t.Fatal("wrapper dropped SeriesEpisodeRollupStore for a store that supports it")
-	}
-	counts, err := rollup.SeriesEpisodeWatchCounts(context.Background(), "p1", []string{"series-1"})
+func TestInterestTrackingDeviceSettingsCapability(t *testing.T) {
+	// Capability discovery is structural. Each combination must survive, and
+	// a backend with no device settings support must keep reporting absence.
+	plain := &struct{ userstore.UserStore }{}
+	provider := WrapUserStoreProvider(preferenceTransactionTestProvider{store: plain}, &System{})
+	wrapped, err := provider.ForUser(t.Context(), 1)
 	if err != nil {
-		t.Fatalf("SeriesEpisodeWatchCounts: %v", err)
+		t.Fatal(err)
 	}
-	if !inner.called {
-		t.Error("rollup call did not reach the backing store")
+	if _, ok := wrapped.(userstore.DeviceSettingsStore); ok {
+		t.Fatal("invented device settings support")
 	}
-	if counts["series-1"].WatchedCount != 2 {
-		t.Errorf("counts = %+v, want WatchedCount 2", counts["series-1"])
+	supported := []userstore.UserStore{
+		&struct {
+			userstore.UserStore
+			userstore.DeviceSettingsStore
+		}{},
+		&struct {
+			userstore.UserStore
+			userstore.DeviceSettingsStore
+			userstore.DeviceRegistry
+		}{},
+		&struct {
+			userstore.UserStore
+			userstore.DeviceSettingsStore
+			userstore.SeriesEpisodeRollupStore
+		}{},
+		&struct {
+			userstore.UserStore
+			userstore.DeviceSettingsStore
+			userstore.DeviceRegistry
+			userstore.SeriesEpisodeRollupStore
+		}{},
 	}
+	for _, inner := range supported {
+		provider := WrapUserStoreProvider(preferenceTransactionTestProvider{store: inner}, &System{})
+		wrapped, err := provider.ForUser(t.Context(), 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := wrapped.(userstore.DeviceSettingsStore); !ok {
+			t.Fatal("lost device settings support")
+		}
+		_, beforeDevices := inner.(userstore.DeviceRegistry)
+		_, afterDevices := wrapped.(userstore.DeviceRegistry)
+		_, beforeRollup := inner.(userstore.SeriesEpisodeRollupStore)
+		_, afterRollup := wrapped.(userstore.SeriesEpisodeRollupStore)
+		if beforeDevices != afterDevices || beforeRollup != afterRollup {
+			t.Fatal("changed other capabilities")
+		}
+	}
+}
 
-	// The other capabilities must still survive alongside the rollup.
-	if _, ok := wrapped.(userstore.WatchedBatchWriter); !ok {
-		t.Error("rollup-capable wrapper dropped WatchedBatchWriter")
-	}
-	if _, ok := wrapped.(userstore.SettingValueCompareAndSetter); !ok {
-		t.Error("rollup-capable wrapper dropped SettingValueCompareAndSetter")
+func TestInterestTrackingProviderDoesNotInventProfileTransaction(t *testing.T) {
+	for name, inner := range map[string]userstore.UserStoreProvider{
+		"sqlite":  userdb.NewSQLiteProvider(nil),
+		"unknown": preferenceTransactionTestProvider{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			wrapped := WrapUserStoreProvider(inner, &System{})
+			if _, ok := wrapped.(transactionalProfileCreator); ok {
+				t.Fatal("unsupported backend advertised a profile transaction")
+			}
+		})
 	}
 }
 
@@ -494,5 +582,176 @@ func TestInterestTrackingStoreConditionalCapabilities(t *testing.T) {
 				t.Error("dropped SettingMutationTransactioner")
 			}
 		})
+	}
+}
+
+func TestInterestTrackingOptionalCapabilityResolution(t *testing.T) {
+	inner := &struct {
+		userstore.UserStore
+		userstore.OnboardingProgressStore
+	}{}
+	provider := WrapUserStoreProvider(preferenceTransactionTestProvider{store: inner}, &System{})
+	wrapped, err := provider.ForUser(t.Context(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := wrapped.(userstore.OnboardingProgressStore); !ok {
+		t.Fatal("lost underlying onboarding capability")
+	}
+	if _, ok := wrapped.(userstore.WatchedBatchWriter); !ok {
+		t.Fatal("decorator dropped the notification mutation hooks")
+	}
+	if _, ok := wrapped.(userstore.SeriesEpisodeRollupStore); ok {
+		t.Fatal("decorator invented backend support")
+	}
+}
+
+func TestInterestTrackingStorePreservesJellycompatProgress(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := userdb.InitSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	provider := WrapUserStoreProvider(preferenceTransactionTestProvider{store: userdb.NewSQLiteUserStore(db)}, &System{})
+	wrapped, err := provider.ForUser(t.Context(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wrapped.CreateProfile(t.Context(), userstore.Profile{ID: "profile-1", Name: "Profile"}); err != nil {
+		t.Fatal(err)
+	}
+	writer, ok := wrapped.(userstore.JellycompatProgressEditor)
+	if !ok {
+		t.Fatal("production decorator lost explicit progress writer")
+	}
+	date := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
+	if err := writer.ApplyJellycompatProgress(t.Context(), "profile-1", userstore.JellycompatProgressEdit{MediaItemID: "item-1", PositionSeconds: 123, DurationSeconds: 600, EventAt: date}); err != nil {
+		t.Fatal(err)
+	}
+	reader, ok := wrapped.(interface {
+		ListJellycompatProgressDates(context.Context, string, []string) (map[string]string, error)
+	})
+	if !ok {
+		t.Fatal("production decorator lost progress dates reader")
+	}
+	dates, err := reader.ListJellycompatProgressDates(t.Context(), "profile-1", []string{"item-1"})
+	if err != nil || dates["item-1"] != date.Format(time.RFC3339Nano) {
+		t.Fatalf("dates=%+v err=%v", dates, err)
+	}
+	progress, err := wrapped.GetProgress(t.Context(), "profile-1", "item-1")
+	if err != nil || progress == nil || progress.PositionSeconds != 123 {
+		t.Fatalf("progress=%+v err=%v", progress, err)
+	}
+}
+
+type atomicProgressObserver struct{ calls int }
+
+func (o *atomicProgressObserver) HandleWatchedCompleted(context.Context, int, string, []string) {
+	o.calls++
+}
+
+func TestAtomicJellycompatProgressNotifiesOnlyAfterCommit(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := userdb.InitSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TRIGGER fail_atomic_progress BEFORE INSERT ON watch_progress WHEN NEW.position_seconds = 321 BEGIN SELECT RAISE(ABORT, 'forced progress failure'); END"); err != nil {
+		t.Fatal(err)
+	}
+	store := userdb.NewSQLiteUserStore(db)
+	if err := store.CreateProfile(t.Context(), userstore.Profile{ID: "profile-1", Name: "Test"}); err != nil {
+		t.Fatal(err)
+	}
+	updater := &InterestUpdater{pending: map[interestMutation]int{}}
+	wrapped := &interestTrackingStore{UserStore: store, userID: 1, updater: updater}
+	observer := &atomicProgressObserver{}
+	service := watchstate.NewService(preferenceTransactionTestProvider{store: wrapped}).WithCompletionObserver(observer)
+	date := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	edit := userstore.JellycompatProgressEdit{MediaItemID: "item-1", PositionSeconds: 321, DurationSeconds: 600, Completed: true, EventAt: date}
+	if err := service.RecordJellycompatProgress(t.Context(), 1, "profile-1", edit, new(true)); err == nil {
+		t.Fatal("progress failure ignored")
+	}
+	if observer.calls != 0 || len(updater.pending) != 0 {
+		t.Fatal("failed edit notified observers")
+	}
+	edit.PositionSeconds = 123
+	if err := service.RecordJellycompatProgress(t.Context(), 1, "profile-1", edit, new(true)); err != nil {
+		t.Fatal(err)
+	}
+	if observer.calls != 1 || len(updater.pending) != 1 {
+		t.Fatal("committed edit did not notify observers")
+	}
+	clear(updater.pending)
+	edit.PositionSeconds = 321
+	edit.Completed = false
+	if err := service.RecordJellycompatProgress(t.Context(), 1, "profile-1", edit, new(false)); err == nil {
+		t.Fatal("unplayed failure ignored")
+	}
+	if observer.calls != 1 || len(updater.pending) != 0 {
+		t.Fatal("failed unplayed edit notified observers")
+	}
+	progress, err := store.GetProgress(t.Context(), "profile-1", "item-1")
+	if err != nil || progress == nil || !progress.Completed || progress.PositionSeconds != 123 {
+		t.Fatalf("failed edit changed progress: %+v %v", progress, err)
+	}
+	history, err := store.ListHistory(t.Context(), "profile-1", 10, 0)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("failed edit changed history: %+v %v", history, err)
+	}
+}
+
+type catalogProgressRelationCapableStore struct {
+	userstore.UserStore
+}
+
+func (catalogProgressRelationCapableStore) CatalogProgressRelation(_ *pgxpool.Pool, userID int, profileID string, firstArg int) (string, []any, bool) {
+	return fmt.Sprintf("progress_$%d", firstArg), []any{userID, profileID}, true
+}
+
+// Every wrapper variant answers CatalogProgressRelation, so the answer, not the
+// method's presence, must carry the backing store's capability. Production
+// always wraps the store, so a dropped answer silently disables the PostgreSQL
+// play-target path.
+func TestInterestTrackingStoreForwardsCatalogProgressRelation(t *testing.T) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := userdb.InitSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	sqlite := userdb.NewSQLiteUserStore(db)
+
+	for _, tc := range []struct {
+		name     string
+		inner    userstore.UserStore
+		wantSQL  string
+		wantOK   bool
+		wantArgs int
+	}{
+		{"postgres-backed", catalogProgressRelationCapableStore{UserStore: sqlite}, "progress_$6", true, 2},
+		{"sqlite", sqlite, "", false, 0},
+	} {
+		provider := WrapUserStoreProvider(preferenceTransactionTestProvider{store: tc.inner}, &System{})
+		wrapped, err := provider.ForUser(context.Background(), 7)
+		if err != nil {
+			t.Fatalf("%s: ForUser: %v", tc.name, err)
+		}
+		store, ok := wrapped.(userstore.CatalogProgressRelationStore)
+		if !ok {
+			t.Fatalf("%s: wrapper %T does not expose CatalogProgressRelation", tc.name, wrapped)
+		}
+		relation, args, ok := store.CatalogProgressRelation(nil, 7, "p1", 6)
+		if relation != tc.wantSQL || ok != tc.wantOK || len(args) != tc.wantArgs {
+			t.Fatalf("%s: CatalogProgressRelation = %q, %v, %v; want %q, %d args, %v", tc.name, relation, args, ok, tc.wantSQL, tc.wantArgs, tc.wantOK)
+		}
 	}
 }

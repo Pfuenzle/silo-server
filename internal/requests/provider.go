@@ -11,9 +11,7 @@ import (
 
 // RequestRouterProvider fulfills a whole request and checks target status via a
 // request_router.v1 plugin. The host owns governance (which qualities) and the
-// target records; the provider is the plugin boundary. Fulfill implementations
-// must treat Request.FulfillmentKey as an idempotency key across retries and
-// process restarts.
+// target records; the provider is the plugin boundary.
 type RequestRouterProvider interface {
 	Fulfill(ctx context.Context, installationID int, capabilityID string, req Request, qualities []Quality, conns []ResolvedRouterConnection) ([]RouterTarget, string, error)
 	CheckStatus(ctx context.Context, installationID int, capabilityID string, req Request, targets []RouterTargetRef, conns []ResolvedRouterConnection) ([]RouterTargetStatus, error)
@@ -37,7 +35,6 @@ type RouterTarget struct {
 	ExternalStatus string
 	Status         Status
 	Message        string
-	Metadata       *RouterMetadata `json:"metadata,omitempty"`
 }
 
 type RouterTargetRef struct {
@@ -52,28 +49,10 @@ type RouterTargetStatus struct {
 	Status         Status
 	ExternalStatus string
 	Message        string
-	Metadata       *RouterMetadata `json:"metadata,omitempty"`
+	// Progress is set by a plugin that declares reports_download_progress
+	// while the target has downloads in flight; nil means none.
+	Progress *DownloadProgress
 }
-
-// RouterMetadata carries optional fulfillment details that are useful to a
-// host without making any integration-specific field part of request logic.
-type RouterMetadata struct {
-	ExternalCorrelationID string        `json:"external_correlation_id,omitempty"`
-	StatusText            string        `json:"status_text,omitempty"`
-	ExternalURL           string        `json:"external_url,omitempty"`
-	LibraryURL            string        `json:"library_url,omitempty"`
-	ImportedPath          string        `json:"imported_path,omitempty"`
-	ScanLinkState         ScanLinkState `json:"scan_link_state,omitempty"`
-}
-
-type ScanLinkState string
-
-const (
-	ScanLinkStatePending  ScanLinkState = "pending"
-	ScanLinkStateScanning ScanLinkState = "scanning"
-	ScanLinkStateLinked   ScanLinkState = "linked"
-	ScanLinkStateFailed   ScanLinkState = "failed"
-)
 
 type RouterOption struct {
 	Value string `json:"value"`
@@ -97,31 +76,26 @@ type RouterClient interface {
 
 type pluginRouterProvider struct{ resolver RouterClientResolver }
 
+// RouterFeatures reads the capability's declared features when the resolver
+// can; otherwise the capability declares none.
+func (p *pluginRouterProvider) RouterFeatures(ctx context.Context, installationID int, capabilityID string) (RouterFeatures, error) {
+	reader, ok := p.resolver.(RouterFeatureReader)
+	if !ok {
+		return RouterFeatures{}, nil
+	}
+	return reader.RouterFeatures(ctx, installationID, capabilityID)
+}
+
 func NewPluginRouterProvider(r RouterClientResolver) RequestRouterProvider {
 	return &pluginRouterProvider{resolver: r}
 }
 
 func routerDescriptor(req Request) *pluginv1.RequestDescriptor {
 	ids := map[string]string{}
-	if req.ID != "" {
-		ids["silo_request_id"] = req.ID
-	}
-	if req.FulfillmentKey != "" {
-		ids["silo_fulfillment_key"] = req.FulfillmentKey
-	}
-	if req.Provider != "" {
-		ids["provider"] = req.Provider
-	}
-	if req.ProviderItemID != "" {
-		ids["provider_item_id"] = req.ProviderItemID
-	}
-	if req.ExternalLibraryID != "" {
-		ids["external_library_id"] = req.ExternalLibraryID
-	}
 	if req.TMDBID != 0 {
 		ids["tmdb"] = strconv.Itoa(req.TMDBID)
 	}
-	if req.TVDBID != nil {
+	if req.TVDBID != nil && *req.TVDBID > 0 {
 		ids["tvdb"] = strconv.Itoa(*req.TVDBID)
 	}
 	if req.IMDbID != "" {
@@ -130,6 +104,14 @@ func routerDescriptor(req Request) *pluginv1.RequestDescriptor {
 	year := 0
 	if req.Year != nil {
 		year = *req.Year
+	}
+	// Seasons name the series seasons requested; none means the whole
+	// series. A plugin without supports_seasons ignores them.
+	var seasons []int32
+	if req.MediaType == MediaTypeSeries {
+		for _, season := range req.Seasons {
+			seasons = append(seasons, int32(season))
+		}
 	}
 	return &pluginv1.RequestDescriptor{
 		MediaType:          string(req.MediaType),
@@ -141,8 +123,7 @@ func routerDescriptor(req Request) *pluginv1.RequestDescriptor {
 		RequesterProfileId: req.RequestedByProfileID,
 		RequesterEmail:     req.RequesterEmail,
 		RequesterUsername:  req.RequesterUsername,
-		RequestId:          req.ID,
-		FulfillmentKey:     req.FulfillmentKey,
+		Seasons:            seasons,
 	}
 }
 
@@ -190,7 +171,7 @@ func (p *pluginRouterProvider) Fulfill(ctx context.Context, installationID int, 
 		targets = append(targets, RouterTarget{
 			Quality: Quality(t.GetQuality()), ConnectionID: t.GetConnectionId(),
 			ExternalID: t.GetExternalId(), ExternalStatus: t.GetExternalStatus(),
-			Status: Status(t.GetStatus()), Message: t.GetMessage(), Metadata: routerMetadataFromProto(t.GetMetadata()),
+			Status: Status(t.GetStatus()), Message: t.GetMessage(),
 		})
 	}
 	return targets, resp.GetMessage(), nil
@@ -220,10 +201,42 @@ func (p *pluginRouterProvider) CheckStatus(ctx context.Context, installationID i
 		out = append(out, RouterTargetStatus{
 			Quality: Quality(st.GetQuality()), ConnectionID: st.GetConnectionId(),
 			Status: Status(st.GetStatus()), ExternalStatus: st.GetExternalStatus(), Message: st.GetMessage(),
-			Metadata: routerMetadataFromProto(st.GetMetadata()),
+			Progress: downloadProgressFromProto(st.GetProgress()),
 		})
 	}
 	return out, nil
+}
+
+// downloadProgressFromProto normalizes a plugin's progress report. An unknown
+// or empty phase reads as downloading, but a report with neither a phase nor
+// a size carries nothing and maps to nil. Byte counts are clamped so that
+// 0 <= left <= total; a total of 0 means the size is unknown.
+func downloadProgressFromProto(p *pluginv1.DownloadProgress) *DownloadProgress {
+	if p == nil {
+		return nil
+	}
+	phase := DownloadPhase(p.GetPhase())
+	total := max(p.GetBytesTotal(), 0)
+	if phase == "" && total == 0 {
+		return nil
+	}
+	switch phase {
+	case DownloadPhaseQueued, DownloadPhaseDownloading, DownloadPhasePaused,
+		DownloadPhaseStalled, DownloadPhaseImporting, DownloadPhaseImportBlocked:
+	default:
+		phase = DownloadPhaseDownloading
+	}
+	out := &DownloadProgress{
+		Phase:      phase,
+		BytesTotal: total,
+		BytesLeft:  min(max(p.GetBytesLeft(), 0), total),
+		Downloads:  int(max(p.GetDownloads(), 0)),
+	}
+	if eta := p.GetEstimatedCompletion(); eta != nil && eta.IsValid() {
+		at := eta.AsTime().UTC()
+		out.EstimatedCompletion = &at
+	}
+	return out
 }
 
 func (p *pluginRouterProvider) ListConfigOptions(ctx context.Context, installationID int, capabilityID string, conn ResolvedRouterConnection) (map[string][]RouterOption, error) {

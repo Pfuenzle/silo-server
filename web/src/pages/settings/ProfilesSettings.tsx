@@ -13,6 +13,7 @@ import { useAvailableUserLibraries } from "@/hooks/queries/libraries";
 import { useDeleteProfile, useProfiles } from "@/hooks/queries/profiles";
 import { ProfileEditorDialog } from "@/components/profiles/ProfileEditorDialog";
 import { ProfilePinDialog } from "@/components/profiles/ProfilePinDialog";
+import { pinLockoutMessage } from "@/components/profiles/pinLockout";
 import { getProfileToken } from "@/api/client";
 import { buildProfileAccessSummary } from "@/lib/profile-management";
 import { HouseholdStreamsPanel } from "@/components/profiles/HouseholdStreamsPanel";
@@ -38,7 +39,13 @@ function getDeleteGuardReason(
 }
 
 export default function ProfilesSettings() {
-  const { data: profiles = [], isLoading: profilesLoading, avatarUploadEnabled } = useProfiles();
+  const {
+    data: profiles = [],
+    isLoading: profilesLoading,
+    avatarUploadEnabled,
+    maxAdvisoryAgeSupported,
+    requireAdvisoryAgeSupported,
+  } = useProfiles();
   const { data: libraries = [], isLoading: librariesLoading } = useAvailableUserLibraries();
   const { profile: activeProfile, selectProfile, verifyProfilePin } = useAuth();
   const deleteMutation = useDeleteProfile();
@@ -196,6 +203,8 @@ export default function ProfilesSettings() {
         profile={editingProfile}
         libraries={libraries}
         avatarUploadEnabled={avatarUploadEnabled}
+        advisoryAgeSupported={maxAdvisoryAgeSupported}
+        requireAdvisoryAgeSupported={requireAdvisoryAgeSupported}
         onOpenChange={(open) => {
           setEditorOpen(open);
           if (!open) {
@@ -215,8 +224,13 @@ export default function ProfilesSettings() {
                 selectProfile(savedProfile, response.profile_token);
                 return;
               }
-            } catch {
-              toast.error("Profile saved, but PIN verification failed");
+            } catch (err) {
+              const lockout = pinLockoutMessage(err);
+              toast.error(
+                lockout
+                  ? `Profile saved. ${lockout}`
+                  : "Profile saved, but PIN verification failed",
+              );
               return;
             }
           }

@@ -1,20 +1,33 @@
-import type { RefObject } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
+import type { RefObject } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { PlayerSubtitleInfo, VideoFitMode } from "../types";
 import { useASSSubtitles } from "./useASSSubtitles";
-import type { PlayerSubtitleInfo } from "../types";
 
 // Capture the options every JASSUB instance is constructed with, plus the
 // instances themselves so tests can observe later timeOffset updates.
 const constructorOpts: Array<Record<string, unknown>> = [];
-const instances: Array<{ timeOffset: number; resize: ReturnType<typeof vi.fn> }> = [];
+const instances: Array<{
+  timeOffset: number;
+  resize: ReturnType<typeof vi.fn>;
+  renderer: { setTrack: ReturnType<typeof vi.fn> };
+  prescaleFactor: number;
+  prescaleHeightLimit: number;
+  _canvas: HTMLCanvasElement;
+}> = [];
 let rendererReady: Promise<void> = Promise.resolve();
 
 vi.mock("jassub", () => {
   class MockJASSUB {
     timeOffset = 0;
     ready = rendererReady;
-    renderer = { setTrackByUrl: vi.fn().mockResolvedValue(undefined) };
+    renderer = {
+      setTrack: vi.fn().mockResolvedValue(undefined),
+      setTrackByUrl: vi.fn().mockResolvedValue(undefined),
+    };
+    prescaleFactor = 1;
+    prescaleHeightLimit = 1080;
+    _canvas = document.createElement("canvas");
     constructor(opts: Record<string, unknown>) {
       constructorOpts.push(opts);
       this.timeOffset = (opts.timeOffset as number) ?? 0;
@@ -79,7 +92,7 @@ function mockFontBundleResponse(bytes: string): Response {
   return {
     ok: true,
     status: 200,
-    json: vi.fn().mockResolvedValue([{ name: "Attached.ttf", data: btoa(bytes) }]),
+    json: vi.fn().mockResolvedValue({ items: [{ name: "Attached.ttf", data: btoa(bytes) }] }),
   } as unknown as Response;
 }
 
@@ -251,20 +264,123 @@ describe("useASSSubtitles time offset", () => {
     });
     expect(instances[0]!.resize).not.toHaveBeenCalled();
   });
+});
 
-  it("updates the live instance's timeOffset when the delay changes", async () => {
+describe("useASSSubtitles video fit", () => {
+  const script = [
+    "[Script Info]",
+    "PlayResX: 1920",
+    "PlayResY: 1080",
+    "",
+    "[V4+ Styles]",
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+    "Style: Default,Arial,64,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,3,0,2,40,40,40,1",
+    "",
+    "[Events]",
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Hello",
+  ].join("\n");
+  // A 16:9 frame filling a 2.39:1 player hides 12.8% of its height per edge,
+  // which is 138 rows of this script's 1080-row PlayRes.
+  const scopeCrop = { x: 0, y: 0.128 };
+  const insetStyle = "0,2,40,40,178,1";
+
+  type Props = { videoFit: VideoFitMode; coverCrop: { x: number; y: number } };
+  function renderFitHook(initialProps: Props) {
     const videoRef = makeVideoRef();
-    const { rerender } = renderHook(
-      ({ delay }) => useASSSubtitles(videoRef, [germanTrack], 6, false, 30, delay),
-      { initialProps: { delay: 0 } },
+    return renderHook(
+      ({ videoFit, coverCrop }: Props) =>
+        useASSSubtitles(videoRef, [germanTrack], 6, false, 0, 0, undefined, videoFit, coverCrop),
+      { initialProps },
     );
+  }
+
+  beforeEach(() => {
+    vi.mocked(fetch).mockResolvedValue(mockFetchResponse(script));
+  });
+
+  it("applies a fit change made before JASSUB finishes initializing", async () => {
+    let resolveFetch!: (response: Response) => void;
+    vi.mocked(fetch).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      }),
+    );
+    let resolveReady!: () => void;
+    rendererReady = new Promise((resolve) => {
+      resolveReady = resolve;
+    });
+    const { rerender } = renderFitHook({ videoFit: "contain", coverCrop: { x: 0, y: 0 } });
+    await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+
+    await act(async () => {
+      resolveFetch(mockFetchResponse(script));
+    });
+    await waitFor(() => expect(instances).toHaveLength(1));
+    expect(constructorOpts[0]!.subContent).toBe(script);
+
+    rerender({ videoFit: "cover", coverCrop: scopeCrop });
+    await act(async () => {
+      resolveReady();
+    });
+
+    const instance = instances[0]!;
+    await waitFor(() => expect(instance.renderer.setTrack).toHaveBeenCalled());
+    expect(instance._canvas).toHaveClass("player-ass-fill");
+    expect(instance.renderer.setTrack).toHaveBeenLastCalledWith(
+      expect.stringContaining(insetStyle),
+    );
+    expect(instance.resize).toHaveBeenCalledWith(true);
+  });
+
+  it("starts with Fill margins when the player is already cropped", async () => {
+    renderFitHook({ videoFit: "cover", coverCrop: scopeCrop });
 
     await waitFor(() => expect(instances).toHaveLength(1));
-    expect(instances[0]!.timeOffset).toBe(30);
+    expect(constructorOpts[0]!.subContent).toContain(insetStyle);
+    expect(instances[0]!._canvas).toHaveClass("player-ass-fill");
+    await waitFor(() => expect(instances[0]!.resize).toHaveBeenCalledWith(true));
+    expect(instances[0]!.renderer.setTrack).not.toHaveBeenCalled();
+  });
 
-    rerender({ delay: 2000 });
+  it("moves regular events into view in Fill and restores them in Fit", async () => {
+    const { rerender } = renderFitHook({ videoFit: "contain", coverCrop: { x: 0, y: 0 } });
+    await waitFor(() => expect(instances).toHaveLength(1));
+    const instance = instances[0]!;
+    expect(instance._canvas).not.toHaveClass("player-ass-fill");
 
-    await waitFor(() => expect(instances[0]!.timeOffset).toBe(28));
+    rerender({ videoFit: "cover", coverCrop: scopeCrop });
+    expect(instance._canvas).toHaveClass("player-ass-fill");
+    await waitFor(() =>
+      expect(instance.renderer.setTrack).toHaveBeenLastCalledWith(
+        expect.stringContaining(insetStyle),
+      ),
+    );
+    expect(instance.resize).toHaveBeenCalledWith(true);
+    // Render at the zoomed size so the cropped bitmap is not upscaled.
+    expect(instance.prescaleFactor).toBeCloseTo(1 / (1 - 2 * scopeCrop.y));
+    expect(instance.prescaleHeightLimit).toBe(Number.POSITIVE_INFINITY);
+
+    rerender({ videoFit: "contain", coverCrop: { x: 0, y: 0 } });
+    expect(instance._canvas).not.toHaveClass("player-ass-fill");
+    await waitFor(() => expect(instance.renderer.setTrack).toHaveBeenLastCalledWith(script));
+    expect(instance.prescaleFactor).toBe(1);
+    expect(instance.prescaleHeightLimit).toBe(1080);
+  });
+
+  it("reloads the track once after the player stops resizing", async () => {
+    const { rerender } = renderFitHook({ videoFit: "cover", coverCrop: { x: 0, y: 0 } });
+    await waitFor(() => expect(instances).toHaveLength(1));
+    const instance = instances[0]!;
+    await waitFor(() => expect(instance.resize).toHaveBeenCalled());
+
+    rerender({ videoFit: "cover", coverCrop: { x: 0, y: 0.05 } });
+    rerender({ videoFit: "cover", coverCrop: { x: 0, y: 0.1 } });
+    rerender({ videoFit: "cover", coverCrop: scopeCrop });
+
+    await waitFor(() => expect(instance.renderer.setTrack).toHaveBeenCalled());
+    expect(instance.renderer.setTrack).toHaveBeenCalledOnce();
+    expect(instance.renderer.setTrack).toHaveBeenCalledWith(expect.stringContaining(insetStyle));
   });
 });
 
@@ -401,4 +517,43 @@ it("keeps a slowly progressing ASS extraction alive beyond 30 seconds", async ()
     unmount();
     vi.useRealTimers();
   }
+});
+
+describe("useASSSubtitles retime", () => {
+  it("swaps a retimed script into the running renderer without reloading", async () => {
+    const script = (start: string) =>
+      `[Script Info]\nScriptType: v4.00+\n\n[Events]\nFormat: Layer, Start, End, Style, Text\nDialogue: 0,${start},0:00:12.00,Default,Hi\n`;
+    const fetchMock = vi.fn().mockResolvedValue(mockFetchResponse(script("0:00:10.00")));
+    vi.stubGlobal("fetch", fetchMock);
+    const states: string[] = [];
+    const { rerender } = renderHook(
+      ({ revision }) =>
+        useASSSubtitles(
+          makeVideoRef(),
+          [germanTrack],
+          6,
+          false,
+          0,
+          0,
+          (state) => states.push(state),
+          "contain",
+          undefined,
+          revision,
+        ),
+      { initialProps: { revision: 0 } },
+    );
+    await waitFor(() => expect(states.at(-1)).toBe("ready"));
+    states.length = 0;
+
+    fetchMock.mockResolvedValue(mockFetchResponse(script("0:00:11.50")));
+    rerender({ revision: 1 });
+    await waitFor(() => expect(states.at(-1)).toBe("ready"));
+    // One renderer throughout: the corrected script replaces the old one in
+    // place, and the reload is not announced as loading.
+    expect(instances).toHaveLength(1);
+    expect(instances[0]!.renderer.setTrack).toHaveBeenLastCalledWith(
+      expect.stringContaining("0:00:11.50"),
+    );
+    expect(states).toEqual(["refreshing", "ready"]);
+  });
 });

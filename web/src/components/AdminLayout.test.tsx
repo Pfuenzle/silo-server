@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router";
@@ -48,13 +49,22 @@ function renderAdmin(initialPath = "/admin") {
         children: [
           { index: true, element: <h1>Admin dashboard</h1> },
           { path: "users", element: <h1>Admin users</h1> },
+          { path: "home-rows", element: <h1>Admin home rows</h1> },
         ],
       },
     ],
     { initialEntries: [initialPath] },
   );
 
-  return { router, ...render(<RouterProvider router={router} />) };
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return {
+    router,
+    ...render(
+      <QueryClientProvider client={client}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    ),
+  };
 }
 
 beforeEach(() => {
@@ -93,6 +103,31 @@ describe("AdminLayout search shortcut hint", () => {
     const [search] = screen.getAllByRole("button", { name: "Search admin sections" });
     expect(search).toHaveAttribute("title", "Search admin sections (⌘ K)");
     expect(screen.getByText("⌘ K")).toBeInTheDocument();
+  });
+});
+
+describe("AdminLayout shell attribute", () => {
+  it("publishes data-admin-shell for exactly its own lifetime", () => {
+    // app.css resolves `--app-sidebar-offset` to this shell's 240px sidebar
+    // only while the attribute is present, so the audiobook MiniBar clears the
+    // admin navigation instead of painting over its bottom edge.
+    const { unmount } = renderAdmin();
+    expect(document.documentElement).toHaveAttribute("data-admin-shell", "true");
+    unmount();
+    expect(document.documentElement).not.toHaveAttribute("data-admin-shell");
+  });
+});
+
+describe("AdminLayout page title", () => {
+  // The tab title, the route-change announcement and the phone header all read
+  // this name, so a renamed route must not fall back to the generic "Admin"
+  // (which the phone header shows as "Dashboard").
+  it("names the Home rows page in the tab and the phone header", () => {
+    renderAdmin("/admin/home-rows");
+
+    expect(document.title).toBe("Admin Home rows · Silo");
+    expect(screen.getByText("Home rows")).toBeInTheDocument();
+    expect(screen.queryByText("Dashboard")).not.toBeInTheDocument();
   });
 });
 

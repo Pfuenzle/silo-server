@@ -2,15 +2,23 @@ package jellycompat
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/Silo-Server/silo-server/internal/auth"
-	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/logredact"
+
 	"github.com/go-chi/chi/v5"
+
+	"github.com/Silo-Server/silo-server/internal/activitylog"
+	"github.com/Silo-Server/silo-server/internal/auth"
+	"github.com/Silo-Server/silo-server/internal/clientip"
+	"github.com/Silo-Server/silo-server/internal/playback"
 )
 
 type sessionContextKey string
@@ -24,16 +32,28 @@ const (
 	tokenRefreshTimeout = 30 * time.Second
 )
 
+// tokenRefresher exchanges a session's Silo refresh token for a new pair;
+// *auth.Service implements it.
+type tokenRefresher interface {
+	Refresh(ctx context.Context, refreshToken string) (*auth.TokenPair, error)
+}
+
 // Authenticator extracts Jellyfin-style auth tokens and resolves compat sessions.
 type Authenticator struct {
-	sessions    *SessionStore
-	authService *auth.Service
-	now         func() time.Time
+	sessions *SessionStore
+	// refresher is nil when no auth service is configured; sessions then
+	// keep their Silo tokens unrefreshed.
+	refresher tokenRefresher
+	now       func() time.Time
 }
 
 // NewAuthenticator creates a new compat authenticator.
 func NewAuthenticator(sessions *SessionStore, authService *auth.Service) *Authenticator {
-	return &Authenticator{sessions: sessions, authService: authService, now: time.Now}
+	a := &Authenticator{sessions: sessions, now: time.Now}
+	if authService != nil {
+		a.refresher = authService
+	}
+	return a
 }
 
 // ExtractToken extracts a compat token from Jellyfin-style request auth.
@@ -93,8 +113,12 @@ func (a *Authenticator) RequireSession(next http.Handler) http.Handler {
 			return
 		}
 
-		session, ok := a.sessions.Get(token)
-		if !ok {
+		session, err := a.sessions.Lookup(r.Context(), token)
+		if err != nil && !errors.Is(err, ErrSessionNotFound) {
+			writeSessionLookupFailed(w, r, token, err)
+			return
+		}
+		if err != nil {
 			slog.WarnContext(r.Context(), "jellycompat auth: session not found", "component", "jellycompat",
 				"path", r.URL.Path,
 				"token_prefix", safeTokenPrefix(token),
@@ -106,16 +130,29 @@ func (a *Authenticator) RequireSession(next http.Handler) http.Handler {
 		// Refresh underlying Silo tokens if they're about to expire.
 		// Use a detached context so a client aborting the request mid-refresh
 		// (common on flaky mobile networks) doesn't revoke the compat session.
-		if a.authService != nil && !session.StreamAppTokenExpiry.IsZero() &&
+		if a.refresher != nil && !session.StreamAppTokenExpiry.IsZero() &&
 			session.StreamAppTokenExpiry.Before(a.now().Add(tokenRefreshBuffer)) {
 			refreshCtx, cancel := context.WithTimeout(context.Background(), tokenRefreshTimeout)
-			newPair, err := a.authService.Refresh(refreshCtx, session.StreamAppRefreshToken)
+			newPair, err := a.refresher.Refresh(refreshCtx, session.StreamAppRefreshToken)
 			cancel()
+			if errors.Is(err, auth.ErrSessionCheckUnavailable) || errors.Is(err, auth.ErrProviderUnavailable) {
+				// The store could not be read, or the sign-in provider could
+				// not answer under the fail_closed outage policy: the refresh
+				// token was not refused. Keep the compat session; the client
+				// retries.
+				slog.WarnContext(r.Context(), "jellycompat auth: token refresh could not check the session; keeping it", "component", "jellycompat",
+					"path", r.URL.Path,
+					"token_prefix", safeTokenPrefix(token),
+					"error", logredact.SanitizeText(err.Error()),
+				)
+				writeSessionCheckUnavailable(w)
+				return
+			}
 			if err != nil {
 				slog.WarnContext(r.Context(), "jellycompat auth: token refresh failed, revoking session", "component", "jellycompat",
 					"path", r.URL.Path,
 					"token_prefix", safeTokenPrefix(token),
-					"error", err,
+					"error", logredact.SanitizeText(err.Error()),
 				)
 				a.sessions.Delete(token)
 				writeError(w, http.StatusUnauthorized, "Unauthorized", "Session expired")
@@ -142,6 +179,39 @@ func (a *Authenticator) RequireSession(next http.Handler) http.Handler {
 	})
 }
 
+// writeSessionCheckUnavailable answers a request whose session could not be
+// checked with a retryable 503.
+func writeSessionCheckUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", strconv.Itoa(auth.SessionCheckRetryAfterSeconds))
+	writeError(w, http.StatusServiceUnavailable, "ServiceUnavailable", "Server is temporarily unavailable")
+}
+
+// writeSessionLookupFailed answers a request whose compat session could not
+// be read from the session store. The token was not judged: a retryable
+// 503, never a 401 that signs the client out.
+func writeSessionLookupFailed(w http.ResponseWriter, r *http.Request, token string, err error) {
+	if r.Context().Err() == nil {
+		slog.WarnContext(r.Context(), "jellycompat auth: session lookup failed; answering 503", "component", "jellycompat",
+			"path", r.URL.Path,
+			"token_prefix", safeTokenPrefix(token),
+			"error", logredact.SanitizeText(err.Error()),
+		)
+	}
+	writeSessionCheckUnavailable(w)
+}
+
+// attributeActivity records the session's account on the activity log entry
+// for this request, when the activity log middleware is mounted.
+func attributeActivity(r *http.Request, session *Session) {
+	if session == nil {
+		return
+	}
+	if lc := activitylog.GetLogContext(r.Context()); lc != nil {
+		uid := session.StreamAppUserID
+		lc.UserID = &uid
+	}
+}
+
 // safeTokenPrefix returns the first 8 characters of a token for logging.
 func safeTokenPrefix(token string) string {
 	if len(token) <= 8 {
@@ -153,6 +223,7 @@ func safeTokenPrefix(token string) string {
 // serveWithSession injects the resolved compat session into the request context
 // and continues the handler chain.
 func serveWithSession(next http.Handler, w http.ResponseWriter, r *http.Request, session *Session) {
+	attributeActivity(r, session)
 	ctx := context.WithValue(r.Context(), compatSessionKey, session)
 	ctx = playback.WithClientInfo(ctx, compatPlaybackClientInfo(r))
 	next.ServeHTTP(w, r.WithContext(ctx))
@@ -201,35 +272,54 @@ func mediaBrowserAuthorizationValue(header, key string) string {
 // resolveCompatToken resolves a token to a compat session: a session-store token
 // (normal login) or, matching Jellyfin, an sa_ admin API key (synthesized
 // session bound to the key user's primary profile). Returns false when the token
-// matches neither. keyAuth may be nil (resolveSession handles a nil receiver).
-func resolveCompatToken(ctx context.Context, sessions *SessionStore, keyAuth *AdminAPIKeyAuthenticator, token string) (*Session, bool) {
+// matches neither, and an error when the session store could not be read, which
+// judges nothing about the token. keyAuth may be nil (resolveSession handles a
+// nil receiver).
+func resolveCompatToken(ctx context.Context, sessions *SessionStore, keyAuth *AdminAPIKeyAuthenticator, token string) (*Session, bool, error) {
 	if token == "" {
-		return nil, false
+		return nil, false, nil
 	}
-	if session, ok := sessions.Get(token); ok {
-		return session, true
+	if sessions != nil {
+		session, err := sessions.Lookup(ctx, token)
+		if err == nil {
+			return session, true, nil
+		}
+		if !errors.Is(err, ErrSessionNotFound) {
+			return nil, false, err
+		}
 	}
 	if strings.HasPrefix(token, "sa_") {
 		if session, _, _ := keyAuth.resolveSession(ctx, token); session != nil {
-			return session, true
+			return session, true, nil
 		}
 	}
-	return nil, false
+	return nil, false, nil
 }
 
-// PlaybackSessionAuth creates middleware that falls back to playback session
-// authentication for media stream endpoints where external players (e.g. libmpv)
-// don't forward auth headers or query parameters.
+// PlaybackSessionAuth accepts a login/API token or an unexpired PlaySessionId
+// scoped to the negotiated item and source. Catalog IDs are not credentials:
+// the one credential-less path is a static video stream of a source that the
+// same client address negotiated through an authenticated PlaybackInfo that
+// is still live (staticStreamGrantIdle). Clients behind one shared address
+// (a household NAT, carrier-grade NAT) can therefore reuse each other's live
+// negotiation for that exact source.
 func PlaybackSessionAuth(sessions *SessionStore, playbackStore CompatPlaybackStore, keyAuth *AdminAPIKeyAuthenticator) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Try standard token auth first — a compat session token or an sa_
 			// admin key (synthesized session).
 			if token, ok := ExtractToken(r); ok {
-				if session, ok := resolveCompatToken(r.Context(), sessions, keyAuth, token); ok {
+				session, ok, err := resolveCompatToken(r.Context(), sessions, keyAuth, token)
+				if err != nil {
+					writeSessionLookupFailed(w, r, token, err)
+					return
+				}
+				if ok {
 					serveWithSession(next, w, r, session)
 					return
 				}
+				writeError(w, http.StatusUnauthorized, "Unauthorized", "Invalid or expired authentication token")
+				return
 			}
 
 			// Follow-up HLS requests (master/segment) carry only PlaySessionId,
@@ -241,9 +331,14 @@ func PlaybackSessionAuth(sessions *SessionStore, playbackStore CompatPlaybackSto
 			// builds its own direct-play URL with a lowercase "playSessionId"
 			// (and no api_key / auth header), so a case-sensitive match would
 			// miss it and 401 the stream — forcing a needless transcode fallback.
-			if playSessionID := newCaseInsensitiveQuery(r.URL.Query()).Get("PlaySessionId"); playSessionID != "" {
-				if playSession, found := playbackStore.Get(playSessionID); found {
-					if session, ok := resolveCompatToken(r.Context(), sessions, keyAuth, playSession.CompatToken); ok {
+			if playSessionID := newCaseInsensitiveQuery(r.URL.Query()).Get("PlaySessionId"); playSessionID != "" && playbackStore != nil {
+				if playSession, found := playbackStore.Get(playSessionID); found && playbackGrantMatchesRequest(r, playSession) {
+					session, ok, err := resolveCompatToken(r.Context(), sessions, keyAuth, playSession.CompatToken)
+					if err != nil {
+						writeSessionLookupFailed(w, r, playSession.CompatToken, err)
+						return
+					}
+					if ok {
 						serveWithSession(next, w, r, session)
 						return
 					}
@@ -252,32 +347,27 @@ func PlaybackSessionAuth(sessions *SessionStore, playbackStore CompatPlaybackSto
 				}
 			}
 
-			// Stock Jellyfin Android TV ignores the api_key-bearing DirectStreamUrl
-			// we return from PlaybackInfo and builds its own direct-play URL with no
-			// auth header, no api_key/ApiKey, and no PlaySessionId. Anchor auth on
-			// the PlaybackSession negotiated for this item: a successful PlaybackInfo
-			// already authenticated the user and registered a session holding the
-			// CompatToken. Scope this strictly to the direct-play video stream routes
-			// (NOT /Items/{id}/Download) via the chi route pattern, prefer matching
-			// on mediaSourceId when present, and require the matched session's
-			// RouteItemID to equal the requested item so a source id can't
-			// authorize a stream for a different item.
-			if playbackStore != nil {
-				switch chi.RouteContext(r.Context()).RoutePattern() {
-				case "/Videos/{id}/stream", "/Videos/{id}/stream.{container}":
-					routeItemID := chi.URLParam(r, "id")
-					if routeItemID != "" {
-						mediaSourceID := newCaseInsensitiveQuery(r.URL.Query()).Get("mediaSourceId")
-						lookupID := routeItemID
-						if mediaSourceID != "" {
-							lookupID = mediaSourceID
-						}
-						if playSession, _, found := playbackStore.FindByRoute("", lookupID); found && playSession.RouteItemID == routeItemID {
-							if session, ok := resolveCompatToken(r.Context(), sessions, keyAuth, playSession.CompatToken); ok {
-								serveWithSession(next, w, r, session)
-								return
-							}
-						}
+			// Jellyfin for Android TV and Findroid open static direct-play and
+			// download URLs with no credentials at all (upstream Jellyfin serves
+			// them anonymously). Grant only a static stream of a source the same
+			// client address negotiated through an authenticated PlaybackInfo
+			// that is still live and recently active, so an item or source id is
+			// never a credential on its own.
+			if playbackStore != nil && isStaticStreamRequest(r) {
+				itemID := chi.URLParam(r, "id")
+				sourceID := newCaseInsensitiveQuery(r.URL.Query()).Get("MediaSourceId")
+				clientIP := clientip.FromContext(r.Context())
+				if grant, found := playbackStore.FindStreamGrant(itemID, sourceID, clientIP, requestPeerHost(r), staticStreamGrantIdle); found {
+					session, ok, err := resolveCompatToken(r.Context(), sessions, keyAuth, grant.CompatToken)
+					if err != nil {
+						writeSessionLookupFailed(w, r, grant.CompatToken, err)
+						return
+					}
+					if ok {
+						slog.InfoContext(r.Context(), "jellycompat static stream granted without credentials",
+							"play_session", grant.ID, "user_id", grant.UserID, "item_id", itemID, "media_source_id", sourceID, "client_ip", clientIP, "peer", requestPeerHost(r), "negotiated_peer", grant.ClientPeer)
+						serveWithSession(next, w, r, session)
+						return
 					}
 				}
 			}
@@ -285,6 +375,87 @@ func PlaybackSessionAuth(sessions *SessionStore, playbackStore CompatPlaybackSto
 			writeError(w, http.StatusUnauthorized, "Unauthorized", "Missing authentication token")
 		})
 	}
+}
+
+// staticStreamGrantIdle bounds how long after its last activity (PlaybackInfo,
+// progress report, or ping) a negotiation keeps granting credential-less static
+// streams. Playing clients report progress well within it; it also covers a
+// long pause followed by a seek.
+const staticStreamGrantIdle = 2 * time.Hour
+
+// isStaticStreamRequest reports a direct-file video stream read, using the
+// same Static=true test as HandleVideoStream. A request repeating Static or
+// MediaSourceId under different cases is refused, since the case-insensitive
+// lookup would pick one arbitrarily and auth and handler could disagree.
+func isStaticStreamRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	pattern := chi.RouteContext(r.Context()).RoutePattern()
+	if !strings.HasSuffix(pattern, "/Videos/{id}/stream") && !strings.HasSuffix(pattern, "/Videos/{id}/stream.{container}") {
+		return false
+	}
+	query := r.URL.Query()
+	for _, name := range []string{"Static", "MediaSourceId"} {
+		values := 0
+		for key, vals := range query {
+			if strings.EqualFold(key, name) {
+				values += len(vals)
+			}
+		}
+		if values > 1 {
+			return false
+		}
+	}
+	return strings.EqualFold(newCaseInsensitiveQuery(query).Get("Static"), "true")
+}
+
+// requestPeerHost is the transport peer's host, before any forwarding header
+// was applied; see sameStreamPath.
+func requestPeerHost(r *http.Request) string {
+	peer := clientip.PeerFromContext(r.Context())
+	if peer == "" {
+		peer = r.RemoteAddr
+	}
+	if host, _, err := net.SplitHostPort(peer); err == nil {
+		return host
+	}
+	return peer
+}
+
+// staticStreamGrantTouchInterval throttles how often progress reports refresh
+// a grant's activity, so playback past staticStreamGrantIdle keeps seeking
+// without a store write on every report.
+const staticStreamGrantTouchInterval = 10 * time.Minute
+
+// touchStaticStreamGrant refreshes the activity of a started play that may
+// back a credential-less static stream. Best effort: a failed touch only
+// shortens the grant.
+func touchStaticStreamGrant(store CompatPlaybackStore, playSession *PlaybackSession, stop bool) {
+	if stop || store == nil || playSession == nil || playSession.ClientIP == "" || time.Since(playSession.UpdatedAt) < staticStreamGrantTouchInterval {
+		return
+	}
+	_ = store.Update(playSession.ID, func(*PlaybackSession) error { return nil })
+}
+
+func playbackGrantMatchesRequest(r *http.Request, session *PlaybackSession) bool {
+	if session == nil || session.Terminal || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
+		return false
+	}
+	itemID := firstNonEmpty(chi.URLParam(r, "id"), chi.URLParam(r, "routeItemId"))
+	if itemID == "" || !mediaSourceIDsEqual(itemID, session.RouteItemID) {
+		return false
+	}
+	sourceID := firstNonEmpty(chi.URLParam(r, "routeMediaSourceId"), newCaseInsensitiveQuery(r.URL.Query()).Get("MediaSourceId"))
+	if sourceID == "" {
+		return true
+	}
+	for _, source := range session.MediaSources {
+		if mediaSourceIDsEqual(source.ID, sourceID) {
+			return true
+		}
+	}
+	return false
 }
 
 // SessionFromContext returns the authenticated compat session, if present.

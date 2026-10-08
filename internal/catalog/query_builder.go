@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -18,13 +17,14 @@ import (
 var EbookFinishedProgressThresholdSQL = strconv.FormatFloat(models.EbookFinishedProgressThreshold, 'f', -1, 64)
 
 type QueryBuilder struct {
-	alias      string
-	argIdx     int
-	args       []any
-	userID     int
-	profileID  string
-	libraryIDs []int
-	mediaScope string
+	cursorTerms []queryCursorTerm
+	alias       string
+	argIdx      int
+	args        []any
+	userID      int
+	profileID   string
+	libraryIDs  []int
+	mediaScope  string
 	// requireUserHistoryCTE is set when an emitted clause references the
 	// per-user history aggregate (audit 2026-05-01 §3.1 Pattern B). The
 	// executor reads this flag to inject the user_last_watched CTE and
@@ -33,6 +33,7 @@ type QueryBuilder struct {
 }
 
 type QuerySortPlan struct {
+	terms   []queryCursorTerm
 	Joins   []string
 	OrderBy string
 	Args    []any
@@ -222,7 +223,12 @@ func (qb *QueryBuilder) BuildSortClause(sortConfig QuerySort) (string, []any, er
 	return plan.OrderBy, plan.Args, nil
 }
 
-func (qb *QueryBuilder) BuildSortPlan(sortConfig QuerySort) (QuerySortPlan, error) {
+func (qb *QueryBuilder) BuildSortPlan(sortConfig QuerySort) (result QuerySortPlan, err error) {
+	qb.cursorTerms = nil
+	defer func() {
+		result.terms = append([]queryCursorTerm(nil), qb.cursorTerms...)
+		setCursorTermKinds(result.terms, NormalizeQuerySort(sortConfig).Field)
+	}()
 	sortConfig = NormalizeQuerySort(sortConfig)
 	sortDef, ok := querySortDefs[sortConfig.Field]
 	if !ok {
@@ -245,6 +251,7 @@ func (qb *QueryBuilder) BuildSortPlan(sortConfig QuerySort) (QuerySortPlan, erro
 
 	switch sortConfig.Field {
 	case "title":
+		qb.cursorTerms = []queryCursorTerm{{expression: titleExpr, descending: dir == "DESC"}, {expression: qb.alias + ".content_id"}}
 		plan.OrderBy = fmt.Sprintf("ORDER BY %s %s, %s.content_id ASC", titleExpr, dir, qb.alias)
 		return plan, nil
 	case "release_date":
@@ -259,6 +266,7 @@ func (qb *QueryBuilder) BuildSortPlan(sortConfig QuerySort) (QuerySortPlan, erro
 	case "content_rating":
 		rankExpr := qb.contentRatingRankExpr()
 		labelExpr := qb.contentRatingLabelExpr()
+		qb.cursorTerms = []queryCursorTerm{{expression: rankExpr, descending: dir == "DESC"}, {expression: labelExpr, descending: dir == "DESC"}, {expression: titleExpr}, {expression: qb.alias + ".content_id"}}
 		plan.OrderBy = fmt.Sprintf(
 			"ORDER BY %s %s, %s %s, %s ASC, %s.content_id ASC",
 			rankExpr,
@@ -318,6 +326,7 @@ func (qb *QueryBuilder) BuildSortPlan(sortConfig QuerySort) (QuerySortPlan, erro
 			qb.bookSeriesTable(),
 			qb.alias,
 		)}
+		qb.cursorTerms = []queryCursorTerm{{expression: "sort_series.series_name", descending: dir == "DESC", nullsLast: true}, {expression: "sort_series.series_index", nullsLast: true}, {expression: titleExpr}, {expression: qb.alias + ".content_id"}}
 		// Sort by series name primarily, then by series_index so books
 		// within the same series come back in narrative order. Title
 		// breaks ties for books that don't have a series_index.
@@ -1092,9 +1101,34 @@ func (qb *QueryBuilder) buildAddedAtClause(rule QueryRule) (string, error) {
 	}
 }
 
+// buildReleaseDateClause compares the item's release date: release_date when
+// set, else a well-formed first_air_date. The comparison is emitted once per
+// source column, ((release_date IS NOT NULL AND cmp) OR (release_date IS NULL
+// AND first_air_date cmp)), rather than over their COALESCE, so the
+// release_date indexes can serve it. Both forms agree for every NULL
+// combination, including under NOT.
 func (qb *QueryBuilder) buildReleaseDateClause(rule QueryRule) (string, error) {
-	column := qb.releaseDateFilterExpr()
+	// Build the comparison once around a marker so both arms reuse the same
+	// bound arguments, then substitute each source column for the marker.
+	const column = "\x00release_date\x00"
+	clause, err := qb.buildReleaseDateComparison(column, rule)
+	if err != nil {
+		return "", err
+	}
+	if isEpisodeCatalogScope(qb.mediaScope) {
+		return strings.ReplaceAll(clause, column, qb.alias+".episode_air_date"), nil
+	}
+	releaseDate := qb.alias + ".release_date"
+	trimmedAirDate := fmt.Sprintf("NULLIF(BTRIM(%s.first_air_date), '')", qb.alias)
+	firstAirDate := fmt.Sprintf("(CASE WHEN %[1]s ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN %[1]s::date ELSE NULL END)", trimmedAirDate)
+	return fmt.Sprintf("((%[1]s IS NOT NULL AND %[2]s) OR (%[1]s IS NULL AND %[3]s))",
+		releaseDate,
+		strings.ReplaceAll(clause, column, releaseDate),
+		strings.ReplaceAll(clause, column, firstAirDate),
+	), nil
+}
 
+func (qb *QueryBuilder) buildReleaseDateComparison(column string, rule QueryRule) (string, error) {
 	switch rule.Op {
 	case "gt":
 		return qb.buildTypedComparisonClause(column, ">", rule.Value, "date"), nil
@@ -1342,19 +1376,6 @@ func (qb *QueryBuilder) releaseDateSortExpr() string {
 	return queryColumnSQL(qb.alias, querySortDefs["release_date"].columnSQL)
 }
 
-func (qb *QueryBuilder) releaseDateFilterExpr() string {
-	if isEpisodeCatalogScope(qb.mediaScope) {
-		return fmt.Sprintf("%s.episode_air_date", qb.alias)
-	}
-	firstAirDate := fmt.Sprintf("NULLIF(BTRIM(%s.first_air_date), '')", qb.alias)
-	return fmt.Sprintf(
-		`COALESCE(%s.release_date, CASE WHEN %s ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN %s::date ELSE NULL END)`,
-		qb.alias,
-		firstAirDate,
-		firstAirDate,
-	)
-}
-
 func (qb *QueryBuilder) addedAtFilterExpr() string {
 	if isEpisodeCatalogScope(qb.mediaScope) {
 		return fmt.Sprintf("%s.episode_created_at", qb.alias)
@@ -1363,6 +1384,7 @@ func (qb *QueryBuilder) addedAtFilterExpr() string {
 }
 
 func (qb *QueryBuilder) orderByExpr(expr, dir string, nullsLast bool, titleExpr string) string {
+	qb.cursorTerms = []queryCursorTerm{{expression: expr, descending: dir == "DESC", nullsLast: nullsLast || dir != "DESC"}, {expression: titleExpr, nullsLast: true}, {expression: qb.alias + ".content_id", nullsLast: true}}
 	clause := fmt.Sprintf("ORDER BY %s %s", expr, dir)
 	if nullsLast {
 		clause += " NULLS LAST"
@@ -1400,6 +1422,21 @@ func (qb *QueryBuilder) addedAtSortPlan() (string, []string, []any, bool) {
 		return "sort_added.added_at", []string{joinSQL}, args, true
 	}
 
+	if len(qb.libraryIDs) == 1 {
+		// The executor's library scope admits only members of this library,
+		// so the inner join drops no row, and its one (content, library) row
+		// is the MIN the aggregate below would compute. first_seen_at is NOT
+		// NULL, so the order matches idx_item_libraries_folder_seen_content
+		// and a page reads only its own rows instead of aggregating the whole
+		// library.
+		joinSQL := fmt.Sprintf(
+			`JOIN media_item_libraries sort_added ON sort_added.content_id = %s AND sort_added.media_folder_id = %s`,
+			qb.libraryContentExpr(),
+			placeholders[0],
+		)
+		return "sort_added.first_seen_at", []string{joinSQL}, args, false
+	}
+
 	joinSQL := fmt.Sprintf(
 		`LEFT JOIN (
 			SELECT mil.content_id, MIN(mil.first_seen_at) AS added_at
@@ -1413,23 +1450,12 @@ func (qb *QueryBuilder) addedAtSortPlan() (string, []string, []any, bool) {
 	return "sort_added.added_at", []string{joinSQL}, args, true
 }
 
+// contentRatingRankExpr sorts by the stored minimum age, so ratings from
+// different national systems interleave correctly instead of only the eleven
+// US strings ordering at all. A rating with no age — unrated, or a string no
+// ladder recognizes — still sorts last.
 func (qb *QueryBuilder) contentRatingRankExpr() string {
-	cases := make([]string, 0, len(access.RatingRankEntries()))
-	for _, entry := range access.RatingRankEntries() {
-		cases = append(
-			cases,
-			fmt.Sprintf(
-				"WHEN UPPER(NULLIF(BTRIM(%s.content_rating), '')) = '%s' THEN %d",
-				qb.alias,
-				entry.Rating,
-				entry.Rank,
-			),
-		)
-	}
-	return fmt.Sprintf(
-		"CASE %s ELSE 2147483647 END",
-		strings.Join(cases, " "),
-	)
+	return fmt.Sprintf("COALESCE(%s.content_rating_age, 2147483647)", qb.alias)
 }
 
 func (qb *QueryBuilder) contentRatingLabelExpr() string {

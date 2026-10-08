@@ -42,12 +42,6 @@ describe("AdminSectionCommandDialog", () => {
     mocks.navigateToPluginRoute.mockReset();
   });
 
-  it("does not render a visible search input before Cmd+K", () => {
-    renderDialog();
-
-    expect(screen.queryByRole("searchbox", { name: "Search admin sections" })).toBeNull();
-  });
-
   it("opens and focuses admin search with Cmd+K", async () => {
     renderDialog();
 
@@ -66,16 +60,6 @@ describe("AdminSectionCommandDialog", () => {
     expect(screen.getByRole("option", { name: /Dashboard/ })).toBeInTheDocument();
   });
 
-  it("searches all admin section groups", async () => {
-    renderDialog();
-
-    const searchBox = await openDialog();
-    await userEvent.type(searchBox, "history import");
-
-    expect(screen.getByRole("option", { name: /History Import/ })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: /Settings/ })).not.toBeInTheDocument();
-  });
-
   it("searches individual admin setting labels from the admin dialog", async () => {
     renderDialog();
 
@@ -90,6 +74,7 @@ describe("AdminSectionCommandDialog", () => {
     expect(screen.getByLabelText("Current path")).toHaveTextContent(
       "/admin/settings/infrastructure",
     );
+    expect(screen.queryByRole("searchbox", { name: "Search admin sections" })).toBeNull();
   });
 
   it("includes admin plugin app destinations", async () => {
@@ -118,29 +103,8 @@ describe("AdminSectionCommandDialog", () => {
     await userEvent.type(searchBox, "arrproxy");
     await userEvent.click(screen.getByRole("option", { name: /ArrProxy/ }));
 
-    expect(mocks.navigateToPluginRoute).toHaveBeenCalledWith("/api/v1/plugins/7/");
+    expect(mocks.navigateToPluginRoute).toHaveBeenCalledWith("/api/v2/plugin-content/plugins/7/");
     expect(screen.queryByRole("searchbox", { name: "Search admin sections" })).toBeNull();
-  });
-
-  it("closes after choosing an internal result", async () => {
-    renderDialog();
-
-    const searchBox = await openDialog();
-    await userEvent.type(searchBox, "logs");
-    await userEvent.click(screen.getByRole("option", { name: /^LogsServer log stream/ }));
-
-    expect(screen.getByLabelText("Current path")).toHaveTextContent("/admin/logs");
-    expect(screen.queryByRole("searchbox", { name: "Search admin sections" })).toBeNull();
-  });
-
-  it("opens client diagnostics from admin search", async () => {
-    renderDialog();
-
-    const searchBox = await openDialog();
-    await userEvent.type(searchBox, "client diagnostics");
-    await userEvent.click(screen.getByRole("option", { name: /Diagnostics/ }));
-
-    expect(screen.getByLabelText("Current path")).toHaveTextContent("/admin/diagnostics");
   });
 
   it("closes with Escape", async () => {

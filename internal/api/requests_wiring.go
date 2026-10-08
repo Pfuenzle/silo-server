@@ -4,13 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/Silo-Server/silo-server/internal/autoscan"
-	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/plugins"
 	mediarequests "github.com/Silo-Server/silo-server/internal/requests"
-	"github.com/Silo-Server/silo-server/internal/scanner"
-	"github.com/Silo-Server/silo-server/internal/scanqueue"
-	"github.com/Silo-Server/silo-server/internal/scantrigger"
 )
 
 // PluginRequestRouterAdapter adapts plugins.Service to
@@ -28,6 +23,22 @@ func (a PluginRequestRouterAdapter) RequestRouterClient(ctx context.Context, ins
 	return a.Svc.RequestRouterClient(ctx, installationID, capabilityID)
 }
 
+// RouterFeatures reads the optional request_router.v1 features the
+// capability's stored manifest declares, without launching the plugin.
+func (a PluginRequestRouterAdapter) RouterFeatures(ctx context.Context, installationID int, capabilityID string) (mediarequests.RouterFeatures, error) {
+	if a.Svc == nil {
+		return mediarequests.RouterFeatures{}, errors.New("request router plugin service is not configured")
+	}
+	descriptor, err := a.Svc.RequestRouterDescriptor(ctx, installationID, capabilityID)
+	if err != nil {
+		return mediarequests.RouterFeatures{}, err
+	}
+	return mediarequests.RouterFeatures{
+		SupportsSeasons:         descriptor.GetSupportsSeasons(),
+		ReportsDownloadProgress: descriptor.GetReportsDownloadProgress(),
+	}, nil
+}
+
 // AttachRequestRouter wires the plugin-backed router provider onto a requests
 // service. Both the HTTP handler and the reconcile task call this so the wiring
 // lives in one place. With either dependency absent (e.g. a build without the
@@ -38,16 +49,4 @@ func AttachRequestRouter(svc *mediarequests.Service, pluginService *plugins.Serv
 		return
 	}
 	svc.SetRouterProvider(mediarequests.NewPluginRouterProvider(PluginRequestRouterAdapter{pluginService}))
-}
-
-func AttachAudiobookImport(svc *mediarequests.Service, queue *scanqueue.Service, folders *catalog.FolderRepository, files *scanner.FileRepository, items *catalog.ItemRepository) error {
-	if svc == nil || queue == nil || folders == nil || files == nil || items == nil {
-		return nil
-	}
-	linker := mediarequests.NewAudiobookImportLinker(queue, scantrigger.NewResolver(folders), files, items, nil)
-	linker.SetPathMapperFactory(func(raw map[string]any) (mediarequests.PathMapper, error) {
-		return autoscan.NewPathMapperFromConfig(raw)
-	})
-	svc.SetAudiobookImportLinker(linker)
-	return nil
 }

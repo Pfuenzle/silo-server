@@ -1,5 +1,12 @@
+// @vitest-environment node
+
 import { describe, expect, it } from "vitest";
-import { buildInviteDeepLink, detectMobilePlatform } from "./appDeepLink";
+import {
+  buildDeviceDeepLink,
+  buildInviteDeepLink,
+  buildWatchPartyDeepLink,
+  detectMobilePlatform,
+} from "./appDeepLink";
 
 describe("detectMobilePlatform", () => {
   it("detects Android", () => {
@@ -24,8 +31,8 @@ describe("detectMobilePlatform", () => {
 
 describe("buildInviteDeepLink", () => {
   it("emits the silo://invite contract the Android app registers", () => {
-    expect(buildInviteDeepLink("https://silo.arkyncdn.net", "wIAUTS99-abc")).toBe(
-      "silo://invite?server=https%3A%2F%2Fsilo.arkyncdn.net&token=wIAUTS99-abc",
+    expect(buildInviteDeepLink("https://silo.example.test", "wIAUTS99-abc")).toBe(
+      "silo://invite?server=https%3A%2F%2Fsilo.example.test&token=wIAUTS99-abc",
     );
   });
 
@@ -45,5 +52,39 @@ describe("buildInviteDeepLink", () => {
     expect(buildInviteDeepLink("not a url", "t")).toBeNull();
     expect(buildInviteDeepLink("ftp://silo.example.net", "t")).toBeNull();
     expect(buildInviteDeepLink("https://user:pw@silo.example.net", "t")).toBeNull();
+  });
+});
+
+describe("buildWatchPartyDeepLink", () => {
+  it("emits the silo://watch-party contract the Apple app registers", () => {
+    expect(buildWatchPartyDeepLink("https://silo.example.net:8443", "a+b/c=")).toBe(
+      "silo://watch-party?server=https%3A%2F%2Fsilo.example.net%3A8443&token=a%2Bb%2Fc%3D",
+    );
+  });
+
+  it("rejects unrepresentable origins and empty tokens", () => {
+    expect(buildWatchPartyDeepLink("ftp://silo.example.net", "t")).toBeNull();
+    expect(buildWatchPartyDeepLink("https://user:pw@silo.example.net", "t")).toBeNull();
+    expect(buildWatchPartyDeepLink("https://silo.example.net", "")).toBeNull();
+  });
+});
+
+describe("buildDeviceDeepLink", () => {
+  it("emits the silo://device contract both apps register", () => {
+    expect(buildDeviceDeepLink("3f2a9d5e", "https://silo.example.net:8443", "4821-7730")).toBe(
+      "silo://device?server=3f2a9d5e&url=https%3A%2F%2Fsilo.example.net%3A8443&code=48217730",
+    );
+  });
+
+  it("leaves out an unknown server identity", () => {
+    expect(buildDeviceDeepLink(undefined, "http://192.168.1.10:8090", "4821 7730")).toBe(
+      "silo://device?url=http%3A%2F%2F192.168.1.10%3A8090&code=48217730",
+    );
+  });
+
+  it("rejects unrepresentable origins and empty codes", () => {
+    expect(buildDeviceDeepLink("s", "ftp://silo.example.net", "48217730")).toBeNull();
+    expect(buildDeviceDeepLink("s", "https://user:pw@silo.example.net", "48217730")).toBeNull();
+    expect(buildDeviceDeepLink("s", "https://silo.example.net", "-")).toBeNull();
   });
 });

@@ -1,44 +1,37 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
-import { api } from "@/api/client";
-import type {
-  PluginSettingsDetailResponse,
-  PluginSettingsListResponse,
-  UpdatePluginSettingsRequest,
-} from "@/api/types";
+import { v2, type V2Result } from "@/api/v2/request";
 import { settingsKeys } from "./keys";
+
+type PluginSettingsInstallationV2 = V2Result<"GET /api/v2/settings/plugins">["items"][number];
+
+/**
+ * One installation exposing user settings, as the screens model it. The v2
+ * contract renders the installation id as a string; the plugin route helpers
+ * and the settings page address installations by number, so the id is
+ * converted once here.
+ */
+export type PluginSettingsInstallation = Omit<PluginSettingsInstallationV2, "id"> & {
+  id: number;
+};
+
+export interface PluginSettingsList {
+  installations: PluginSettingsInstallation[];
+}
+
+function installationFromV2(
+  installation: PluginSettingsInstallationV2,
+): PluginSettingsInstallation {
+  return { ...installation, id: Number(installation.id) };
+}
 
 export function usePluginSettingsList() {
   return useQuery({
     queryKey: settingsKeys.plugins(),
-    queryFn: () =>
-      api<PluginSettingsListResponse>("/settings/plugins").then(
-        (data) => data ?? { installations: [] },
-      ),
-    staleTime: 30_000,
-  });
-}
-
-export function usePluginSettingsDetail(installationId: number, enabled = true) {
-  return useQuery({
-    queryKey: settingsKeys.pluginDetail(installationId),
-    queryFn: () => api<PluginSettingsDetailResponse>(`/settings/plugins/${installationId}`),
-    enabled,
-    staleTime: 30_000,
-  });
-}
-
-export function useUpdatePluginSettings() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, body }: { id: number; body: UpdatePluginSettingsRequest }) =>
-      api(`/settings/plugins/${id}`, {
-        method: "PUT",
-        body: JSON.stringify(body),
-      }),
-    onSuccess: (_, { id }) => {
-      queryClient.invalidateQueries({ queryKey: settingsKeys.plugins() });
-      queryClient.invalidateQueries({ queryKey: settingsKeys.pluginDetail(id) });
+    queryFn: async (): Promise<PluginSettingsList> => {
+      const list = await v2("GET /api/v2/settings/plugins");
+      return { installations: list.items.map(installationFromV2) };
     },
+    staleTime: 30_000,
   });
 }

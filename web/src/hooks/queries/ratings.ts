@@ -1,20 +1,27 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/api/client";
+import { toast } from "sonner";
 import type { ItemDetail } from "@/api/types";
+import { v2 } from "@/api/v2/request";
 import { invalidateRatingSurfaceQueries } from "./ratingsSurfaceRefresh";
 import {
   cancelItemDetailQueries,
   isItemDetailQueryKey,
   updateCatalogItemDetail,
 } from "./mediaSurfaceRefresh";
+import {
+  PERSONAL_STATE_WRITE_TIMEOUT_MS,
+  personalStateMutationOptions,
+} from "./personalStateWrites";
 
 export function useSetRating(itemId: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    ...personalStateMutationOptions,
     mutationFn: (rating: number) =>
-      api(`/ratings/${itemId}`, {
-        method: "PUT",
-        body: JSON.stringify({ rating }),
+      v2("PUT /api/v2/ratings/{item_id}", {
+        path: { item_id: itemId },
+        body: { rating },
+        timeoutMs: PERSONAL_STATE_WRITE_TIMEOUT_MS,
       }),
     onMutate: async (rating: number) => {
       await cancelItemDetailQueries(queryClient, itemId);
@@ -31,6 +38,7 @@ export function useSetRating(itemId: string) {
       for (const [queryKey, value] of context?.previous ?? []) {
         queryClient.setQueryData(queryKey, value);
       }
+      toast.error("Failed to update rating");
     },
     onSettled: () => {
       return invalidateRatingSurfaceQueries(queryClient, itemId);
@@ -41,7 +49,12 @@ export function useSetRating(itemId: string) {
 export function useDeleteRating(itemId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => api(`/ratings/${itemId}`, { method: "DELETE" }),
+    ...personalStateMutationOptions,
+    mutationFn: () =>
+      v2("DELETE /api/v2/ratings/{item_id}", {
+        path: { item_id: itemId },
+        timeoutMs: PERSONAL_STATE_WRITE_TIMEOUT_MS,
+      }),
     onMutate: async () => {
       await cancelItemDetailQueries(queryClient, itemId);
       const previous = queryClient.getQueriesData<ItemDetail>({
@@ -57,6 +70,7 @@ export function useDeleteRating(itemId: string) {
       for (const [queryKey, value] of context?.previous ?? []) {
         queryClient.setQueryData(queryKey, value);
       }
+      toast.error("Failed to update rating");
     },
     onSettled: () => {
       return invalidateRatingSurfaceQueries(queryClient, itemId);

@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+
+	"github.com/Silo-Server/silo-server/internal/logredact"
 
 	"github.com/go-chi/chi/v5"
 
@@ -90,10 +93,17 @@ func (s *Server) authorizeGrant(w http.ResponseWriter, r *http.Request) (*playba
 		return nil, false
 	}
 	valid, err := s.loginSessions.IsValid(r.Context(), claims.SessionID)
-	if err != nil || !valid {
-		if err != nil {
-			slog.WarnContext(r.Context(), "login session check failed", "component", "proxy", "error", err, "playback_session_id", sessionID)
+	if err != nil {
+		// The session could not be checked, which says nothing about the
+		// credential: a retryable 503, never a 401 that signs the client out.
+		if r.Context().Err() == nil {
+			slog.WarnContext(r.Context(), "login session check failed", "component", "proxy", "error", logredact.SanitizeText(err.Error()), "playback_session_id", sessionID)
 		}
+		w.Header().Set("Retry-After", strconv.Itoa(auth.SessionCheckRetryAfterSeconds))
+		writeGrantError(w, http.StatusServiceUnavailable, "service_unavailable", "Sign-in could not be checked right now; try again shortly")
+		return nil, false
+	}
+	if !valid {
 		writeGrantError(w, http.StatusUnauthorized, "unauthorized", "Session is no longer valid")
 		return nil, false
 	}
@@ -105,6 +115,13 @@ func (s *Server) authorizeGrant(w http.ResponseWriter, r *http.Request) (*playba
 	}
 	if card.UserID != claims.UserID {
 		writeGrantError(w, http.StatusForbidden, "forbidden", "Session belongs to another user")
+		return nil, false
+	}
+	// The grant outlives the session it describes, so the deny marker is what
+	// stops a stopped, expired, or terminated session from serving here. Keep
+	// the JSON error shape the rest of this route family answers with.
+	if grantClaims := card.ToClaims(); s.sessionDenied(r.Context(), &grantClaims) {
+		writeGrantError(w, http.StatusGone, "playback_session_ended", "Playback session ended")
 		return nil, false
 	}
 	nodeID, nodeIDKnown := s.currentNodeRowID()

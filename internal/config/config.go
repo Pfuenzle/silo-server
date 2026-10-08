@@ -13,6 +13,12 @@ import (
 	"github.com/google/uuid"
 )
 
+// ArtworkBackendAuto selects S3 when a public bucket is configured and local
+// storage otherwise. It is the artwork.storage_backend default.
+const ArtworkBackendAuto = "auto"
+
+const artworkBackendAuto = ArtworkBackendAuto
+
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {
 	Listen    string `yaml:"listen"`
@@ -20,6 +26,10 @@ type ServerConfig struct {
 	LogLevel  string `yaml:"log_level"`
 	LogFormat string `yaml:"log_format"`
 	LogQuiet  string `yaml:"log_quiet"`
+	PublicURL string `yaml:"public_url"`
+	// LANDiscovery advertises the API server on the local network with
+	// DNS-SD (see internal/landiscovery). Settings key server.lan_discovery.
+	LANDiscovery bool `yaml:"-"`
 }
 
 // DatabaseConfig holds the primary PostgreSQL connection settings.
@@ -133,6 +143,10 @@ type ScannerConfig struct {
 	MaxConcurrentScoped    int           `yaml:"max_concurrent_scoped"`
 	EmptyTrashAfterScan    bool          `yaml:"-"`
 	FileRemovalGrace       time.Duration `yaml:"-"`
+	// RealtimeMonitoring is the server-wide real-time monitoring switch
+	// (scanner.realtime_monitoring). It hot-reloads; each library also has
+	// its own switch.
+	RealtimeMonitoring bool `yaml:"-"`
 }
 
 // scannerConfigRaw is the raw YAML representation with duration strings.
@@ -142,6 +156,7 @@ type scannerConfigRaw struct {
 	MaxConcurrentLibraries int    `yaml:"max_concurrent_libraries"`
 	MaxConcurrentScoped    int    `yaml:"max_concurrent_scoped"`
 	EmptyTrashAfterScan    bool   `yaml:"empty_trash_after_scan"`
+	RealtimeMonitoring     bool   `yaml:"realtime_monitoring"`
 }
 
 // MatcherConfig holds metadata matching settings.
@@ -174,20 +189,25 @@ type PlaybackConfig struct {
 	// identical paths on every node; devices absent on a node fall out of
 	// that node's rotation. The admin hw-accel endpoint reports each node's
 	// inventory so the UI can flag divergence.
-	HWDevice                     string                `yaml:"hw_device"`
-	ChapterThumbnailWorkers      int                   `yaml:"chapter_thumbnail_workers"`
-	ChapterThumbnailExecution    string                `yaml:"chapter_thumbnail_execution"`
-	ChapterThumbnailNodeCapacity int                   `yaml:"chapter_thumbnail_node_capacity"`
-	TranscodeEnabled             bool                  `yaml:"transcode_enabled"`
-	Routing                      PlaybackRoutingPolicy `yaml:"-"`
+	HWDevice                     string `yaml:"hw_device"`
+	ChapterThumbnailWorkers      int    `yaml:"chapter_thumbnail_workers"`
+	ChapterThumbnailExecution    string `yaml:"chapter_thumbnail_execution"`
+	ChapterThumbnailNodeCapacity int    `yaml:"chapter_thumbnail_node_capacity"`
+	// SubtitleSyncNodeCapacity is how many media sampling runs (subtitle sync
+	// speech decoding) one transcode node admits at once, across every API
+	// server that sends it work (subtitles.sync_node_capacity).
+	SubtitleSyncNodeCapacity int                   `yaml:"-"`
+	TranscodeEnabled         bool                  `yaml:"transcode_enabled"`
+	Routing                  PlaybackRoutingPolicy `yaml:"-"`
 }
 
 // RedisConfig holds Redis connection settings.
 type RedisConfig struct {
-	URL               string   `yaml:"url"`
-	SentinelMaster    string   `yaml:"sentinel_master"`
-	SentinelAddresses []string `yaml:"sentinel_addresses"`
-	SentinelPassword  string   `yaml:"sentinel_password"`
+	// URL names one Redis server or a Sentinel deployment; see ParseRedisURL.
+	URL string `yaml:"url"`
+	// DB is the redis.db setting. When it is not empty it replaces the
+	// database number in URL; see Options.
+	DB string `yaml:"-"`
 }
 
 // RateLimitConfig holds rate limiting infrastructure settings.
@@ -330,6 +350,11 @@ type DownloadConfig struct {
 	ArtifactDir           string `yaml:"-"` // prepared-artifact output volume ("" = default under the transcode dir)
 	MaxConcurrentPrepares int    `yaml:"-"` // encode/remux worker-pool size (default 2)
 	ArtifactMaxBytes      int64  `yaml:"-"` // LRU eviction budget for prepared artifacts (0 = unlimited)
+
+	// Playback transcode switches that also govern converted downloads, read
+	// from their playback setting keys so both surfaces follow one toggle.
+	Allow4KTranscode  bool `yaml:"-"` // allow_4k_transcode: 4K sources may be converted
+	AllowHEVCEncoding bool `yaml:"-"` // playback.allow_hevc_encoding: HEVC output when the device decodes it
 }
 
 // PolicyConfig holds embedded policy engine settings.
@@ -341,9 +366,19 @@ type PolicyConfig struct {
 	DecisionLogRetentionDays   int    `yaml:"-"` // policy decision log retention window
 }
 
+// MarkersConfig holds local marker detection settings.
+type MarkersConfig struct {
+	// DetectionWorkers is how many seasons intro detection analyzes at once,
+	// which also bounds its ffmpeg processes.
+	DetectionWorkers int `yaml:"-"`
+}
+
 // MetadataConfig holds metadata pipeline settings.
 type MetadataConfig struct {
 	CacheImages bool `yaml:"-"`
+	// ImageWorkers is how many artwork encodes run at once. Zero means one
+	// per CPU core.
+	ImageWorkers int `yaml:"-"`
 }
 
 // ClientIPConfig holds client IP resolution settings.
@@ -351,6 +386,11 @@ type ClientIPConfig struct {
 	// TrustedProxies is the comma-separated CIDR list of reverse proxies
 	// whose X-Forwarded-For headers are trusted ("" = built-in defaults).
 	TrustedProxies string `yaml:"-"`
+}
+
+type ArtworkConfig struct {
+	StorageBackend string `yaml:"storage_backend"`
+	LocalPath      string `yaml:"local_path"`
 }
 
 // Config is the top-level configuration for Silo.
@@ -361,7 +401,9 @@ type Config struct {
 	UserDB               UserDBConfig               `yaml:"-"`
 	Scanner              ScannerConfig              `yaml:"-"`
 	Matcher              MatcherConfig              `yaml:"matcher"`
+	Artwork              ArtworkConfig              `yaml:"artwork"`
 	Metadata             MetadataConfig             `yaml:"-"`
+	Markers              MarkersConfig              `yaml:"-"`
 	Playback             PlaybackConfig             `yaml:"playback"`
 	Redis                RedisConfig                `yaml:"redis"`
 	RateLimit            RateLimitConfig            `yaml:"rate_limiting"`
@@ -386,6 +428,7 @@ type configRaw struct {
 	S3             s3ConfigRaw             `yaml:"s3"`
 	UserDB         userDBConfigRaw         `yaml:"user_db"`
 	Scanner        scannerConfigRaw        `yaml:"scanner"`
+	Artwork        ArtworkConfig           `yaml:"artwork"`
 	Matcher        MatcherConfig           `yaml:"matcher"`
 	Playback       PlaybackConfig          `yaml:"playback"`
 	Redis          RedisConfig             `yaml:"redis"`
@@ -434,8 +477,8 @@ func EffectiveDownloadArtifactDir(artifactDir, transcodeDir string) string {
 	return filepath.Join(filepath.Dir(filepath.Clean(transcodeDir)), "silo-download-artifacts")
 }
 
-const DefaultJellyfinCompatEmulatedServerVersion = "10.12.0"
-const DefaultJellyfinWebVersion = "10.11.6"
+const DefaultJellyfinCompatEmulatedServerVersion = "12.1.0"
+const DefaultJellyfinWebVersion = "12.1"
 const DefaultJellyfinWebInstallDir = "/var/lib/silo/compat/jellyfin-web"
 const DefaultJellyfinWebDir = DefaultJellyfinWebInstallDir + "/current"
 
@@ -493,7 +536,9 @@ func setDefaults() *configRaw {
 			Workers:                8,
 			MaxConcurrentLibraries: 1,
 			MaxConcurrentScoped:    2,
+			RealtimeMonitoring:     true,
 		},
+		Artwork: ArtworkConfig{StorageBackend: artworkBackendAuto, LocalPath: "/var/lib/silo/artwork"},
 		Matcher: MatcherConfig{
 			Workers:                 8,
 			BatchSize:               500,
@@ -507,6 +552,7 @@ func setDefaults() *configRaw {
 			ChapterThumbnailWorkers:      1,
 			ChapterThumbnailExecution:    "local",
 			ChapterThumbnailNodeCapacity: 1,
+			SubtitleSyncNodeCapacity:     1,
 			TranscodeEnabled:             true,
 		},
 		RateLimit: RateLimitConfig{
@@ -550,11 +596,10 @@ func (c *Config) Validate() error {
 		errs = append(errs, "database.url is required for "+c.Server.Mode+" mode")
 	}
 
-	// Redis required for proxy and transcode modes (URL or Sentinel).
+	// Redis required for proxy and transcode modes.
 	needsRedis := c.Server.Mode == "proxy" || c.Server.Mode == "transcode"
-	hasRedis := c.Redis.URL != "" || (c.Redis.SentinelMaster != "" && len(c.Redis.SentinelAddresses) > 0)
-	if needsRedis && !hasRedis {
-		errs = append(errs, "redis.url or redis sentinel config is required for "+c.Server.Mode+" mode")
+	if needsRedis && c.Redis.URL == "" {
+		errs = append(errs, "redis.url is required for "+c.Server.Mode+" mode")
 	}
 
 	if len(errs) > 0 {

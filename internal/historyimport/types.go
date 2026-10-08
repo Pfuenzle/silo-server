@@ -35,6 +35,7 @@ const (
 
 // Source is an admin-configured external media server used as an import source.
 type Source struct {
+	Revision      int64     `json:"-"`
 	ID            int       `json:"id"`
 	Name          string    `json:"name"`
 	SourceType    string    `json:"source_type"`
@@ -90,9 +91,14 @@ type PlexServer struct {
 	AccessToken      string `json:"access_token"`
 	RemoteURL        string `json:"remote_url"`
 	LocalURL         string `json:"local_url"`
-	Owned            bool   `json:"owned"`
-	HasRemoteURL     bool   `json:"has_remote_url"`
-	HasLocalURL      bool   `json:"has_local_url"`
+	// ConnectionURLs is every address plex.tv advertised for this server, in
+	// the order it advertised them. RemoteURL and LocalURL are picked out of
+	// this same list. Sessions persisted before this field existed decode with
+	// it empty, so those two remain the fallback.
+	ConnectionURLs []string `json:"connection_urls,omitempty"`
+	Owned          bool     `json:"owned"`
+	HasRemoteURL   bool     `json:"has_remote_url"`
+	HasLocalURL    bool     `json:"has_local_url"`
 }
 
 type PlexSession struct {
@@ -134,6 +140,7 @@ type PlexServerPublic struct {
 
 // Run represents one history import execution.
 type Run struct {
+	CancelRequested   bool              `json:"-"`
 	ID                string            `json:"id"`
 	UserID            int               `json:"user_id"`
 	ProfileID         string            `json:"profile_id"`
@@ -219,7 +226,10 @@ type CreateRunInput struct {
 	PlexSessionID    string `json:"plex_session_id,omitempty"`
 	PlexServerID     string `json:"plex_server_id,omitempty"`
 	PlexBaseURL      string `json:"plex_base_url,omitempty"`
-	PlexToken        string `json:"plex_token,omitempty"`
+	// PlexBaseURLs carries the other addresses advertised for the same server.
+	// PlexBaseURL stays the preferred one, for clients that send only it.
+	PlexBaseURLs []string `json:"plex_base_urls,omitempty"`
+	PlexToken    string   `json:"plex_token,omitempty"`
 	// PlexAccountToken is the plex.tv account token from a browser-side
 	// PIN/OAuth flow. PlexToken is a PMS access token in that flow and is
 	// rejected by account-level APIs (the watchlist), so clients that hold
@@ -269,15 +279,6 @@ type localProgressRow struct {
 	UpdatedAt time.Time
 }
 
-type plexAuth struct {
-	BaseURL string
-	Token   string
-	// AccountToken is the plex.tv account token (PIN/OAuth session token or
-	// the user-supplied token), used for account-level fetches such as the
-	// watchlist. May equal Token for manual-token imports.
-	AccountToken string
-}
-
 // --- Admin types ---
 
 // ExternalUser is a user account on an external media server.
@@ -291,6 +292,7 @@ type ExternalUser struct {
 
 // UserMapping persists the link from one external server user to a Silo user + profile.
 type UserMapping struct {
+	Revision         int64      `json:"-"`
 	ID               int        `json:"id"`
 	SourceID         int        `json:"source_id"`
 	ExternalUserID   string     `json:"external_user_id"`
@@ -322,10 +324,18 @@ type SetAdminTokenInput struct {
 }
 
 // BulkRunResult is the response from a bulk admin run request.
+type BulkRunOutcome struct {
+	MappingID int    `json:"mapping_id"`
+	Status    string `json:"status"`
+	Run       *Run   `json:"run,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
 type BulkRunResult struct {
-	Runs    []*Run `json:"runs"`
-	Skipped int    `json:"skipped"`
-	Errors  int    `json:"errors"`
+	Outcomes []BulkRunOutcome `json:"outcomes"`
+	Runs     []*Run           `json:"runs"`
+	Skipped  int              `json:"skipped"`
+	Errors   int              `json:"errors"`
 }
 
 type PlexLoginInput struct {

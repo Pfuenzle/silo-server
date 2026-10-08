@@ -1,6 +1,7 @@
 package transcodenode
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math"
@@ -51,7 +52,7 @@ exec sleep 30
 	t.Cleanup(func() { _ = session.Close() })
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if _, statErr := os.Stat(filepath.Join(dir, "stream.m3u8")); statErr == nil {
+		if data, readErr := os.ReadFile(filepath.Join(dir, "stream.m3u8")); readErr == nil && bytes.Contains(data, []byte("seg_00011.m4s\n")) {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -122,14 +123,6 @@ func TestRestartSessionLocked_WaitsForLockThenRechecks(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("restartSessionLocked did not complete after lock release")
-	}
-}
-
-func TestRestartSessionLocked_SupersededWhenUnregistered(t *testing.T) {
-	s := &Server{sessions: map[string]*playback.TranscodeSession{}}
-	err := s.restartSessionLocked(context.Background(), "sess-x", &playback.TranscodeSession{}, 0, 0)
-	if !errors.Is(err, playback.ErrSessionSuperseded) {
-		t.Fatalf("want ErrSessionSuperseded for an unmapped session, got %v", err)
 	}
 }
 

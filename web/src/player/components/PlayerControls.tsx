@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import {
   Info,
   ListVideo,
@@ -10,6 +10,7 @@ import {
   Play,
   RotateCcw,
   RotateCw,
+  Scaling,
   SkipBack,
   SkipForward,
   Tags,
@@ -29,13 +30,21 @@ import type {
   PlayerChapter,
   PlayerSubtitleInfo,
   QualityOption,
+  VideoFitMode,
 } from "../types";
+import type { PlayerTrickplay } from "../trickplay";
 import type { VersionInfo } from "./QualityMenu";
+import type { EffectiveRecipeV3 } from "../protocol-v3";
 import type { PlayerConfig } from "../context/PlayerConfigContext";
+import type { SubtitleSync } from "../hooks/useSubtitleSync";
 import { useCoarsePointer } from "../hooks/useCoarsePointer";
 import { PlayerMenuSurface } from "./PlayerMenuSurface";
 
 interface PlayerControlsProps {
+  /** The profile's rewind/fast-forward intervals, shown on the transport buttons. */
+  skipSeconds: { back: number; forward: number };
+  /** Directional skips; the player owns the timeline math (offsets, pending seeks). */
+  onSkip: { back: () => void; forward: () => void };
   // Visibility
   visible: boolean;
   // Video state
@@ -46,6 +55,10 @@ interface PlayerControlsProps {
   // Seek bar markers
   chapters?: PlayerChapter[];
   regions?: MarkerRegionView[];
+  // Seek bar previews
+  trickplay?: PlayerTrickplay | null;
+  trickplayUpdatedAt?: number;
+  onTrickplayError?: () => void;
   // Marker editing
   editing?: boolean;
   activeEditKind?: MarkerKind | null;
@@ -56,6 +69,8 @@ interface PlayerControlsProps {
   volume: number;
   muted: boolean;
   isFullscreen: boolean;
+  videoFit: VideoFitMode;
+  onVideoFitToggle: () => void;
   // Subtitles
   subtitleTracks: PlayerSubtitleInfo[];
   activeSubtitleIndex: number | null;
@@ -66,8 +81,10 @@ interface PlayerControlsProps {
   mediaFileId?: number;
   playerConfig?: PlayerConfig;
   onRefreshSubtitles?: () => void;
+  onSubtitleJobAccepted?: (jobId: string) => void;
   sessionId?: string;
   getSubtitleStartPosition?: () => number;
+  subtitleSync?: SubtitleSync;
   // Audio
   audioTracks: PlayerAudioTrack[];
   activeAudioIndex: number;
@@ -75,11 +92,13 @@ interface PlayerControlsProps {
   // Quality
   qualityOptions: QualityOption[];
   activeQualityId: string;
+  deliveredRecipe?: EffectiveRecipeV3;
   isTranscoding: boolean;
   qualityError: string | null;
   onQualitySelect: (id: string) => void;
   // Version switching
   versions?: VersionInfo[];
+  versionLocked?: boolean;
   onSwitchVersion?: (fileId: number) => void;
   // PiP
   onTogglePiP?: () => void;
@@ -100,14 +119,13 @@ interface PlayerControlsProps {
   onVolumeChange: (volume: number) => void;
   onMutedChange: (muted: boolean) => void;
   onFullscreenToggle: () => void;
-  onSurfaceTap?: () => void;
+  onSurfaceTap?: (event: MouseEvent<HTMLElement>) => void;
 }
 
 /** Skip amount for the ±seconds buttons, matching keyboard shortcuts. */
-export const SKIP_BACK_SECONDS = 10;
-export const SKIP_FORWARD_SECONDS = 30;
-
 export function PlayerControls({
+  skipSeconds,
+  onSkip,
   visible,
   playing,
   currentTime,
@@ -115,6 +133,9 @@ export function PlayerControls({
   buffered,
   chapters,
   regions,
+  trickplay,
+  trickplayUpdatedAt,
+  onTrickplayError,
   editing,
   activeEditKind,
   onRegionEdgeChange,
@@ -124,6 +145,8 @@ export function PlayerControls({
   volume,
   muted,
   isFullscreen,
+  videoFit,
+  onVideoFitToggle,
   subtitleTracks,
   activeSubtitleIndex,
   onSubtitleSelect,
@@ -133,17 +156,21 @@ export function PlayerControls({
   mediaFileId,
   playerConfig,
   onRefreshSubtitles,
+  onSubtitleJobAccepted,
   sessionId,
   getSubtitleStartPosition,
+  subtitleSync,
   audioTracks,
   activeAudioIndex,
   onAudioSelect,
   qualityOptions,
   activeQualityId,
+  deliveredRecipe,
   isTranscoding,
   qualityError,
   onQualitySelect,
   versions,
+  versionLocked,
   onSwitchVersion,
   onTogglePiP,
   showPlaybackInfo,
@@ -185,10 +212,8 @@ export function PlayerControls({
     setAudioOpen(false);
     setChaptersOpen(false);
   }
-  const safeDuration = duration > 0 ? duration : 0;
-  const handleSkipBack = () => onSeek(Math.max(0, currentTime - SKIP_BACK_SECONDS));
-  const handleSkipForward = () =>
-    onSeek(Math.min(safeDuration || currentTime, currentTime + SKIP_FORWARD_SECONDS));
+  const handleSkipBack = onSkip.back;
+  const handleSkipForward = onSkip.forward;
   // When playing any episode in a series (even the first or last), reserve
   // both prev/next slots so the cluster remains symmetric around the play
   // button. Movies (no episode nav at all) skip the slots entirely.
@@ -214,7 +239,7 @@ export function PlayerControls({
       {compactControls && (
         <div className="player-compact-transport pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-[max(0.75rem,env(safe-area-inset-left))]">
           <div
-            className="pointer-events-auto flex items-center gap-2"
+            className={`flex items-center gap-2 ${visible ? "pointer-events-auto" : ""}`}
             onClick={(event) => event.stopPropagation()}
           >
             {showEpisodeSlots ? (
@@ -234,10 +259,10 @@ export function PlayerControls({
             <CircleButton
               size="md"
               variant="secondary"
-              ariaLabel={`Back ${SKIP_BACK_SECONDS} seconds`}
+              ariaLabel={`Back ${skipSeconds.back} seconds`}
               onClick={handleSkipBack}
             >
-              <SkipIcon direction="back" seconds={SKIP_BACK_SECONDS} />
+              <SkipIcon direction="back" seconds={skipSeconds.back} />
             </CircleButton>
             <button
               type="button"
@@ -254,10 +279,10 @@ export function PlayerControls({
             <CircleButton
               size="md"
               variant="secondary"
-              ariaLabel={`Forward ${SKIP_FORWARD_SECONDS} seconds`}
+              ariaLabel={`Forward ${skipSeconds.forward} seconds`}
               onClick={handleSkipForward}
             >
-              <SkipIcon direction="forward" seconds={SKIP_FORWARD_SECONDS} />
+              <SkipIcon direction="forward" seconds={skipSeconds.forward} />
             </CircleButton>
             {showEpisodeSlots ? (
               hasNextEpisode ? (
@@ -288,10 +313,14 @@ export function PlayerControls({
           buffered={buffered}
           chapters={chapters}
           regions={regions}
+          trickplay={trickplay}
+          trickplayUpdatedAt={trickplayUpdatedAt}
+          onTrickplayError={onTrickplayError}
           editing={editing}
           activeEditKind={activeEditKind}
           onRegionEdgeChange={onRegionEdgeChange}
           onSeek={onSeek}
+          onSkip={onSkip}
         />
 
         {compactControls ? (
@@ -321,17 +350,21 @@ export function PlayerControls({
               mediaFileId={mediaFileId}
               playerConfig={playerConfig}
               onRefreshSubtitles={onRefreshSubtitles}
+              onSubtitleJobAccepted={onSubtitleJobAccepted}
               sessionId={sessionId}
               getSubtitleStartPosition={getSubtitleStartPosition}
+              subtitleSync={subtitleSync}
               audioTracks={audioTracks}
             />
             <QualityMenu
               options={qualityOptions}
               activeId={activeQualityId}
+              deliveredRecipe={deliveredRecipe}
               isTranscoding={isTranscoding}
               error={qualityError}
               onSelect={onQualitySelect}
               versions={versions}
+              versionLocked={versionLocked}
               onSwitchVersion={onSwitchVersion}
             />
             <button
@@ -415,10 +448,10 @@ export function PlayerControls({
               <CircleButton
                 size="sm"
                 variant="secondary"
-                ariaLabel={`Back ${SKIP_BACK_SECONDS} seconds`}
+                ariaLabel={`Back ${skipSeconds.back} seconds`}
                 onClick={handleSkipBack}
               >
-                <SkipIcon direction="back" seconds={SKIP_BACK_SECONDS} />
+                <SkipIcon direction="back" seconds={skipSeconds.back} />
               </CircleButton>
 
               <CircleButton
@@ -438,10 +471,10 @@ export function PlayerControls({
               <CircleButton
                 size="sm"
                 variant="secondary"
-                ariaLabel={`Forward ${SKIP_FORWARD_SECONDS} seconds`}
+                ariaLabel={`Forward ${skipSeconds.forward} seconds`}
                 onClick={handleSkipForward}
               >
-                <SkipIcon direction="forward" seconds={SKIP_FORWARD_SECONDS} />
+                <SkipIcon direction="forward" seconds={skipSeconds.forward} />
               </CircleButton>
 
               {showEpisodeSlots ? (
@@ -494,18 +527,22 @@ export function PlayerControls({
                 mediaFileId={mediaFileId}
                 playerConfig={playerConfig}
                 onRefreshSubtitles={onRefreshSubtitles}
+                onSubtitleJobAccepted={onSubtitleJobAccepted}
                 sessionId={sessionId}
                 getSubtitleStartPosition={getSubtitleStartPosition}
+                subtitleSync={subtitleSync}
                 audioTracks={audioTracks}
               />
 
               <QualityMenu
                 options={qualityOptions}
                 activeId={activeQualityId}
+                deliveredRecipe={deliveredRecipe}
                 isTranscoding={isTranscoding}
                 error={qualityError}
                 onSelect={onQualitySelect}
                 versions={versions}
+                versionLocked={versionLocked}
                 onSwitchVersion={onSwitchVersion}
               />
 
@@ -544,6 +581,18 @@ export function PlayerControls({
                   <PictureInPicture2 className="h-[18px] w-[18px]" />
                 </button>
               )}
+
+              <button
+                type="button"
+                className="player-utility-btn"
+                onClick={onVideoFitToggle}
+                aria-label="Fill screen"
+                aria-pressed={videoFit === "cover"}
+                title="Fill screen"
+                data-active={videoFit === "cover" ? "true" : "false"}
+              >
+                <Scaling className="h-[18px] w-[18px]" />
+              </button>
 
               <button
                 type="button"
@@ -626,6 +675,15 @@ export function PlayerControls({
                 }}
               />
             )}
+            <OverflowAction
+              icon={<Scaling className="h-5 w-5" />}
+              label="Fill screen"
+              active={videoFit === "cover"}
+              onClick={() => {
+                onVideoFitToggle();
+                setOverflowOpen(false);
+              }}
+            />
             {markerEditAvailable && onToggleMarkerEdit && (
               <OverflowAction
                 icon={<Tags className="h-5 w-5" />}

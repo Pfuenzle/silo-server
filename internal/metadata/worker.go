@@ -242,7 +242,8 @@ func (w *MatchWorker) processFile(ctx context.Context, file *models.MediaFile) {
 }
 
 func (w *MatchWorker) processFileWithFolderCache(ctx context.Context, file *models.MediaFile, folderEnabledCache *sync.Map, deferredSeriesLinks *sync.Map) {
-	if !w.folderEnabled(ctx, file.MediaFolderID, folderEnabledCache) {
+	folder := w.matchFolderConfig(ctx, file.MediaFolderID, folderEnabledCache)
+	if !folder.enabled {
 		slog.InfoContext(ctx, "metadata: skipping file in disabled library", "component", "metadata",
 			"file_id", file.ID,
 			"path", file.FilePath,
@@ -252,7 +253,7 @@ func (w *MatchWorker) processFileWithFolderCache(ctx context.Context, file *mode
 	}
 
 	// Phase 0: Create skeleton item or find existing.
-	skeleton, err := w.service.createOrFindSkeleton(ctx, file, file.MediaFolderID)
+	skeleton, err := w.service.createOrFindSkeleton(ctx, file, file.MediaFolderID, folder.paths...)
 	if err != nil {
 		slog.WarnContext(ctx, "metadata: skeleton creation failed", "component", "metadata",
 			"file_id", file.ID, "path", file.FilePath, "error", err)
@@ -282,7 +283,7 @@ func (w *MatchWorker) processFileWithFolderCache(ctx context.Context, file *mode
 		return
 	}
 
-	req := w.buildProcessRequestForGroup(ctx, file, skeleton, nil)
+	req := w.buildProcessRequestForGroup(ctx, file, skeleton, nil, folder.paths...)
 	result, err := w.service.Process(ctx, req)
 	if err != nil {
 		slog.WarnContext(ctx, "metadata: enrichment failed", "component", "metadata",
@@ -313,7 +314,7 @@ func (w *MatchWorker) processFileWithFolderCache(ctx context.Context, file *mode
 	w.publishCatalogItemChanged(ctx, file.MediaFolderID, resultContentID(result, skeleton.ContentID), "metadata_updated")
 }
 
-func (w *MatchWorker) buildProcessRequestForGroup(ctx context.Context, representative *models.MediaFile, skeleton *skeletonResult, preloadedGroupFiles []*models.MediaFile) ProcessRequest {
+func (w *MatchWorker) buildProcessRequestForGroup(ctx context.Context, representative *models.MediaFile, skeleton *skeletonResult, preloadedGroupFiles []*models.MediaFile, libraryRoots ...string) ProcessRequest {
 	groupFiles := preloadedGroupFiles
 	if len(groupFiles) == 0 {
 		groupFiles = []*models.MediaFile{representative}
@@ -364,6 +365,7 @@ func (w *MatchWorker) buildProcessRequestForGroup(ctx context.Context, represent
 		ObservedRootPath:          safeObservedRootPath,
 		AllGroupFilePaths:         groupFilePaths,
 		PrimarySidecarSearchPaths: sidecarSearchPaths,
+		LibraryRoots:              slices.Clone(libraryRoots),
 		Title:                     skeleton.Title,
 		Year:                      skeleton.Year,
 		Type:                      skeleton.Type,
@@ -371,7 +373,7 @@ func (w *MatchWorker) buildProcessRequestForGroup(ctx context.Context, represent
 		ImdbID:                    skeleton.ImdbID,
 		TvdbID:                    skeleton.TvdbID,
 		HintSource:                "scanner",
-		AlternateIdentities:       queuedMatchIdentityAlternates(representative, skeleton),
+		AlternateIdentities:       queuedMatchIdentityAlternates(representative, skeleton, libraryRoots...),
 	}
 
 	return ProcessRequest{
@@ -384,7 +386,9 @@ func (w *MatchWorker) buildProcessRequestForGroup(ctx context.Context, represent
 
 const maxAlternateMatchIdentities = 3
 
-func queuedMatchIdentityAlternates(file *models.MediaFile, skeleton *skeletonResult) []MatchIdentityHint {
+const seriesReleaseYearHintSource = "series_release_year"
+
+func queuedMatchIdentityAlternates(file *models.MediaFile, skeleton *skeletonResult, libraryRoots ...string) []MatchIdentityHint {
 	if file == nil || skeleton == nil {
 		return nil
 	}
@@ -407,14 +411,25 @@ func queuedMatchIdentityAlternates(file *models.MediaFile, skeleton *skeletonRes
 	}
 
 	itemType := strings.ToLower(strings.TrimSpace(skeleton.Type))
-	if parsed := naming.ParseFilename(file.FilePath, itemType); parsed != nil {
+	if parsed := naming.ParseFilename(file.FilePath, itemType, libraryRoots...); parsed != nil {
 		add(parsed.Title, parsed.Year, "current_path")
+	}
+	if itemType == matchContentTypeSeries {
+		if title, year, ok := naming.ParseSeriesReleaseYear(file.FilePath, libraryRoots...); ok {
+			add(title, year, seriesReleaseYearHintSource)
+		}
 	}
 
 	if itemType == matchContentTypeMovie {
 		base := strings.TrimSuffix(filepath.Base(file.FilePath), filepath.Ext(file.FilePath))
 		stem := naming.ParseInferMovieStem(base, skeleton.Title, skeleton.Year)
 		add(stem.Title, stem.Year, "filename")
+		// A loose title ending in a number (Blade Runner 2049) parses that
+		// number as a year. Keep the complete, undated title as a fallback.
+		if year := strconv.Itoa(stem.Year); stem.Year != 0 && stem.Remainder == "" &&
+			!strings.Contains(base, "("+year+")") && !strings.Contains(base, "["+year+"]") {
+			add(stem.Title+" "+year, 0, "numeric_title")
+		}
 
 		observedRoot := strings.TrimSpace(skeleton.ObservedRootPath)
 		if observedRoot == "" {
@@ -789,11 +804,12 @@ func (w *MatchWorker) processQueuedMovieFile(ctx context.Context, job models.Mov
 	if file == nil || w == nil || w.service == nil || w.movieClaimer == nil {
 		return false
 	}
-	if !w.folderEnabled(ctx, file.MediaFolderID, folderEnabledCache) {
+	folder := w.matchFolderConfig(ctx, file.MediaFolderID, folderEnabledCache)
+	if !folder.enabled {
 		return false
 	}
 
-	skeleton, reusedLinkedItem, err := w.queuedMovieSkeleton(ctx, file, job.RerunRequested)
+	skeleton, reusedLinkedItem, err := w.queuedMovieSkeleton(ctx, file, job.RerunRequested, folder.paths...)
 	if err != nil {
 		queueErr := truncateSeriesQueueError(err.Error())
 		if updateErr := w.movieClaimer.UpdateError(ctx, file.ID, job.LeaseToken, queueErr); updateErr != nil {
@@ -849,7 +865,7 @@ func (w *MatchWorker) processQueuedMovieFile(ctx context.Context, job models.Mov
 	}
 
 	if skeleton.IsNew || reusedLinkedItem {
-		req := w.buildProcessRequestForGroup(ctx, file, skeleton, nil)
+		req := w.buildProcessRequestForGroup(ctx, file, skeleton, nil, folder.paths...)
 		result, processErr := w.service.Process(ctx, req)
 		if processErr != nil {
 			queueErr := truncateSeriesQueueError(processErr.Error())
@@ -867,7 +883,7 @@ func (w *MatchWorker) processQueuedMovieFile(ctx context.Context, job models.Mov
 			)
 			w.logStatusUpdateFailure(ctx, skeleton.ContentID, "unmatched", "content_id", skeleton.ContentID, "file_id", file.ID, "path", file.FilePath)
 			return false
-		} else if result != nil && !result.Updated {
+		} else if result != nil && !result.Updated && !result.Pinned {
 			if updateErr := w.updateMovieFailure(ctx, file.ID, job.LeaseToken, result.Decision); updateErr != nil {
 				slog.WarnContext(ctx, "metadata: failed to update movie queue error", "component", "metadata",
 					"file_id", file.ID,
@@ -877,8 +893,11 @@ func (w *MatchWorker) processQueuedMovieFile(ctx context.Context, job models.Mov
 			}
 			w.logStatusUpdateFailure(ctx, skeleton.ContentID, "unmatched", "content_id", skeleton.ContentID, "file_id", file.ID, "path", file.FilePath)
 			return false
+		} else if result == nil || !result.Pinned {
+			// A pinned result is an unmatched split target: nothing matched or
+			// changed, and the job is complete.
+			w.publishCatalogItemChanged(ctx, file.MediaFolderID, resultContentID(result, skeleton.ContentID), "metadata_updated")
 		}
-		w.publishCatalogItemChanged(ctx, file.MediaFolderID, resultContentID(result, skeleton.ContentID), "metadata_updated")
 	}
 
 	if err := w.movieClaimer.Delete(ctx, file.ID, job.LeaseToken); err != nil {
@@ -892,20 +911,71 @@ func (w *MatchWorker) processQueuedMovieFile(ctx context.Context, job models.Mov
 	return true
 }
 
-func (w *MatchWorker) queuedMovieSkeleton(ctx context.Context, file *models.MediaFile, allowMatched bool) (*skeletonResult, bool, error) {
-	if skeleton, ok := w.reusableQueuedMovieSkeleton(ctx, file, allowMatched); ok {
+func (w *MatchWorker) queuedMovieSkeleton(ctx context.Context, file *models.MediaFile, allowMatched bool, libraryRoots ...string) (*skeletonResult, bool, error) {
+	if skeleton, ok := w.reusableQueuedMovieSkeleton(ctx, file, allowMatched, libraryRoots...); ok {
+		override, err := w.queuedGroupOverride(ctx, file, skeleton)
+		if err != nil {
+			return nil, false, err
+		}
+		overridden, err := w.applyQueuedGroupOverride(ctx, file, skeleton, override, libraryRoots...)
+		if err != nil {
+			return nil, false, err
+		}
+		if err := w.validateReusedGroupIdentity(ctx, file, skeleton, overridden, libraryRoots...); err != nil {
+			return nil, false, err
+		}
+		if skeleton.ItemStatus == "ambiguous" {
+			confirmedIDs, err := w.service.resolveMovieTitleAmbiguity(ctx, reparseQueuedFileIdentity(file, "movie", libraryRoots...), skeleton, libraryRoots...)
+			if err != nil {
+				return nil, false, err
+			}
+			if confirmedIDs != nil {
+				applyFolderIDHints(skeleton, confirmedIDs)
+				skeleton.ItemStatus = "pending" //nolint:goconst // Catalog item state, independent of queue state.
+			}
+		}
 		return skeleton, true, nil
 	}
 
-	currentFile := reparseQueuedFileIdentity(file, "movie")
-	skeleton, err := w.service.createOrFindSkeleton(ctx, currentFile, currentFile.MediaFolderID)
+	currentFile := reparseQueuedFileIdentity(file, "movie", libraryRoots...)
+	skeleton, err := w.service.createOrFindSkeleton(ctx, currentFile, currentFile.MediaFolderID, libraryRoots...)
 	if err != nil {
 		return nil, false, err
 	}
 	return skeleton, false, nil
 }
 
-func (w *MatchWorker) reusableQueuedMovieSkeleton(ctx context.Context, file *models.MediaFile, allowMatched bool) (*skeletonResult, bool) {
+// Reusing a provisional item must obey the same rescan boundary as creating
+// one: files linked by an older parser still share that item's identity.
+// overridden reports that an operator override was applied to the skeleton,
+// which establishes identity independently of how the filename currently
+// parses. An override the worker declined to apply does not.
+func (w *MatchWorker) validateReusedGroupIdentity(ctx context.Context, file *models.MediaFile, skeleton *skeletonResult, overridden bool, libraryRoots ...string) error {
+	if skeleton.ItemStatus == string(MatchOutcomeMatched) || file.ContentGroupKey == "" || overridden {
+		return nil
+	}
+	if w.service.scannedGroupRepo == nil {
+		return nil
+	}
+	group, err := w.service.scannedGroupRepo.Get(ctx, file.MediaFolderID, file.GroupKeyVersion, file.ContentGroupKey)
+	if err != nil {
+		return fmt.Errorf("loading queued group identity: %w", err)
+	}
+	current := reparseQueuedFileIdentity(file, skeleton.Type, libraryRoots...)
+	ids := trustedStructuredIDsForSkeleton(file.FilePath, skeleton.ObservedRootPath, skeleton.RootPath, libraryRoots...)
+	if ids == nil {
+		ids = naming.ParseFolderIDs(skeletonFolderAnchorName(skeleton.ObservedRootPath, libraryRoots))
+		if ids == nil && skeleton.RootPath != skeleton.ObservedRootPath {
+			ids = naming.ParseFolderIDs(skeletonFolderAnchorName(skeleton.RootPath, libraryRoots))
+		}
+	}
+	if scannedGroupIdentityChanged(group, current, ids, libraryRoots...) {
+		return errors.New("filename identity changed since the last scan; rescan the library to update file grouping")
+	}
+	return nil
+}
+
+func (w *MatchWorker) reusableQueuedMovieSkeleton(ctx context.Context, file *models.MediaFile, allowMatched bool, libraryRoots ...string) (*skeletonResult, bool) {
 	if w == nil || w.service == nil || w.service.itemRepo == nil || file == nil {
 		return nil, false
 	}
@@ -949,18 +1019,19 @@ func (w *MatchWorker) reusableQueuedMovieSkeleton(ctx context.Context, file *mod
 	if year == 0 {
 		year = file.BaseYear
 	}
-	currentFile := reparseQueuedFileIdentity(file, itemType)
+	currentFile := reparseQueuedFileIdentity(file, itemType, libraryRoots...)
+	sameTitle := naming.InferTitlesCoherent(title, currentFile.BaseTitle)
 	if currentFile.BaseTitle != "" {
 		title = currentFile.BaseTitle
 	}
-	if currentFile.BaseYear != 0 {
+	if currentFile.BaseYear != 0 || !sameTitle {
 		year = currentFile.BaseYear
 	}
 	if currentFile.BaseType != "" {
 		itemType = currentFile.BaseType
 	}
 
-	refreshedIDs := trustedStructuredIDsForSkeleton(file.FilePath, observedRootPath, rootPath)
+	refreshedIDs := trustedStructuredIDsForSkeleton(file.FilePath, observedRootPath, rootPath, libraryRoots...)
 	// This is an unmatched-style skeleton being re-evaluated. Structured path
 	// IDs are current input; IDs that disappeared from the path must not remain
 	// trusted forever merely because an older parser copied them onto the
@@ -980,7 +1051,7 @@ func (w *MatchWorker) reusableQueuedMovieSkeleton(ctx context.Context, file *mod
 
 	return &skeletonResult{
 		ContentID:        item.ContentID,
-		ItemStatus:       item.Status,
+		ItemStatus:       status,
 		RootPath:         rootPath,
 		ObservedRootPath: observedRootPath,
 		GroupKeyVersion:  file.GroupKeyVersion,
@@ -994,11 +1065,107 @@ func (w *MatchWorker) reusableQueuedMovieSkeleton(ctx context.Context, file *mod
 	}, true
 }
 
+// queuedGroupOverride loads the operator override on a queued file's content
+// group. A matched item keeps its identity, so it is not loaded for one.
+func (w *MatchWorker) queuedGroupOverride(ctx context.Context, file *models.MediaFile, skeleton *skeletonResult) (*models.MediaGroupOverride, error) {
+	if skeleton.ItemStatus == string(MatchOutcomeMatched) || file.ContentGroupKey == "" || w.service.groupOverrideRepo == nil {
+		return nil, nil
+	}
+	override, err := w.service.groupOverrideRepo.Get(ctx, file.MediaFolderID, file.GroupKeyVersion, file.ContentGroupKey)
+	if err != nil {
+		return nil, fmt.Errorf("loading queued group override: %w", err)
+	}
+	return override, nil
+}
+
+// applyQueuedGroupOverride forces override onto the skeleton rebuilt from the
+// provisional item a queued file already links to, as createOrFindSkeleton
+// does when it first links a file. A matched item and an item pinned unmatched
+// by a split keep their identity, and a structured path ID still beats a forced
+// ID for the same provider.
+//
+// A group key can be shared by roots that are different titles (two bare
+// "Season" folders, or one title with no year), each on its own item, and the
+// override row does not record which root it was saved for. A match can move
+// the whole item, so the override reaches an item only when that item holds
+// the whole group and nothing else. It reports whether it applied override.
+func (w *MatchWorker) applyQueuedGroupOverride(ctx context.Context, file *models.MediaFile, skeleton *skeletonResult, override *models.MediaGroupOverride, libraryRoots ...string) (bool, error) {
+	if override == nil || !isProvisionalOwnershipStatus(skeleton.ItemStatus) {
+		return false, nil
+	}
+	if pinned, err := w.service.pinnedUnmatchedBySplit(ctx, skeleton.ContentID); err != nil || pinned {
+		return false, err
+	}
+	owned, err := w.itemOwnsContentGroup(ctx, file)
+	if err != nil {
+		return false, err
+	}
+	if !owned {
+		slog.WarnContext(ctx, "metadata: group override not applied to linked item because the item and its content group hold different files", "component", "metadata",
+			"folder_id", file.MediaFolderID,
+			"observed_root_path", file.ObservedRootPath,
+			"content_id", skeleton.ContentID,
+			"group_key_version", file.GroupKeyVersion,
+			"content_group_key", file.ContentGroupKey,
+		)
+		return false, nil
+	}
+
+	wasAmbiguous := skeleton.ItemStatus == "ambiguous" //nolint:goconst // Item statuses are literals throughout this package.
+	applyGroupOverride(skeleton, override)
+	applyFolderIDHints(skeleton, trustedStructuredIDsForSkeleton(file.FilePath, skeleton.ObservedRootPath, skeleton.RootPath, libraryRoots...))
+	if wasAmbiguous {
+		// The match merges provider metadata into the stored item, and keeps
+		// the title of an item that is still ambiguous. Store the settled
+		// status so the item takes the provider's title like any other
+		// provisional item.
+		changed, err := w.service.updateItemStatus(ctx, skeleton.ContentID, skeleton.ItemStatus)
+		if err != nil {
+			return false, fmt.Errorf("settling overridden ambiguous item: %w", err)
+		}
+		if !changed {
+			// Another writer matched the item after it was read. Leave the
+			// match alone; the retry reads the matched item.
+			return false, fmt.Errorf("item %s was matched while its group override was applied", skeleton.ContentID)
+		}
+	}
+	return true, nil
+}
+
+// itemOwnsContentGroup reports whether the item file links to and file's
+// content group hold the same present files.
+func (w *MatchWorker) itemOwnsContentGroup(ctx context.Context, file *models.MediaFile) (bool, error) {
+	lister, ok := w.service.fileRepo.(metadataContentFileLister)
+	if !ok {
+		return false, errors.New("file repository cannot list files by content id")
+	}
+	groupFiles, err := w.service.fileRepo.ListByGroupKey(ctx, file.MediaFolderID, file.GroupKeyVersion, file.ContentGroupKey)
+	if err != nil {
+		return false, fmt.Errorf("listing queued group files: %w", err)
+	}
+	for _, groupFile := range groupFiles {
+		if groupFile != nil && groupFile.ContentID != file.ContentID {
+			return false, nil
+		}
+	}
+	itemFiles, err := lister.GetByContentID(ctx, file.ContentID)
+	if err != nil {
+		return false, fmt.Errorf("listing queued item files: %w", err)
+	}
+	for _, itemFile := range itemFiles {
+		if itemFile != nil && (itemFile.MediaFolderID != file.MediaFolderID ||
+			itemFile.GroupKeyVersion != file.GroupKeyVersion || itemFile.ContentGroupKey != file.ContentGroupKey) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // reparseQueuedFileIdentity refreshes the in-memory scanner identity from the
 // current path without mutating the persisted scan row. Queue entries can live
 // across parser releases, including entries that have not created a skeleton
 // yet, so both fresh and reusable skeleton paths must use this view.
-func reparseQueuedFileIdentity(file *models.MediaFile, fallbackType string) *models.MediaFile {
+func reparseQueuedFileIdentity(file *models.MediaFile, fallbackType string, libraryRoots ...string) *models.MediaFile {
 	if file == nil {
 		return nil
 	}
@@ -1007,7 +1174,7 @@ func reparseQueuedFileIdentity(file *models.MediaFile, fallbackType string) *mod
 	if parseType == "" {
 		parseType = strings.TrimSpace(current.BaseType)
 	}
-	if parsed := naming.ParseFilename(current.FilePath, parseType); parsed != nil {
+	if parsed := naming.ParseFilename(current.FilePath, parseType, libraryRoots...); parsed != nil {
 		if parsed.Title != "" {
 			current.BaseTitle = parsed.Title
 		}
@@ -1100,7 +1267,8 @@ func (w *MatchWorker) releaseSeriesLeases(jobs []models.SeriesRootMatchJob) {
 }
 
 func (w *MatchWorker) processSeriesRoot(ctx context.Context, job models.SeriesRootMatchJob, folderEnabledCache *sync.Map) (int, error) {
-	if !w.folderEnabled(ctx, job.MediaFolderID, folderEnabledCache) {
+	folder := w.matchFolderConfig(ctx, job.MediaFolderID, folderEnabledCache)
+	if !folder.enabled {
 		return 0, nil
 	}
 	if w.service == nil || w.service.fileRepo == nil || w.seriesClaimer == nil {
@@ -1129,10 +1297,59 @@ func (w *MatchWorker) processSeriesRoot(ctx context.Context, job models.SeriesRo
 		}
 		return 0, nil
 	}
+	if seriesRootNeedsIdentityRescan(groupFiles, folder.paths...) {
+		overridden, overrideErr := w.seriesRootHasManualGroupIdentity(ctx, groupFiles)
+		if overrideErr != nil {
+			if updateErr := w.seriesClaimer.UpdateError(ctx, job.MediaFolderID, job.ObservedRootPath, job.LeaseToken, truncateSeriesQueueError(overrideErr.Error())); updateErr != nil {
+				return 0, updateErr
+			}
+			return 0, overrideErr
+		}
+		if !overridden {
+			return 0, w.seriesClaimer.UpdateFailure(ctx, job.MediaFolderID, job.ObservedRootPath, job.LeaseToken, MatchFailure{
+				Kind:    MatchOutcomeCandidateRejected,
+				Message: "filenames identify different series within the queued root; rescan the library to update file grouping",
+			})
+		}
+	}
 	if !hasUnlinkedGroupFile(groupFiles) {
 		if strings.TrimSpace(representative.ContentID) != "" {
-			if skeleton, ok := w.reusableQueuedMovieSkeleton(ctx, representative, job.RerunRequested); ok && skeleton.ItemStatus != "ambiguous" {
-				req := w.buildProcessRequestForGroup(ctx, representative, skeleton, groupFiles)
+			skeleton, ok := w.reusableQueuedMovieSkeleton(ctx, representative, job.RerunRequested, folder.paths...)
+			overridden := false
+			if ok {
+				override, err := w.queuedGroupOverride(ctx, representative, skeleton)
+				if err == nil {
+					overridden, err = w.applyQueuedGroupOverride(ctx, representative, skeleton, override, folder.paths...)
+				}
+				if err != nil {
+					if updateErr := w.seriesClaimer.UpdateError(ctx, job.MediaFolderID, job.ObservedRootPath, job.LeaseToken, truncateSeriesQueueError(err.Error())); updateErr != nil {
+						return 0, updateErr
+					}
+					// The queue row records the failure. Returning it would
+					// cancel sibling jobs.
+					slog.WarnContext(ctx, "metadata: series root group override failed", "component", "metadata",
+						"folder_id", job.MediaFolderID,
+						"observed_root_path", job.ObservedRootPath,
+						"error", err,
+					)
+					return 0, nil
+				}
+			}
+			if ok && skeleton.ItemStatus != "ambiguous" {
+				if err := w.validateReusedGroupIdentity(ctx, representative, skeleton, overridden, folder.paths...); err != nil {
+					if updateErr := w.seriesClaimer.UpdateError(ctx, job.MediaFolderID, job.ObservedRootPath, job.LeaseToken, truncateSeriesQueueError(err.Error())); updateErr != nil {
+						return 0, updateErr
+					}
+					// The queue row records the failure. Returning it would cancel
+					// sibling jobs and fail the scan that the error asks for.
+					slog.WarnContext(ctx, "metadata: series root identity requires rescan", "component", "metadata",
+						"folder_id", job.MediaFolderID,
+						"observed_root_path", job.ObservedRootPath,
+						"error", err,
+					)
+					return 0, nil
+				}
+				req := w.buildProcessRequestForGroup(ctx, representative, skeleton, groupFiles, folder.paths...)
 				result, processErr := w.service.Process(ctx, req)
 				if processErr != nil {
 					queueErr := truncateSeriesQueueError(processErr.Error())
@@ -1153,7 +1370,9 @@ func (w *MatchWorker) processSeriesRoot(ctx context.Context, job models.SeriesRo
 					}
 					return 0, nil
 				}
-				if result != nil && !result.Updated {
+				if result != nil && result.Pinned {
+					w.synthesizePinnedSeriesEpisodes(ctx, skeleton.ContentID)
+				} else if result != nil && !result.Updated {
 					if updateErr := w.updateSeriesFailure(ctx, job.MediaFolderID, job.ObservedRootPath, job.LeaseToken, result.Decision); updateErr != nil {
 						return 0, updateErr
 					}
@@ -1166,8 +1385,9 @@ func (w *MatchWorker) processSeriesRoot(ctx context.Context, job models.SeriesRo
 							"content_id", skeleton.ContentID, "error", fbErr)
 					}
 					return 0, nil
+				} else {
+					w.publishCatalogItemChanged(ctx, job.MediaFolderID, resultContentID(result, skeleton.ContentID), "metadata_updated")
 				}
-				w.publishCatalogItemChanged(ctx, job.MediaFolderID, resultContentID(result, skeleton.ContentID), "metadata_updated")
 			}
 			if err := w.service.ensureSeriesEpisodeLinks(ctx, representative.ContentID); err != nil {
 				if errors.Is(err, catalog.ErrItemNotFound) {
@@ -1193,8 +1413,8 @@ func (w *MatchWorker) processSeriesRoot(ctx context.Context, job models.SeriesRo
 		return len(groupFiles), nil
 	}
 
-	currentRepresentative := reparseQueuedFileIdentity(representative, "series")
-	skeleton, err := w.service.createOrFindSkeleton(ctx, currentRepresentative, job.MediaFolderID)
+	currentRepresentative := reparseQueuedFileIdentity(representative, "series", folder.paths...)
+	skeleton, err := w.service.createOrFindSkeleton(ctx, currentRepresentative, job.MediaFolderID, folder.paths...)
 	if err != nil {
 		queueErr := truncateSeriesQueueError(err.Error())
 		if updateErr := w.seriesClaimer.UpdateError(ctx, job.MediaFolderID, job.ObservedRootPath, job.LeaseToken, queueErr); updateErr != nil {
@@ -1212,11 +1432,21 @@ func (w *MatchWorker) processSeriesRoot(ctx context.Context, job models.SeriesRo
 		return 0, nil
 	}
 
-	if _, err := w.service.fileRepo.UpdateContentIDByObservedRootPath(ctx, job.MediaFolderID, job.ObservedRootPath, skeleton.ContentID); err != nil {
+	_, replacedContentIDs, err := w.service.fileRepo.UpdateContentIDByObservedRootPath(ctx, job.MediaFolderID, job.ObservedRootPath, skeleton.ContentID)
+	if err != nil {
 		if updateErr := w.seriesClaimer.UpdateError(ctx, job.MediaFolderID, job.ObservedRootPath, job.LeaseToken, truncateSeriesQueueError(err.Error())); updateErr != nil {
 			return 0, updateErr
 		}
 		return 0, fmt.Errorf("relinking series root %d/%s: %w", job.MediaFolderID, job.ObservedRootPath, err)
+	}
+	// The relink has committed, so a cleanup failure is logged rather than
+	// retried: the next full library scan removes the same memberships.
+	if err := w.service.reconcileRelinkedItems(ctx, job.MediaFolderID, replacedContentIDs); err != nil {
+		slog.WarnContext(ctx, "metadata: series root relink cleanup failed", "component", "metadata",
+			"folder_id", job.MediaFolderID,
+			"observed_root_path", job.ObservedRootPath,
+			"error", err,
+		)
 	}
 
 	needsInitialMatch := skeleton.IsNew || job.RerunRequested
@@ -1235,7 +1465,7 @@ func (w *MatchWorker) processSeriesRoot(ctx context.Context, job models.SeriesRo
 		}
 	}
 	if needsInitialMatch && skeleton.ItemStatus != "ambiguous" {
-		req := w.buildProcessRequestForGroup(ctx, representative, skeleton, groupFiles)
+		req := w.buildProcessRequestForGroup(ctx, representative, skeleton, groupFiles, folder.paths...)
 		result, processErr := w.service.Process(ctx, req)
 		if processErr != nil {
 			queueErr := truncateSeriesQueueError(processErr.Error())
@@ -1260,6 +1490,8 @@ func (w *MatchWorker) processSeriesRoot(ctx context.Context, job models.SeriesRo
 				)
 			}
 			return 0, nil
+		} else if result != nil && result.Pinned {
+			w.synthesizePinnedSeriesEpisodes(ctx, skeleton.ContentID)
 		} else if result != nil && !result.Updated {
 			if updateErr := w.updateSeriesFailure(ctx, job.MediaFolderID, job.ObservedRootPath, job.LeaseToken, result.Decision); updateErr != nil {
 				return 0, updateErr
@@ -1278,8 +1510,9 @@ func (w *MatchWorker) processSeriesRoot(ctx context.Context, job models.SeriesRo
 				)
 			}
 			return 0, nil
+		} else {
+			w.publishCatalogItemChanged(ctx, job.MediaFolderID, resultContentID(result, skeleton.ContentID), "metadata_updated")
 		}
-		w.publishCatalogItemChanged(ctx, job.MediaFolderID, resultContentID(result, skeleton.ContentID), "metadata_updated")
 	}
 
 	finalContentID, err := w.service.fileRepo.FindContentIDByObservedRootPath(ctx, job.MediaFolderID, job.ObservedRootPath, "series")
@@ -1324,6 +1557,84 @@ func (w *MatchWorker) processSeriesRoot(ctx context.Context, job models.SeriesRo
 	return len(groupFiles), nil
 }
 
+// synthesizePinnedSeriesEpisodes gives an unmatched split target the same
+// file-derived episodes an automatic match failure would, so its episodes stay
+// browsable while it waits for an admin to identify it.
+func (w *MatchWorker) synthesizePinnedSeriesEpisodes(ctx context.Context, contentID string) {
+	if err := w.service.SynthesizeFallbackEpisodes(ctx, contentID); err != nil {
+		slog.WarnContext(ctx, "metadata: fallback episode synthesis failed for unmatched split target", "component", "metadata",
+			"content_id", contentID, "error", err)
+	}
+}
+
+// A queue row can predate filename-based series grouping. Rechecking every
+// member prevents the old root's bulk relink from assigning neighboring shows
+// to whichever file happened to be selected as representative.
+func seriesRootNeedsIdentityRescan(files []*models.MediaFile, libraryRoots ...string) bool {
+	identity := ""
+	conflict, fileRoot := false, false
+	for _, file := range files {
+		if file == nil {
+			continue
+		}
+		parsed := naming.ResolvePathContext(file.FilePath, "series", libraryRoots...)
+		ownRoot := filepath.Clean(parsed.RootPath) == filepath.Clean(file.FilePath)
+		fileRoot = fileRoot || ownRoot
+		key := matchIdentityKey(parsed.Title, parsed.Year)
+		switch {
+		case key == "":
+			// An anonymous sibling (E02.mkv) cannot share a file-rooted show's
+			// identity: a current scan leaves it outside that file's root.
+			conflict = conflict || !ownRoot
+		case identity == "":
+			identity = key
+		case key != identity:
+			conflict = true
+		}
+	}
+	return conflict && fileRoot
+}
+
+// An operator can group differently named releases as one series. The override
+// must cover every queued file; overriding only the representative cannot
+// authorize relinking unrelated groups that share the old physical root.
+func (w *MatchWorker) seriesRootHasManualGroupIdentity(ctx context.Context, files []*models.MediaFile) (bool, error) {
+	var first *models.MediaFile
+	for _, file := range files {
+		if file == nil {
+			continue
+		}
+		if file.ContentGroupKey == "" || file.GroupKeyVersion <= 0 {
+			return false, nil
+		}
+		if first == nil {
+			first = file
+		} else if file.MediaFolderID != first.MediaFolderID || file.GroupKeyVersion != first.GroupKeyVersion || file.ContentGroupKey != first.ContentGroupKey {
+			return false, nil
+		}
+	}
+	if first == nil {
+		return false, nil
+	}
+	if w.service.groupOverrideRepo != nil {
+		override, err := w.service.groupOverrideRepo.Get(ctx, first.MediaFolderID, first.GroupKeyVersion, first.ContentGroupKey)
+		if err != nil {
+			return false, fmt.Errorf("loading series group override: %w", err)
+		}
+		if override != nil {
+			return override.ForcedType == "" || override.ForcedType == matchContentTypeSeries, nil
+		}
+	}
+	if w.service.scannedGroupRepo != nil {
+		group, err := w.service.scannedGroupRepo.Get(ctx, first.MediaFolderID, first.GroupKeyVersion, first.ContentGroupKey)
+		if err != nil {
+			return false, fmt.Errorf("loading series group identity: %w", err)
+		}
+		return group != nil && group.OverrideSource == manualIdentityOverrideSource && group.InferredType == matchContentTypeSeries, nil
+	}
+	return false, nil
+}
+
 func matchFailureFromDecision(decision *MatchDecision) MatchFailure {
 	kind := MatchOutcomeMetadataEmpty
 	if decision != nil && strings.TrimSpace(string(decision.Outcome)) != "" {
@@ -1363,7 +1674,7 @@ func (w *MatchWorker) logStatusUpdateFailure(ctx context.Context, contentID, sta
 	if w == nil || w.service == nil {
 		return
 	}
-	if err := w.service.updateItemStatus(ctx, contentID, status); err != nil {
+	if _, err := w.service.updateItemStatus(ctx, contentID, status); err != nil {
 		args := append([]any{"content_id", contentID, "status", status, "error", err}, attrs...)
 		slog.WarnContext(ctx, "metadata: failed to update item status", append([]any{"component", "metadata"}, args...)...)
 	}
@@ -1420,33 +1731,46 @@ func (w *MatchWorker) collapseClaimedSeriesBatch(ctx context.Context, files []*m
 	return out
 }
 
-func (w *MatchWorker) folderEnabled(ctx context.Context, folderID int, cache *sync.Map) bool {
+type matchFolderConfig struct {
+	enabled bool
+	paths   []string
+}
+
+func (w *MatchWorker) matchFolderConfig(ctx context.Context, folderID int, cache *sync.Map) matchFolderConfig {
 	if folderID <= 0 || w == nil || w.service == nil || w.service.folderRepo == nil {
-		return true
+		return matchFolderConfig{enabled: true}
 	}
 
 	if cache != nil {
 		if cached, ok := cache.Load(folderID); ok {
-			return cached.(bool)
+			if config, ok := cached.(matchFolderConfig); ok {
+				return config
+			}
 		}
 	}
 
-	enabled := true
+	config := matchFolderConfig{}
 	folder, err := w.service.folderRepo.GetByID(ctx, folderID)
 	if err != nil {
+		// Without the configured roots this work would parse identities
+		// differently, so skip it. Do not cache a transient failure as a
+		// disabled library for the rest of the batch.
 		slog.WarnContext(ctx, "metadata: failed to load folder state during match", "component", "metadata",
 			"folder_id", folderID,
 			"error", err,
 		)
-	} else if folder != nil {
-		enabled = folder.Enabled
+		return config
+	}
+	if folder != nil {
+		config.enabled = folder.Enabled
+		config.paths = slices.Clone(folder.Paths)
 	}
 
 	if cache != nil {
-		cache.Store(folderID, enabled)
+		cache.Store(folderID, config)
 	}
 
-	return enabled
+	return config
 }
 
 func (w *MatchWorker) folderType(ctx context.Context, folderID int) (string, error) {
@@ -1571,6 +1895,8 @@ func truncateSeriesQueueError(errText string) string {
 
 // RetryUnmatchedItemsByFolderAndPathPrefix revisits linked unmatched items in
 // scope once. Per-item retry failures are counted as warnings, not fatal.
+// Items rekeyed since the list was taken are skipped uncounted; see
+// retryItemGone.
 func (w *MatchWorker) RetryUnmatchedItemsByFolderAndPathPrefix(ctx context.Context, folderID int, pathPrefix string) (retried int, stillUnmatched int, err error) {
 	if w.service == nil {
 		return 0, 0, fmt.Errorf("metadata match worker requires a service")
@@ -1589,12 +1915,20 @@ func (w *MatchWorker) RetryUnmatchedItemsByFolderAndPathPrefix(ctx context.Conte
 			return retried, stillUnmatched, ctx.Err()
 		}
 
-		retried++
 		result, processErr := w.service.Process(ctx, ProcessRequest{
 			ContentID: contentID,
 			FolderID:  formatFolderID(folderID),
 			Mode:      ModeScheduledRefresh,
 		})
+		unresolved := processErr != nil || result == nil || !result.Updated
+		if unresolved && w.retryItemGone(ctx, contentID, processErr) {
+			slog.DebugContext(ctx, "metadata: scoped retry skipped item resolved since listing", "component", "metadata",
+				"content_id", contentID,
+				"folder_id", folderID,
+				"path_prefix", pathPrefix)
+			continue
+		}
+		retried++
 		if processErr != nil {
 			stillUnmatched++
 			slog.WarnContext(ctx, "metadata: scoped retry failed", "component", "metadata",
@@ -1636,6 +1970,32 @@ func (w *MatchWorker) RetryUnmatchedItemsByFolderAndPathPrefix(ctx context.Conte
 	}
 
 	return retried, stillUnmatched, nil
+}
+
+// retryItemGone reports whether a scoped retry that did not resolve the listed
+// item came back that way only because the item no longer exists under its
+// listed ID. The unmatched list is a snapshot, and the background series-root
+// matcher can match an item and rekey it (local-… to series-tvdb-…) either
+// before the retry loads it, which fails Process with ErrItemNotFound, or
+// while Process waits on providers, which ends in an Updated: false result.
+// Such an item is resolved, not still unmatched.
+//
+// The not-found error alone is not trusted: the item must also be absent on a
+// fresh lookup, so a not-found from some other row inside Process still counts
+// as a real failure. Any other error always counts.
+//
+// The matcher commits the rekey before it marks the new item matched, so a
+// matcher that fails between those two commits leaves an unmatched item this
+// scan does not count. The next scan lists it under its new ID.
+func (w *MatchWorker) retryItemGone(ctx context.Context, contentID string, processErr error) bool {
+	if processErr != nil && !errors.Is(processErr, catalog.ErrItemNotFound) {
+		return false
+	}
+	if w.service == nil || w.service.itemRepo == nil {
+		return false
+	}
+	_, err := w.service.itemRepo.GetByID(ctx, contentID)
+	return errors.Is(err, catalog.ErrItemNotFound)
 }
 
 func formatFolderID(id int) string {

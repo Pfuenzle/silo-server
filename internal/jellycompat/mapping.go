@@ -11,6 +11,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/lang"
 	"github.com/Silo-Server/silo-server/internal/models"
 )
 
@@ -39,6 +40,12 @@ func newMapper(codec *ResourceIDCodec, cfg *config.Config) *mapper {
 	return &mapper{codec: codec, serverID: serverID, imageTagSigner: newImageTagSigner(imageTagSecret)}
 }
 
+// displayPreferencesID is Jellyfin's DisplayPreferencesId for a view: the
+// view's GUID in "N" format (no hyphens).
+func displayPreferencesID(viewID string) string {
+	return strings.ReplaceAll(viewID, "-", "")
+}
+
 func (m *mapper) viewFromLibrary(library upstreamUserLibrary) baseItemDTO {
 	imgTags := map[string]string{}
 	routeID := m.codec.EncodeIntID(EncodedIDLibrary, int64(library.ID))
@@ -58,7 +65,10 @@ func (m *mapper) viewFromLibrary(library upstreamUserLibrary) baseItemDTO {
 		ServerID:       m.serverID,
 		CollectionType: libraryCollectionType(library.Type),
 		SortName:       strings.ToLower(library.Name),
-		ImageTags:      imgTags,
+		// Jellyfin clients key per-library view settings on this; Jellyfin
+		// for Android TV crashes reopening a library without it.
+		DisplayPreferencesID: displayPreferencesID(routeID),
+		ImageTags:            imgTags,
 		UserData: &itemUserDataDTO{
 			Key:    routeID,
 			ItemID: routeID,
@@ -93,8 +103,10 @@ func (m *mapper) itemFromList(item upstreamListItem, isFavorite bool, progress *
 		ProductionYear:  item.Year,
 		OfficialRating:  item.ContentRating,
 		CommunityRating: item.RatingIMDB,
-		ImageTags:       map[string]string{},
-		UserData:        userDataDTO(m.codec.EncodeStringID(EncodedIDItem, item.ContentID), item.UserData, isFavorite, progress),
+		// Jellyfin 12 reports the item's own original language, uninherited.
+		OriginalLanguage: item.OriginalLanguage,
+		ImageTags:        map[string]string{},
+		UserData:         userDataDTO(m.codec.EncodeStringID(EncodedIDItem, item.ContentID), jellyfinIsFolder(item.Type), item.UserData, isFavorite, progress),
 	}
 
 	if mt := jellyfinMediaType(item.Type); mt != "" {
@@ -123,7 +135,9 @@ func (m *mapper) itemFromList(item upstreamListItem, isFavorite bool, progress *
 	if item.SeasonCount != nil {
 		seasonCount := *item.SeasonCount
 		dto.ChildCount = seasonCount
-		dto.RecursiveItemCount = seasonCount
+		if item.EpisodeCount == nil {
+			dto.RecursiveItemCount = seasonCount
+		}
 		dto.SeasonCount = seasonCount
 	}
 	primaryPath, primaryThumbhash := listItemPrimaryImageSeedParts(item)
@@ -138,6 +152,15 @@ func (m *mapper) itemFromList(item upstreamListItem, isFavorite bool, progress *
 		item.BackdropURL,
 	); tags != nil {
 		dto.BackdropImageTags = tags
+	}
+	// Advertise the logo as Jellyfin does, so clients that check ImageTags
+	// know it exists. Episodes carry no logo of their own; theirs belongs to
+	// the series.
+	if item.LogoURL != "" && item.Type != "episode" {
+		dto.ImageTags["Logo"] = m.imageTagSigner.Tag(
+			imageTagSeed(item.ContentID, "Logo", compatCardImageSize, item.LogoPath, "", item.UpdatedAt),
+			item.LogoURL,
+		)
 	}
 	if ratio := primaryAspectRatio(item.Type); ratio != nil {
 		dto.PrimaryImageAspectRatio = ratio
@@ -173,10 +196,7 @@ func (m *mapper) itemFromList(item upstreamListItem, isFavorite bool, progress *
 		dto.Tags = []string{}
 	}
 	if allFields || fields["productionlocations"] {
-		dto.ProductionLocations = append([]string{}, item.Countries...)
-	}
-	if allFields || fields["criticrating"] {
-		dto.CriticRating = item.RatingTMDB
+		dto.ProductionLocations = append([]string{}, lang.UniqueCountries(item.Countries)...)
 	}
 	if allFields || fields["mediasourcecount"] {
 		// The list path has no version data, so assume matched playable items
@@ -188,7 +208,7 @@ func (m *mapper) itemFromList(item upstreamListItem, isFavorite bool, progress *
 		}
 	}
 	if allFields || fields["providerids"] {
-		dto.ProviderIDs = map[string]string{}
+		dto.ProviderIDs = providerIDMap(item.ImdbID, item.TmdbID, item.TvdbID)
 	}
 	// Fields that are never populated in list view — only include in detail.
 	if allFields {
@@ -200,87 +220,10 @@ func (m *mapper) itemFromList(item upstreamListItem, isFavorite bool, progress *
 		dto.ImageBlurHashes = map[string]map[string]string{}
 		dto.LockedFields = []string{}
 		dto.Chapters = []map[string]any{}
-		dto.Trickplay = map[string]any{}
 		dto.MediaStreams = []mediaStreamDTO{}
 	}
 
 	return dto
-}
-
-// stubDetailPerson, stubDetailMediaSource, and stubDetailMediaStream are the
-// single placeholder elements injected into a list-mapped DTO by
-// stubDetailListFields when the client requested a detail-only Fields value
-// but the endpoint (currently Resume) deliberately skips the per-item
-// GetItemDetail fetch. Using a non-empty single-element slice keeps the
-// field present in JSON regardless of the omitempty tag, so strict client
-// deserializers see the same shape they'd get from a populated catalog
-// (every real item has at least one media source, stream, and cast/crew
-// entry — the empty-array case never happens in practice, so we should not
-// rely on omitempty doing anything useful for these fields).
-//
-// The values are minimal: each carries the required (non-omitempty) fields
-// only. Clients that consume this data downstream will see a single source
-// with a stub ID, a single Video stream at index 0, and a single placeholder
-// person. The stub is a FALLBACK, not a no-op: Infuse and SenPlayer build
-// their Continue Watching rows from the listing's MediaSources, so pages
-// within the detail-upgrade cap get real sources (upgradeProgressPageToDetail)
-// and only overflow/error entries see the stub — which must therefore still
-// look playable and serialize collections as empty, never null.
-var (
-	stubDetailPerson      = personDTO{ID: "0", Name: ""}
-	stubDetailMediaSource = mediaSourceDTO{ID: "0"}
-	stubDetailMediaStream = mediaStreamDTO{Index: 0, Type: "Video"}
-)
-
-// stubDetailListFields sets the four detail-only fields on a list-mapped DTO
-// to single-element placeholder slices when the client requested them via
-// Fields=People|Chapters|MediaStreams|MediaSources. Used by the Resume/NextUp
-// scan phase, which deliberately skips per-item GetItemDetail fanout; the
-// returned page is then re-mapped through the real detail path
-// (upgradeProgressPageToDetail), so these stubs reach clients only for
-// entries past the detail-upgrade cap or whose detail fetch failed.
-func stubDetailListFields(dto *baseItemDTO, fields map[string]bool) {
-	if len(fields) == 0 {
-		return
-	}
-	if fields["people"] && dto.People == nil {
-		dto.People = []personDTO{stubDetailPerson}
-	}
-	if fields["chapters"] && dto.Chapters == nil {
-		// Constructed fresh per call because map values are reference-typed
-		// and could be mutated by downstream code.
-		dto.Chapters = []map[string]any{{"Name": "", "StartPositionTicks": int64(0)}}
-	}
-	if fields["mediastreams"] && dto.MediaStreams == nil {
-		dto.MediaStreams = []mediaStreamDTO{stubDetailMediaStream}
-	}
-	if fields["mediasources"] && dto.MediaSources == nil {
-		// The stub must still look PLAYABLE: some clients (SenPlayer) decide
-		// whether to render a Resume row entry from the listing's
-		// MediaSources, and an all-false playability stub makes them drop
-		// every item. Keep the stub ID ("0" — never a registered media source
-		// owner) but mirror the shape detailMediaSourceDTO produces; the real
-		// source set is still refetched via /Items/{id}/PlaybackInfo on play.
-		src := stubDetailMediaSource
-		src.Protocol = "File"
-		src.Type = "Default"
-		src.VideoType = "VideoFile"
-		src.Name = dto.Name
-		src.RunTimeTicks = dto.RunTimeTicks
-		src.SupportsTranscoding = true
-		src.SupportsDirectStream = true
-		src.SupportsDirectPlay = true
-		src.SupportsProbing = true
-		src.TranscodingSubProtocol = "hls"
-		src.MediaStreams = []mediaStreamDTO{stubDetailMediaStream}
-		// Real servers never serialize these as JSON null (always []/{});
-		// strict client deserializers fail the whole response on a null
-		// array, which empties the Resume/NextUp rows entirely.
-		src.Formats = []string{}
-		src.RequiredHTTPHeaders = map[string]string{}
-		src.MediaAttachments = []map[string]any{}
-		dto.MediaSources = []mediaSourceDTO{src}
-	}
 }
 
 // itemFromDetail maps a detail payload into a full baseItemDTO, including every
@@ -307,6 +250,7 @@ func (m *mapper) itemFromDetailWithFields(item upstreamItemDetail, isFavorite bo
 		Type:              item.Type,
 		Title:             item.Title,
 		SortTitle:         item.SortTitle,
+		OriginalLanguage:  item.OriginalLanguage,
 		Year:              item.Year,
 		Genres:            item.Genres,
 		ContentRating:     item.ContentRating,
@@ -318,6 +262,7 @@ func (m *mapper) itemFromDetailWithFields(item upstreamItemDetail, isFavorite bo
 		PosterThumbhash:   item.PosterThumbhash,
 		BackdropPath:      item.BackdropPath,
 		BackdropThumbhash: item.BackdropThumbhash,
+		LogoURL:           item.LogoURL,
 		LogoPath:          item.LogoPath,
 		UpdatedAt:         item.UpdatedAt,
 		SeasonCount:       item.SeasonCount,
@@ -328,6 +273,9 @@ func (m *mapper) itemFromDetailWithFields(item upstreamItemDetail, isFavorite bo
 		EpisodeCount:      item.EpisodeCount,
 		Runtime:           item.Runtime,
 		AirDate:           derefString(item.AirDate),
+		ImdbID:            item.ImdbID,
+		TmdbID:            item.TmdbID,
+		TvdbID:            item.TvdbID,
 		UserData:          item.UserData,
 	}, isFavorite, progress, allDetailFields)
 
@@ -335,22 +283,32 @@ func (m *mapper) itemFromDetailWithFields(item upstreamItemDetail, isFavorite bo
 		dto.People = make([]personDTO, 0, len(item.Cast)+len(item.Crew))
 		for _, cast := range item.Cast {
 			personID, _ := strconv.ParseInt(cast.PersonID, 10, 64)
+			routeID := m.codec.EncodeIntID(EncodedIDPerson, personID)
+			var primaryTag string
+			if cast.PhotoURL != "" {
+				primaryTag = personPrimaryImageTag(m.imageTagSigner, routeID, cast.PhotoPath, cast.PhotoThumbhash)
+			}
 			dto.People = append(dto.People, personDTO{
-				ID:              m.codec.EncodeIntID(EncodedIDPerson, personID),
+				ID:              routeID,
 				Name:            cast.Name,
 				Role:            cast.Character,
 				Type:            "Actor",
-				PrimaryImageTag: tagValue(cast.PhotoURL),
+				PrimaryImageTag: primaryTag,
 			})
 		}
 		for _, crew := range item.Crew {
 			personID, _ := strconv.ParseInt(crew.PersonID, 10, 64)
+			routeID := m.codec.EncodeIntID(EncodedIDPerson, personID)
+			var primaryTag string
+			if crew.PhotoURL != "" {
+				primaryTag = personPrimaryImageTag(m.imageTagSigner, routeID, crew.PhotoPath, crew.PhotoThumbhash)
+			}
 			dto.People = append(dto.People, personDTO{
-				ID:              m.codec.EncodeIntID(EncodedIDPerson, personID),
+				ID:              routeID,
 				Name:            crew.Name,
 				Role:            crew.Job,
 				Type:            crew.Job,
-				PrimaryImageTag: tagValue(crew.PhotoURL),
+				PrimaryImageTag: primaryTag,
 			})
 		}
 	}
@@ -373,9 +331,8 @@ func (m *mapper) itemFromDetailWithFields(item upstreamItemDetail, isFavorite bo
 	dto.OriginalTitle = firstNonEmpty(item.OriginalTitle, item.Title)
 	dto.SortName = firstNonEmpty(item.SortTitle, item.OriginalTitle, item.Title)
 	dto.ForcedSortName = dto.SortName
-	dto.CriticRating = item.RatingTMDB
 	dto.Studios = m.namePairs(item.Studios, EncodedIDStudio)
-	dto.ProductionLocations = append([]string{}, item.Countries...)
+	dto.ProductionLocations = append([]string{}, lang.UniqueCountries(item.Countries)...)
 	if item.Tagline != "" {
 		dto.Taglines = []string{item.Tagline}
 	}
@@ -411,27 +368,23 @@ func (m *mapper) itemFromDetailWithFields(item upstreamItemDetail, isFavorite bo
 		if wantMediaSources {
 			dto.MediaSources = make([]mediaSourceDTO, 0, len(item.Versions))
 		}
-		// Register every version's file ID as owned by this item, even when the
-		// caller didn't ask for MediaSources/MediaStreams. Skipping this breaks
-		// later /Items/{mediaSourceId} lookups (LookupMediaSourceOwner returns
-		// ok=false → 404) whenever the detail was first materialized through a
-		// list endpoint without those Fields.
-		for _, version := range item.Versions {
-			m.codec.RegisterMediaSourceOwner(int64(version.FileID), item.ContentID)
-			if !wantMediaSources && !wantMediaStreams {
-				continue
-			}
-			sourceID := m.codec.EncodeIntID(EncodedIDMediaSource, int64(version.FileID))
-			streams := buildMediaStreams(routeItemID, sourceID, version)
-			if wantMediaStreams {
-				dto.MediaStreams = append(dto.MediaStreams, streams...)
-			}
-			if wantMediaSources {
-				dto.MediaSources = append(dto.MediaSources, detailMediaSourceDTO(sourceID, version, streams))
+		if wantMediaSources || wantMediaStreams {
+			for _, version := range item.Versions {
+				sourceID := m.codec.EncodeIntID(EncodedIDMediaSource, int64(version.FileID))
+				streams := buildMediaStreams(routeItemID, sourceID, version)
+				if wantMediaStreams {
+					dto.MediaStreams = append(dto.MediaStreams, streams...)
+				}
+				if wantMediaSources {
+					dto.MediaSources = append(dto.MediaSources, detailMediaSourceDTO(sourceID, version, streams))
+				}
 			}
 		}
 		if wantField("chapters") {
 			dto.Chapters = compatChapters(firstVersion.Chapters, firstVersion.AddedAt)
+		}
+		if wantField("trickplay") {
+			dto.Trickplay = m.compatTrickplay(item.Versions)
 		}
 	} else if isPlayableItemType(item.Type) {
 		// Provider-metadata-only (unaired/missing) item: version data is
@@ -460,7 +413,7 @@ func (m *mapper) seasonFromUpstream(season upstreamSeason, seriesID string, isFa
 		ImageTags:          map[string]string{},
 		SeriesID:           m.codec.EncodeStringID(EncodedIDItem, seriesID),
 		ParentID:           m.codec.EncodeStringID(EncodedIDItem, seriesID),
-		UserData:           userDataDTO(m.codec.EncodeStringID(EncodedIDSeason, season.ContentID), season.UserData, isFavorite, nil),
+		UserData:           userDataDTO(m.codec.EncodeStringID(EncodedIDSeason, season.ContentID), true, season.UserData, isFavorite, nil),
 		ChildCount:         season.EpisodeCount,
 		RecursiveItemCount: season.EpisodeCount,
 	}
@@ -485,9 +438,10 @@ func (m *mapper) episodeFromUpstream(ep upstreamEpisode, isFavorite bool, progre
 		RunTimeTicks: runtimeTicks(ep.DurationSeconds, ep.Runtime),
 		ImageTags:    map[string]string{},
 		SeriesName:   ep.SeriesTitle,
-		UserData:     userDataDTO(m.codec.EncodeStringID(EncodedIDItem, ep.ContentID), ep.UserData, isFavorite, progress),
+		UserData:     userDataDTO(m.codec.EncodeStringID(EncodedIDItem, ep.ContentID), false, ep.UserData, isFavorite, progress),
 	}
 	applyPlayableLocation(&dto, ep.HasMediaFiles == nil || *ep.HasMediaFiles)
+	dto.ProviderIDs = providerIDMap(ep.ImdbID, ep.TmdbID, ep.TvdbID)
 	dto.IndexNumber = &ep.EpisodeNumber
 	dto.ParentIndexNumber = &ep.SeasonNumber
 	if ep.SeriesID != "" {
@@ -528,6 +482,10 @@ func (m *mapper) applySeriesImages(dto *baseItemDTO, series seriesImageSet) {
 			imageTagSeed(series.ContentID, "Primary", compatCardImageSize, series.PosterPath, series.PosterThumbhash, series.UpdatedAt),
 			series.PosterURL,
 		)
+		if dto.ParentPrimaryImageItemID == "" {
+			dto.ParentPrimaryImageItemID = dto.SeriesID
+			dto.ParentPrimaryImageTag = dto.SeriesPrimaryImageTag
+		}
 	}
 	if series.BackdropURL != "" {
 		tag := m.imageTagSigner.Tag(
@@ -541,13 +499,28 @@ func (m *mapper) applySeriesImages(dto *baseItemDTO, series seriesImageSet) {
 	}
 }
 
-func userDataDTO(itemID string, data *catalog.SeasonUserData, isFavorite bool, progress *upstreamProgress) *itemUserDataDTO {
+// applySeasonPrimaryImage points an episode's parent poster at its season,
+// as Jellyfin 12 does, when the season has a poster of its own. Otherwise the
+// series poster set by applySeriesImages stays the parent poster. The tag seed
+// matches seasonFromUpstream so the season image route accepts it.
+func (m *mapper) applySeasonPrimaryImage(dto *baseItemDTO, season seriesImageSet) {
+	if season.ContentID == "" || season.PosterURL == "" {
+		return
+	}
+	dto.ParentPrimaryImageItemID = m.codec.EncodeStringID(EncodedIDSeason, season.ContentID)
+	dto.ParentPrimaryImageTag = m.imageTagSigner.Tag(
+		imageTagSeed(season.ContentID, "Primary", compatCardImageSize, season.PosterPath, season.PosterThumbhash, season.UpdatedAt),
+		season.PosterURL,
+	)
+}
+
+func userDataDTO(itemID string, isFolder bool, data *catalog.SeasonUserData, isFavorite bool, progress *upstreamProgress) *itemUserDataDTO {
 	dto := &itemUserDataDTO{IsFavorite: isFavorite, ItemID: itemID, Key: itemID}
 
 	if data != nil {
 		pos := clampResumeSeconds(data.PositionSeconds, data.DurationSeconds)
 		dto.PlaybackPositionTicks = secondsToTicks(pos)
-		dto.PlayedPercentage = playedPercentage(pos, data.DurationSeconds, data.Played)
+		dto.PlayedPercentage = playedPercentage(pos, data.DurationSeconds)
 		dto.Played = data.Played
 		dto.UnplayedItemCount = data.UnplayedCount
 		if data.Played {
@@ -559,7 +532,7 @@ func userDataDTO(itemID string, data *catalog.SeasonUserData, isFavorite bool, p
 		pos := clampResumeSeconds(progress.PositionSeconds, progress.DurationSeconds)
 		played := dto.Played || progress.Completed
 		dto.PlaybackPositionTicks = secondsToTicks(pos)
-		dto.PlayedPercentage = playedPercentage(pos, progress.DurationSeconds, played)
+		dto.PlayedPercentage = playedPercentage(pos, progress.DurationSeconds)
 		dto.Played = played
 		if played {
 			dto.PlayCount = 1
@@ -567,18 +540,22 @@ func userDataDTO(itemID string, data *catalog.SeasonUserData, isFavorite bool, p
 		dto.LastPlayedDate = progress.UpdatedAt
 	}
 
+	// Jellyfin folders report the share of children played, so a played
+	// series or season reports 100.
+	if isFolder && dto.Played {
+		dto.PlayedPercentage = 100
+	}
+
 	return dto
 }
 
 // playedPercentage derives PlayedPercentage from the same clamped position
-// used for PlaybackPositionTicks so the two fields can never disagree. A
-// played item at rest (position 0, no resume point) reports 100 so clients
-// rendering progress from the DTO show it fully watched; a rewatch in flight
+// used for PlaybackPositionTicks so the two fields can never disagree. Like
+// Jellyfin, a video with no resume point reports 0, which omits the field,
+// even when it is played: clients that draw a bar for any positive value
+// would otherwise show a full bar on every watched item. A rewatch in flight
 // reports its live fraction.
-func playedPercentage(clampedPos, duration float64, played bool) float64 {
-	if played && clampedPos == 0 {
-		return 100
-	}
+func playedPercentage(clampedPos, duration float64) float64 {
 	if duration <= 0 {
 		return 0
 	}
@@ -842,6 +819,26 @@ func imageTagSeed(routeID, imageType, size, rawPath, thumbhash string, updatedAt
 	return strings.Join(parts, "\x00")
 }
 
+// personImageTagSeed is the signed-tag seed for a person headshot. Tags built
+// from it are minted only in responses that already passed a visible-credit
+// check, so a matching tag lets anonymous <img> requests (Jellyfin Web sends no
+// auth on image GETs) load the photo without a session. The photo path and
+// thumbhash change with the photo, so a replaced photo gets a new tag and the
+// old one stops authorizing it.
+func personImageTagSeed(routeID, photoPath, thumbhash string) string {
+	normalize := func(v string) string {
+		if v = strings.TrimSpace(v); v == "-" {
+			return ""
+		}
+		return v
+	}
+	return strings.Join([]string{"person", strings.TrimSpace(routeID), "primary", normalize(photoPath), normalize(thumbhash)}, "\x00")
+}
+
+func personPrimaryImageTag(signer *imageTagSigner, routeID, photoPath, thumbhash string) string {
+	return signer.Tag(personImageTagSeed(routeID, photoPath, thumbhash), "")
+}
+
 func tagValue(raw string) string {
 	if raw == "" {
 		return ""
@@ -964,4 +961,25 @@ func nonNilStrings(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// compatTrickplay is Jellyfin's Trickplay member: for each media source with
+// published seek-bar previews, its one width. Nil when no version has any.
+func (m *mapper) compatTrickplay(versions []catalog.FileVersion) map[string]map[string]trickplayInfoDTO {
+	var out map[string]map[string]trickplayInfoDTO
+	for _, version := range versions {
+		grid := version.Trickplay
+		if grid == nil {
+			continue
+		}
+		if out == nil {
+			out = map[string]map[string]trickplayInfoDTO{}
+		}
+		sourceID := m.codec.EncodeIntID(EncodedIDMediaSource, int64(version.FileID))
+		out[sourceID] = map[string]trickplayInfoDTO{strconv.Itoa(grid.Width): {
+			Width: grid.Width, Height: grid.Height, TileWidth: grid.TileColumns, TileHeight: grid.TileRows,
+			ThumbnailCount: grid.ThumbnailCount, Interval: grid.IntervalMS, Bandwidth: grid.Bandwidth,
+		}}
+	}
+	return out
 }

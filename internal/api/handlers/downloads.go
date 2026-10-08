@@ -20,6 +20,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/downloads"
 	"github.com/Silo-Server/silo-server/internal/httpstream"
+	"github.com/Silo-Server/silo-server/internal/netaccess"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/streamtoken"
@@ -56,6 +57,7 @@ type DownloadHandler struct {
 	nodePlanner     nodepool.DownloadPlanner
 	jwtSecret       func() string
 	proxyHTTPClient *http.Client
+	linkIssuer      DirectDownloadLinkIssuer
 	preflightMu     sync.Mutex
 	preflightCache  map[string]proxyPreflightResult
 }
@@ -85,6 +87,49 @@ func NewDownloadHandler(svc DownloadService) *DownloadHandler {
 func (h *DownloadHandler) SetProxyDelivery(planner nodepool.DownloadPlanner, jwtSecret func() string) {
 	h.nodePlanner = planner
 	h.jwtSecret = jwtSecret
+}
+
+// DirectDownloadLinkIssuer signs direct-download link tokens;
+// auth.JWTService implements it.
+type DirectDownloadLinkIssuer interface {
+	GenerateDirectDownloadLinkToken(userID int, role, sessionID, profileID string, impersonatorUserID *int, fileID int) (string, time.Time, error)
+}
+
+// ErrDirectDownloadLinksUnavailable reports that link minting is not wired:
+// no issuer, or a download service that cannot authorize without serving.
+var ErrDirectDownloadLinksUnavailable = errors.New("direct download links are not configured")
+
+// ErrDirectDownloadLinkSession reports a caller without a login session (an
+// API key). A link is bound to a session so revoking it revokes the link.
+var ErrDirectDownloadLinkSession = errors.New("direct download links require a login session")
+
+// SetDirectDownloadLinks enables CreateDirectDownloadLink.
+func (h *DownloadHandler) SetDirectDownloadLinks(issuer DirectDownloadLinkIssuer) {
+	h.linkIssuer = issuer
+}
+
+// CreateDirectDownloadLink authorizes fileID for the request's verified
+// profile exactly as a direct download would (download policy, catalog and
+// file access under the profile's scope), then mints a short-lived link token
+// carrying the session, profile and file. Nothing is served or recorded. The
+// direct-download routes authorize the request again when the link is used.
+func (h *DownloadHandler) CreateDirectDownloadLink(ctx context.Context, fileID int) (string, time.Time, error) {
+	resolver, ok := h.svc.(downloadFileResolver)
+	if !ok || h.linkIssuer == nil {
+		return "", time.Time{}, ErrDirectDownloadLinksUnavailable
+	}
+	claims := apimw.GetClaims(ctx)
+	profileID := apimw.GetProfileID(ctx)
+	if claims == nil || profileID == "" {
+		return "", time.Time{}, downloads.ErrProfileRequired
+	}
+	if claims.SessionID == "" {
+		return "", time.Time{}, ErrDirectDownloadLinkSession
+	}
+	if _, err := resolver.ResolveDirectFile(ctx, claims.UserID, fileID, "", AccessFilterFromContext(ctx, "")); err != nil {
+		return "", time.Time{}, err
+	}
+	return h.linkIssuer.GenerateDirectDownloadLinkToken(claims.UserID, claims.Role, claims.SessionID, profileID, claims.ImpersonatorUserID, fileID)
 }
 
 type downloadFileResolver interface {
@@ -446,28 +491,7 @@ func (h *DownloadHandler) handleDownloadFile(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	profileID, deviceID, _, _ := managedIdentity(r)
-	filter := requestAccessFilter(r)
-	serveCtx := downloads.WithServeAuthorized(r.Context(), func(target downloads.FileTarget) {
-		attachTransfer(r.Context(), userID, profileID, target.MediaFileID)
-	})
-	if delegate && deviceID != "" {
-		handled, err := h.redirectManagedDownload(r.Context(), w, r, userID, profileID, deviceID, id, filter)
-		if err != nil {
-			h.writeDownloadFileError(w, r, id, err)
-			return
-		}
-		if handled {
-			return
-		}
-	}
-	// Full media downloads outlive the server's absolute WriteTimeout; roll
-	// the write deadline with progress instead.
-	sw := httpstream.NewRollingDeadlineWriter(w)
-	if err := h.svc.ServeFile(serveCtx, sw, r, userID, profileID, deviceID, id, filter); err != nil {
-		if errors.Is(err, downloads.ErrResponseCommitted) {
-			return
-		}
+	if err := h.ServeDownloadFile(w, r, id, delegate); err != nil {
 		h.writeDownloadFileError(w, r, id, err)
 	}
 }
@@ -605,11 +629,19 @@ func (h *DownloadHandler) redirectToProxy(w http.ResponseWriter, r *http.Request
 		reservationKey = fmt.Sprintf("direct-%d-%d", userID, target.MediaFileID)
 	}
 	sessionID := fmt.Sprintf("download-%s-%d", reservationKey, time.Now().UnixNano())
-	plan := h.nodePlanner.PlanDownload(sessionID, target.OriginNodeGroup)
+	accessPath := netaccess.PathFromContext(r.Context())
+	plan := h.nodePlanner.PlanDownloadWith(sessionID, func(node *nodepool.Node) bool {
+		return node.ClientURLFor(accessPath) != ""
+	}, target.OriginNodeGroup)
 	if plan.ProxyNode == nil {
 		return false, nil
 	}
 	releaseReservation := func() { h.nodePlanner.ReleaseSession(sessionID) }
+	clientBase := plan.ProxyNode.ClientURLFor(accessPath)
+	if clientBase == "" {
+		releaseReservation()
+		return false, nil
+	}
 	mediaPath := target.Path
 	downloadFilename := ""
 	if target.OriginArtifactID != "" {
@@ -645,15 +677,22 @@ func (h *DownloadHandler) redirectToProxy(w http.ResponseWriter, r *http.Request
 		return false, fmt.Errorf("sign proxy download token: %w", err)
 	}
 	// The location is what the client downloads from, so it uses the proxy's
-	// client-facing URL; the cache key below stays on the canonical backend
-	// URL, which is the node's identity everywhere else.
-	location := strings.TrimRight(plan.ProxyNode.ClientURL(), "/") + "/downloads/file/" + url.PathEscape(token)
+	// client-facing URL for this access path. The preflight below dials the
+	// proxy's backend URL instead: that is the address this server reaches the
+	// node on (health sweeps, force-reload), while a client-facing origin may
+	// be unreachable from here — a tailnet origin resolves only on tailnet
+	// members, and this process need not be one. The verdict is about the
+	// proxy's ability to read the file, not about any one access path, so the
+	// cache key is the backend URL plus the target and is shared by every path.
+	tokenPath := "/downloads/file/" + url.PathEscape(token)
+	location := clientBase + tokenPath
 	targetKey := target.Path
 	if target.OriginArtifactID != "" {
 		targetKey = target.OriginNodeURL + "\x00" + target.OriginArtifactID
 	}
-	cacheKey := strings.TrimRight(plan.ProxyNode.URL, "/") + "\x00" + targetKey
-	if !h.proxyCanServe(r.Context(), cacheKey, location) {
+	backendBase := strings.TrimRight(plan.ProxyNode.URL, "/")
+	cacheKey := backendBase + "\x00" + targetKey
+	if !h.proxyCanServe(r.Context(), cacheKey, backendBase+tokenPath) {
 		releaseReservation()
 		return false, nil
 	}
@@ -668,7 +707,9 @@ func (h *DownloadHandler) redirectToProxy(w http.ResponseWriter, r *http.Request
 	return true, nil
 }
 
-func (h *DownloadHandler) proxyCanServe(ctx context.Context, cacheKey, location string) bool {
+// proxyCanServe reports whether the proxy answers a HEAD for the signed token
+// at probeURL, its backend address. Verdicts are cached briefly per cacheKey.
+func (h *DownloadHandler) proxyCanServe(ctx context.Context, cacheKey, probeURL string) bool {
 	now := time.Now()
 	h.preflightMu.Lock()
 	for key, cached := range h.preflightCache {
@@ -682,7 +723,7 @@ func (h *DownloadHandler) proxyCanServe(ctx context.Context, cacheKey, location 
 	}
 	h.preflightMu.Unlock()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, location, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, probeURL, nil)
 	if err != nil {
 		return false
 	}
@@ -793,6 +834,12 @@ func (h *DownloadHandler) HandleArtwork(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	kind := chi.URLParam(r, "kind")
+	if kind == "series_poster" {
+		// A v2-only kind; the frozen v1 route answers 404 for it before
+		// checking the download, so an inactive download still gets 404 here.
+		h.writeAssetError(w, "artwork", id, downloads.ErrAssetNotFound)
+		return
+	}
 	if err := h.svc.ServeArtwork(r.Context(), w, r, userID, profileID, deviceID, id, kind, requestAccessFilter(r)); err != nil {
 		h.writeAssetError(w, "artwork", id, err)
 		return
@@ -824,6 +871,10 @@ func (h *DownloadHandler) writeAssetError(w http.ResponseWriter, asset, id strin
 		errors.Is(err, downloads.ErrAssetNotFound),
 		errors.Is(err, catalog.ErrItemNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "Not found")
+	case errors.Is(err, downloads.ErrAssetUnavailable):
+		// The service already logged the store failure; the frozen v1
+		// answer stays the 500 it has always been.
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to serve download asset")
 	case errors.Is(err, downloads.ErrInvalidSubtitleRef):
 		writeError(w, http.StatusBadRequest, "invalid_subtitle_ref", "Invalid subtitle reference")
 	case errors.Is(err, downloads.ErrDownloadNotActive):

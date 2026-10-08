@@ -49,14 +49,23 @@ func (am *AuthMiddleware) RequireApplePushDisplayAuth(
 				return
 			}
 			if claims.ProfileID == "" {
-				writeUnauthorized(w, "Invalid or expired token")
+				writeUnauthorized(w, "Invalid or expired token", ReasonInvalidCredential)
 				return
 			}
-			valid, err := am.checkSession(r.Context(), claims.SessionID)
-			if err != nil || !valid {
-				writeUnauthorized(w, "Session is no longer valid")
+			role, active, err := am.sessionValidator.ActiveSessionRole(r.Context(), claims.SessionID)
+			if err != nil {
+				writeCredentialCheckUnavailable(w, r, err)
 				return
 			}
+			if !active {
+				writeUnauthorized(w, "Session is no longer valid", ReasonSessionInvalid)
+				return
+			}
+			// A display token lives as long as the session and is not
+			// refreshed, so a role change does not refuse it the way it
+			// refuses an access token; the request carries the current role
+			// instead of the one the token was minted with.
+			claims.Role = role
 			// Same attribution RequireAuth performs, so display fetches are
 			// not anonymous in the activity and request logs.
 			if lc := activitylog.GetLogContext(r.Context()); lc != nil {

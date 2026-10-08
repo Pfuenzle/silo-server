@@ -2,11 +2,14 @@ package plugins
 
 import (
 	"archive/zip"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"slices"
+	"sync"
 	"testing"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -43,6 +46,9 @@ func TestServiceEnsureClientRestartsOnManifestDrift(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("MetadataProviderClient() = %#v, want nil fake client", got)
+	}
+	if calls := host.startResult.(*fakePluginClient).metadataProviderCalls; calls != 1 {
+		t.Fatalf("restarted client metadata provider calls = %d, want 1", calls)
 	}
 	if len(host.stopped) != 1 || host.stopped[0] != 3 {
 		t.Fatalf("stopped installations = %#v, want [3]", host.stopped)
@@ -100,54 +106,6 @@ func TestServiceEnsureClientKeepsHealthyClientWhenInstalledManifestUnavailable(t
 	}
 }
 
-func TestServiceEnsureClientRestartsWhenInstalledManifestDiffers(t *testing.T) {
-	ctx := context.Background()
-	installedManifest := testPluginManifest(t, "silo.metadb", "0.0.36")
-	installPath := writeInstalledPluginManifest(t, installedManifest)
-
-	runningClient := &fakePluginClient{manifest: testPluginManifest(t, "silo.metadb", "0.0.34")}
-	restartedClient := &fakePluginClient{manifest: installedManifest}
-	store := newFakeServiceInstallationStore(&Installation{
-		ID:          3,
-		PluginID:    installedManifest.GetPluginId(),
-		Version:     installedManifest.GetVersion(),
-		InstallPath: installPath,
-		Enabled:     true,
-	})
-	host := &fakeServiceHost{
-		clientResult: runningClient,
-		startResult:  restartedClient,
-	}
-	service := &Service{
-		installations: store,
-		host:          host,
-	}
-
-	got, err := service.ensureClient(ctx, 3)
-	if err != nil {
-		t.Fatalf("ensureClient() returned error: %v", err)
-	}
-	if got != restartedClient {
-		t.Fatalf("ensureClient() returned %#v, want restarted client %#v", got, restartedClient)
-	}
-	if len(host.stopped) != 1 || host.stopped[0] != 3 {
-		t.Fatalf("stopped installations = %#v, want [3]", host.stopped)
-	}
-	if len(host.started) != 1 {
-		t.Fatalf("start calls = %d, want 1", len(host.started))
-	}
-	if host.started[0].Manifest.GetVersion() != "0.0.36" {
-		t.Fatalf("started manifest version = %q, want 0.0.36", host.started[0].Manifest.GetVersion())
-	}
-}
-
-func TestNewHostAdapterReturnsHost(t *testing.T) {
-	adapted := NewHostAdapter(pluginhost.NewHost(pluginhost.Config{}))
-	if adapted == nil {
-		t.Fatal("NewHostAdapter() = nil, want host adapter")
-	}
-}
-
 type fakeServiceHost struct {
 	clientResult pluginClient
 	clientErr    error
@@ -183,6 +141,8 @@ func (f *fakeServiceHost) Stop(installationID int) error {
 	return nil
 }
 
+func (f *fakeServiceHost) NextStartSeq() uint64 { return 0 }
+
 func (f *fakeServiceHost) Shutdown(context.Context) error {
 	return nil
 }
@@ -190,6 +150,7 @@ func (f *fakeServiceHost) Shutdown(context.Context) error {
 type fakePluginClient struct {
 	manifest              *pluginv1.PluginManifest
 	metadataProviderCalls int
+	metadataProviderErr   error
 }
 
 func (f *fakePluginClient) Manifest() *pluginv1.PluginManifest {
@@ -198,7 +159,7 @@ func (f *fakePluginClient) Manifest() *pluginv1.PluginManifest {
 
 func (f *fakePluginClient) MetadataProvider(string) (*pluginhost.MetadataProviderClient, error) {
 	f.metadataProviderCalls++
-	return nil, nil
+	return nil, f.metadataProviderErr
 }
 
 func (f *fakePluginClient) ImageResolver(string) (*pluginhost.ImageResolverClient, error) {
@@ -241,8 +202,15 @@ func (f *fakePluginClient) WatchSyncProvider(string) (*pluginhost.WatchSyncProvi
 	return nil, nil
 }
 
+func (f *fakePluginClient) NetworkAccessProvider(string) (*pluginhost.NetworkAccessProviderClient, error) {
+	return nil, nil
+}
+
 type fakeServiceInstallationStore struct {
-	byID             map[int]*Installation
+	byID map[int]*Installation
+	// mu guards every field: the resident supervisor reads the store from
+	// several goroutines while a test mutates it.
+	mu               sync.Mutex
 	byPluginID       map[string][]*Installation
 	createInputs     []CreateInstallationInput
 	updateIDs        []int
@@ -252,6 +220,9 @@ type fakeServiceInstallationStore struct {
 	saveArchiveErr   error
 	listCapabilities []*Capability
 	events           *[]string
+	// archives, when set, backs GetArchive for the archive cache; unset ids
+	// report ErrArchiveNotFound.
+	archives map[int]*InstallationArchive
 }
 
 func newFakeServiceInstallationStore(installations ...*Installation) *fakeServiceInstallationStore {
@@ -271,6 +242,8 @@ func newFakeServiceInstallationStore(installations ...*Installation) *fakeServic
 }
 
 func (s *fakeServiceInstallationStore) Create(_ context.Context, input CreateInstallationInput) (*Installation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	recordTestEvent(s.events, "create")
 	s.createInputs = append(s.createInputs, input)
 	id := len(s.byID) + 1
@@ -287,12 +260,16 @@ func (s *fakeServiceInstallationStore) Create(_ context.Context, input CreateIns
 }
 
 func (s *fakeServiceInstallationStore) SaveArchive(_ context.Context, installationID int, _ []byte, _ string, _ []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	recordTestEvent(s.events, "save_archive")
 	s.saveArchiveIDs = append(s.saveArchiveIDs, installationID)
 	return s.saveArchiveErr
 }
 
 func (s *fakeServiceInstallationStore) Update(_ context.Context, id int, input UpdateInstallationInput) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	recordTestEvent(s.events, "update")
 	s.updateIDs = append(s.updateIDs, id)
 	s.updateInputs = append(s.updateInputs, input)
@@ -310,10 +287,15 @@ func (s *fakeServiceInstallationStore) Update(_ context.Context, id int, input U
 	if input.Enabled != nil {
 		installation.Enabled = *input.Enabled
 	}
+	if input.Restart {
+		installation.RuntimeGeneration++
+	}
 	return nil
 }
 
 func (s *fakeServiceInstallationStore) Delete(_ context.Context, id int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	recordTestEvent(s.events, "delete")
 	s.deleteIDs = append(s.deleteIDs, id)
 	delete(s.byID, id)
@@ -321,6 +303,8 @@ func (s *fakeServiceInstallationStore) Delete(_ context.Context, id int) error {
 }
 
 func (s *fakeServiceInstallationStore) GetByID(_ context.Context, id int) (*Installation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	installation, ok := s.byID[id]
 	if !ok {
 		return nil, ErrInstallationNotFound
@@ -330,6 +314,8 @@ func (s *fakeServiceInstallationStore) GetByID(_ context.Context, id int) (*Inst
 }
 
 func (s *fakeServiceInstallationStore) List(context.Context) ([]*Installation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	result := make([]*Installation, 0, len(s.byID))
 	for _, installation := range s.byID {
 		cloned := *installation
@@ -339,6 +325,8 @@ func (s *fakeServiceInstallationStore) List(context.Context) ([]*Installation, e
 }
 
 func (s *fakeServiceInstallationStore) ListEnabled(_ context.Context) ([]*Installation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var result []*Installation
 	for _, installation := range s.byID {
 		if !installation.Enabled {
@@ -347,10 +335,13 @@ func (s *fakeServiceInstallationStore) ListEnabled(_ context.Context) ([]*Instal
 		cloned := *installation
 		result = append(result, &cloned)
 	}
+	slices.SortFunc(result, func(a, b *Installation) int { return cmp.Compare(a.ID, b.ID) })
 	return result, nil
 }
 
 func (s *fakeServiceInstallationStore) ListByPluginID(_ context.Context, pluginID string) ([]*Installation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	list := s.byPluginID[pluginID]
 	result := make([]*Installation, 0, len(list))
 	for _, installation := range list {
@@ -361,10 +352,37 @@ func (s *fakeServiceInstallationStore) ListByPluginID(_ context.Context, pluginI
 }
 
 func (s *fakeServiceInstallationStore) ListCapabilities(context.Context, int) ([]*Capability, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.listCapabilities, nil
 }
 
-func (s *fakeServiceInstallationStore) GetArchive(context.Context, int) (*InstallationArchive, error) {
+// ListEnabledWithCapabilityTypes mirrors ListCapabilities, whose fixed
+// capability list applies to every installation in the fake.
+func (s *fakeServiceInstallationStore) ListEnabledWithCapabilityTypes(ctx context.Context, capabilityTypes []string) ([]*Installation, error) {
+	matches := false
+	for _, record := range s.listCapabilities {
+		if record == nil {
+			continue
+		}
+		for _, capabilityType := range capabilityTypes {
+			if record.Type == capabilityType {
+				matches = true
+			}
+		}
+	}
+	if !matches {
+		return nil, nil
+	}
+	return s.ListEnabled(ctx)
+}
+
+func (s *fakeServiceInstallationStore) GetArchive(_ context.Context, installationID int) (*InstallationArchive, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if archive, ok := s.archives[installationID]; ok && archive != nil {
+		return archive, nil
+	}
 	return nil, ErrArchiveNotFound
 }
 

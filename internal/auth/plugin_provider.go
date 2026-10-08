@@ -2,29 +2,27 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
+	"net/url"
 	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/pluginhost"
 	"github.com/Silo-Server/silo-server/internal/plugins"
-	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
-type PluginAuthClient interface {
+type pluginAuthClient interface {
 	Authenticate(ctx context.Context, req *pluginv1.AuthenticateRequest) (*pluginv1.AuthenticateResponse, error)
 	InitAuthorize(ctx context.Context, req *pluginv1.InitAuthorizeRequest) (*pluginv1.InitAuthorizeResponse, error)
 	ExchangeCode(ctx context.Context, req *pluginv1.ExchangeCodeRequest) (*pluginv1.AuthenticateResponse, error)
 }
-
-type pluginAuthClient = PluginAuthClient
 
 type pluginAuthClientFactory func(ctx context.Context) (pluginAuthClient, error)
 
@@ -32,84 +30,65 @@ type PluginProviderConfig struct {
 	InstallationID int
 	CapabilityID   string
 	DisplayName    string
-	AuthMode       string
 	AutoProvision  bool
-	StoreProvider  userstore.UserStoreProvider
 }
 
 type PluginProvider struct {
-	config     PluginProviderConfig
-	client     pluginAuthClientFactory
-	sessions   *SessionRepository
-	users      *UserRepository
-	identities *PluginIdentityRepository
-	accounts   *AccountProvisioner
-	pool       *pgxpool.Pool
+	config   PluginProviderConfig
+	client   pluginAuthClientFactory
+	sessions *SessionRepository
+	resolver *AccountResolver
 }
 
+// NewPluginProviderWithClientFactory builds a provider whose accounts are
+// resolved by resolver (shared by every provider of one server).
 func NewPluginProviderWithClientFactory(
 	config PluginProviderConfig,
 	sessions *SessionRepository,
-	users *UserRepository,
-	pool *pgxpool.Pool,
+	resolver *AccountResolver,
 	clientFactory pluginAuthClientFactory,
 ) *PluginProvider {
 	return &PluginProvider{
-		config:     config,
-		client:     clientFactory,
-		sessions:   sessions,
-		users:      users,
-		identities: NewPluginIdentityRepository(pool),
-		accounts:   NewAccountProvisioner(users, config.StoreProvider),
-		pool:       pool,
+		config:   config,
+		client:   clientFactory,
+		sessions: sessions,
+		resolver: resolver,
 	}
+}
+
+// PluginAuthClientResolver loads the auth plugin client of one installation.
+// *plugins.Service implements it.
+type PluginAuthClientResolver interface {
+	AuthProviderClient(ctx context.Context, installationID int, capabilityID string) (*pluginhost.AuthProviderClient, error)
 }
 
 func NewPluginProvider(
 	config PluginProviderConfig,
 	sessions *SessionRepository,
-	users *UserRepository,
-	pool *pgxpool.Pool,
-	resolver interface {
-		AuthProviderClient(ctx context.Context, installationID int, capabilityID string) (*pluginhost.AuthProviderClient, error)
-	},
+	resolver *AccountResolver,
+	clients PluginAuthClientResolver,
 ) *PluginProvider {
-	return NewPluginProviderWithClientFactory(config, sessions, users, pool, func(ctx context.Context) (pluginAuthClient, error) {
-		return resolver.AuthProviderClient(ctx, config.InstallationID, config.CapabilityID)
+	return NewPluginProviderWithClientFactory(config, sessions, resolver, func(ctx context.Context) (pluginAuthClient, error) {
+		return clients.AuthProviderClient(ctx, config.InstallationID, config.CapabilityID)
 	})
 }
 
+// Authenticate is a password sign-in through the plugin (LDAP and other
+// credential providers), resolved to a Silo account.
 func (p *PluginProvider) Authenticate(ctx context.Context, creds Credentials) (*models.User, error) {
-	return p.authenticate(ctx, creds, nil)
+	user, _, err := p.authenticateCredentials(ctx, creds, 0)
+	return user, err
 }
 
-// AuthenticateAndComplete authenticates credentials and durably completes the
-// resulting login. Plugin binding state, external authorization, revocation,
-// and session creation share one transaction when authorization is enabled.
-func (p *PluginProvider) AuthenticateAndComplete(ctx context.Context, creds Credentials, session models.AuthSession) (*models.User, error) {
-	if session.ID == "" || session.ExpiresAt.IsZero() {
-		return nil, ErrInvalidCredentials
-	}
-	return p.authenticate(ctx, creds, &session)
-}
-
-func (p *PluginProvider) authenticate(ctx context.Context, creds Credentials, session *models.AuthSession) (*models.User, error) {
-	if !p.bindingEnabled(ctx) {
-		return nil, ErrInvalidCredentials
-	}
+// authenticateCredentials authenticates creds with the plugin and resolves
+// the answer: a sign-in when linkingUserID is 0 (every directory sign-in),
+// otherwise a link to that signed-in account
+// (Service.LinkCredentialsIdentity). It also answers the identity the
+// sign-in went through, for the login session it opens.
+func (p *PluginProvider) authenticateCredentials(ctx context.Context, creds Credentials, linkingUserID int) (*models.User, int64, error) {
 	client, err := p.client(ctx)
 	if err != nil {
-		slog.ErrorContext(ctx, "plugin auth client unavailable", "component", "auth", "installation_id", p.config.InstallationID, "capability_id", p.config.CapabilityID, "error", err)
-		if status.Code(err) == codes.Unauthenticated {
-			return nil, ErrInvalidCredentials
-		}
-		if errors.Is(err, ErrInvalidCredentials) || errors.Is(err, ErrUserDisabled) {
-			return nil, err
-		}
-		if errors.Is(err, plugins.ErrInstallationDisabled) {
-			return nil, ErrInvalidCredentials
-		}
-		return nil, fmt.Errorf("load plugin auth client: %w", err)
+		return nil, 0, pluginCallError(ctx, p.config.InstallationID, "load", err)
 	}
 
 	response, err := client.Authenticate(ctx, &pluginv1.AuthenticateRequest{
@@ -117,71 +96,34 @@ func (p *PluginProvider) authenticate(ctx context.Context, creds Credentials, se
 		Password: creds.Password,
 	})
 	if err != nil {
-		slog.ErrorContext(ctx, "plugin auth RPC failed", "component", "auth", "installation_id", p.config.InstallationID, "capability_id", p.config.CapabilityID, "error", err)
-		if status.Code(err) == codes.NotFound {
-			return nil, ErrAccountNotFound
-		}
-		if status.Code(err) == codes.Unauthenticated {
-			return nil, ErrInvalidCredentials
-		}
-		if errors.Is(err, ErrInvalidCredentials) || errors.Is(err, ErrUserDisabled) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("plugin auth authenticate: %w", err)
+		return nil, 0, pluginCallError(ctx, p.config.InstallationID, "authenticate", err)
 	}
-	if response.GetStatus() == pluginv1.AuthStatus_AUTH_STATUS_ACCOUNT_NOT_FOUND {
-		return nil, ErrAccountNotFound
-	}
-	if strings.TrimSpace(response.GetExternalSubject()) == "" {
-		return nil, ErrInvalidCredentials
-	}
-
-	return p.completeExternalLogin(ctx, creds, response, session)
+	return p.resolve(ctx, response, linkingUserID, false)
 }
 
 // CompleteOAuth runs the post-RPC half of plugin authentication for an
-// OAuth flow: validate the AuthenticateResponse, look up an existing
-// plugin_auth_identities row, auto-provision a new user if needed, and
-// claim immutable identity ownership. The handler calls plugin ExchangeCode itself and
-// passes the response in here.
-func (p *PluginProvider) CompleteOAuth(ctx context.Context, response *pluginv1.AuthenticateResponse) (*models.User, error) {
-	return p.completeOAuth(ctx, response, nil)
+// OAuth flow: the handler called the plugin's ExchangeCode itself and passes
+// the response in. linkingUserID is the signed-in account a linking flow
+// links to, 0 for an ordinary sign-in. It answers the account and the
+// identity the sign-in went through.
+func (p *PluginProvider) CompleteOAuth(ctx context.Context, response *pluginv1.AuthenticateResponse, linkingUserID int) (*models.User, int64, error) {
+	return p.resolve(ctx, response, linkingUserID, false)
 }
 
-// CompleteOAuthAndComplete finishes an OAuth login inside the same durable
-// transaction that reconciles external authorization and creates its session.
-func (p *PluginProvider) CompleteOAuthAndComplete(ctx context.Context, response *pluginv1.AuthenticateResponse, session models.AuthSession) (*models.User, error) {
-	if session.ID == "" || session.ExpiresAt.IsZero() {
-		return nil, ErrInvalidCredentials
+// resolve runs the plugin's answer through account resolution. network says
+// the answer is a network provider's (authenticatePeer).
+func (p *PluginProvider) resolve(ctx context.Context, response *pluginv1.AuthenticateResponse, linkingUserID int, network bool) (*models.User, int64, error) {
+	identity, err := externalIdentityFromResponse(ctx, p.config.InstallationID, response)
+	if err != nil {
+		return nil, 0, err
 	}
-	return p.completeOAuth(ctx, response, &session)
-}
-
-func (p *PluginProvider) completeOAuth(ctx context.Context, response *pluginv1.AuthenticateResponse, session *models.AuthSession) (*models.User, error) {
-	if !p.bindingEnabled(ctx) {
-		return nil, ErrInvalidCredentials
-	}
-	if strings.TrimSpace(response.GetExternalSubject()) == "" {
-		return nil, ErrInvalidCredentials
-	}
-
-	return p.completeExternalLogin(ctx, Credentials{}, response, session)
-}
-
-func (p *PluginProvider) setAuthMode(mode string) {
-	p.config.AuthMode = mode
-}
-
-func (p *PluginProvider) bindingEnabled(ctx context.Context) bool {
-	if p == nil || p.pool == nil {
-		return false
-	}
-	if strings.TrimSpace(p.config.CapabilityID) == "" {
-		return true
-	}
-	var enabled bool
-	err := p.pool.QueryRow(ctx, `SELECT enabled FROM plugin_auth_bindings WHERE plugin_installation_id = $1 AND capability_id = $2`, p.config.InstallationID, p.config.CapabilityID).Scan(&enabled)
-	return err == nil && enabled
+	return p.resolver.Resolve(ctx, ResolveInput{
+		InstallationID: p.config.InstallationID,
+		AutoProvision:  p.config.AutoProvision,
+		Network:        network,
+		Identity:       identity,
+		LinkingUserID:  linkingUserID,
+	})
 }
 
 // InstallationID exposes the plugin install this provider is bound to —
@@ -190,10 +132,6 @@ func (p *PluginProvider) InstallationID() int { return p.config.InstallationID }
 
 // CapabilityID exposes the bound capability slug (e.g. "whmcs").
 func (p *PluginProvider) CapabilityID() string { return p.config.CapabilityID }
-
-func (p *PluginProvider) SessionProviderKey() (models.SessionProviderKey, error) {
-	return models.NewPluginSessionProviderKey(p.InstallationID(), p.CapabilityID())
-}
 
 // OAuthClient returns a host-side gRPC client wrapping the plugin's
 // AuthProvider service. Used by the OAuth handler to call InitAuthorize
@@ -204,6 +142,63 @@ func (p *PluginProvider) OAuthClient(ctx context.Context) (OAuthClient, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// pluginEndSessionClient is the optional AuthProviderChecks.EndSessionUrl
+// half of a plugin client (*pluginhost.AuthProviderClient implements it).
+type pluginEndSessionClient interface {
+	EndSessionUrl(ctx context.Context, req *pluginv1.AuthEndSessionUrlRequest) (*pluginv1.AuthEndSessionUrlResponse, error)
+}
+
+// EndSessionURL asks the plugin for the provider logout URL of the
+// account's identity at this installation. Empty when the account has no
+// identity here, the plugin predates EndSessionUrl (Unimplemented), or it
+// has no end-session endpoint. Only an absolute http(s) URL is returned,
+// because the web client navigates to it.
+func (p *PluginProvider) EndSessionURL(ctx context.Context, userID int, postLogoutRedirectURI string) (string, error) {
+	if p.resolver == nil || p.resolver.pool == nil {
+		return "", nil
+	}
+	identity, err := scanIdentity(p.resolver.pool.QueryRow(ctx, `SELECT `+identityColumns+`
+		FROM plugin_auth_identities WHERE user_id = $1 AND plugin_installation_id = $2`, userID, p.config.InstallationID))
+	if err != nil {
+		if errors.Is(err, ErrIdentityNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	client, err := p.client(ctx)
+	if err != nil {
+		return "", err
+	}
+	ender, ok := client.(pluginEndSessionClient)
+	if !ok {
+		return "", nil
+	}
+	state, err := p.resolver.loadRefreshState(ctx, p.resolver.pool, identity.ID)
+	if err != nil {
+		return "", err
+	}
+	resp, err := ender.EndSessionUrl(ctx, &pluginv1.AuthEndSessionUrlRequest{
+		ExternalSubject:       identity.ExternalSubject,
+		RefreshState:          state,
+		PostLogoutRedirectUri: postLogoutRedirectURI,
+	})
+	if err != nil {
+		if status.Code(err) == codes.Unimplemented {
+			return "", nil
+		}
+		return "", err
+	}
+	raw := strings.TrimSpace(resp.GetUrl())
+	if raw == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != schemeHTTPS && parsed.Scheme != schemeHTTP) || parsed.Host == "" {
+		return "", fmt.Errorf("plugin returned an unusable end-session url")
+	}
+	return raw, nil
 }
 
 func (p *PluginProvider) ValidateSession(ctx context.Context, sessionID string) (bool, error) {
@@ -219,24 +214,27 @@ func (p *PluginProvider) ValidateSession(ctx context.Context, sessionID string) 
 	return p.sessions.IsValid(ctx, sessionID)
 }
 
-func (p *PluginProvider) lookupIdentity(ctx context.Context, externalSubject string) (*models.User, error) {
-	userID, err := p.identities.Lookup(ctx, PluginIdentityKey{
-		InstallationID:  p.config.InstallationID,
-		ExternalSubject: externalSubject,
-	})
-	if err != nil {
-		return nil, err
+func randomPluginOnlyPassword() (string, error) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
 	}
-	user, err := p.users.GetByID(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	return user, nil
+	return "plugin-only-" + hex.EncodeToString(buf), nil
 }
 
-func (p *PluginProvider) claimIdentity(ctx context.Context, externalSubject string, userID int) error {
-	return p.identities.Claim(ctx, PluginIdentityKey{
-		InstallationID:  p.config.InstallationID,
-		ExternalSubject: externalSubject,
-	}, userID)
+func sanitizeUsername(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, " ", "_")
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-' || r == '.':
+			b.WriteRune(r)
+		}
+	}
+	return strings.Trim(b.String(), "_.-")
 }

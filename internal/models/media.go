@@ -24,6 +24,13 @@ type MediaFolder struct {
 	AutoTranslateMetadata    bool   // AI-translate descriptions when providers lack this language
 	ChapterThumbnailsEnabled bool
 	IntroDetectionEnabled    bool
+	// TrickplayEnabled generates seek-bar previews for the library's video
+	// files (internal/trickplay). Off by default.
+	TrickplayEnabled bool
+	// RealtimeMonitoring is the library's real-time monitoring switch. It
+	// takes effect only while the server-wide scanner.realtime_monitoring
+	// setting is on and the library is enabled.
+	RealtimeMonitoring bool
 	// TrailerKinds is the allow-list of remote video kinds (ExtraKind values)
 	// fetched during metadata refresh for this library. Empty disables remote
 	// videos entirely.
@@ -83,6 +90,7 @@ type MediaFile struct {
 	RecapEnd                     *float64
 	PreviewStart                 *float64
 	PreviewEnd                   *float64
+	MarkerSegments               []MarkerSegment // JSONB; legacy bounds expose the first occurrence per kind
 	MarkersSource                *string
 	MarkersConfidence            *float64
 	IntroMarkersSource           *string
@@ -128,6 +136,7 @@ type MediaFile struct {
 	MultiplePPSScanMtime *time.Time `json:"-"`
 	ProbeSource          string     // arrs, local
 	ProbeUpdatedAt       *time.Time
+	ProbeFailedAt        *time.Time // last local ffprobe rejected the file; cleared by a successful probe (see ProbeRejected)
 	MatchAttemptedAt     *time.Time
 	MissingSince         *time.Time
 	FirstSeenScanRunID   string
@@ -306,6 +315,20 @@ func (f *MediaFile) AudioOnlyProbeFacts() AudioOnlyProbeFacts {
 // audio evidence keep genuine MJPEG video from being normalized away.
 func (f *MediaFile) HasLegacyAttachedPictureVideo() bool {
 	return f.AudioOnlyProbeFacts().HasLegacyAttachedPictureVideo()
+}
+
+// ProbeRejected reports whether ffprobe rejected this file and no usable
+// stream metadata exists for it: no successful probe has been recorded and
+// nothing describes a video or audio stream. Such a file cannot be played until
+// it is replaced, as opposed to a file that has simply not been probed yet.
+// Rows that still carry stream metadata from an earlier probe or an import are
+// not rejected, so a transient probe failure never hides a known-good source.
+func (f *MediaFile) ProbeRejected() bool {
+	if f == nil || f.ProbeFailedAt == nil || f.ProbeUpdatedAt != nil {
+		return false
+	}
+	return strings.TrimSpace(f.CodecVideo) == "" && strings.TrimSpace(f.CodecAudio) == "" &&
+		len(f.VideoTracks) == 0 && len(f.AudioTracks) == 0
 }
 
 // IsAudioOnly reports whether a probed file carries no playable video stream —
@@ -489,6 +512,8 @@ const (
 	PersonKindComposer  PersonKind = 6
 	PersonKindAuthor    PersonKind = 7
 	PersonKindNarrator  PersonKind = 8
+	// PersonKindCreator credits a series' creators, who are not its directors.
+	PersonKindCreator PersonKind = 9
 )
 
 // String returns the Jellyfin-compatible type string for this PersonKind.
@@ -510,6 +535,8 @@ func (k PersonKind) String() string {
 		return "Author"
 	case PersonKindNarrator:
 		return "Narrator"
+	case PersonKindCreator:
+		return "Creator"
 	default:
 		return "Unknown"
 	}
@@ -520,6 +547,8 @@ func PersonKindFromJob(job string) PersonKind {
 	switch strings.ToLower(strings.TrimSpace(job)) {
 	case "director":
 		return PersonKindDirector
+	case "creator":
+		return PersonKindCreator
 	case "writer", "screenplay", "story", "novel":
 		return PersonKindWriter
 	case "composer", "original music composer", "music":
@@ -571,17 +600,65 @@ type AudiobookSeriesMembership struct {
 }
 
 // MediaItem represents a row in the media_items table.
+// AdvisoryColumns normalizes an advisory age and its source for storage.
+//
+// The pair is all-or-nothing: an age Silo cannot attribute is an anonymous
+// number shown to a parent, and a source with no age says nothing. Whenever
+// either half is missing, both columns store NULL, so "no advisory" has one
+// spelling in the database rather than a NULL, an empty string, and a zero.
+//
+// Only movies and series store an advisory (see AdvisoryAgeApplies), so a
+// profile's advisory-age limit can never hide an item of any other type, such
+// as a title in the beta book libraries.
+//
+// Every write path funnels through here, including the COPY-based bulk import,
+// which cannot lean on a NULLIF in SQL, and the catalog-bundle imports, which
+// may carry an advisory from any source.
+func AdvisoryColumns(itemType string, age *int, source string) (*int, *string) {
+	if !AdvisoryAgeApplies(itemType) || age == nil || *age <= 0 || source == "" {
+		return nil, nil
+	}
+	return age, &source
+}
+
+// AdvisoryAgeApplies reports whether an item of itemType may carry an advisory
+// age. Only movies and series do: those are the types advisory services rate
+// and the only ones the profile advisory-age limit is meant for.
+func AdvisoryAgeApplies(itemType string) bool {
+	return itemType == advisoryItemTypeMovie || itemType == advisoryItemTypeSeries
+}
+
+// The media_items.type values that may carry an advisory age.
+const (
+	advisoryItemTypeMovie  = "movie"
+	advisoryItemTypeSeries = "series"
+)
+
 type MediaItem struct {
-	ContentID                    string // Sonyflake ID (PK)
-	Type                         string // movie, series
-	Title                        string
-	SortTitle                    string
-	DefaultMetadataLanguage      string
-	OriginalTitle                string
-	Year                         int
-	Genres                       []string
-	ContentRating                string // PG-13, TV-MA
-	Runtime                      int    // minutes
+	ContentID               string // Sonyflake ID (PK)
+	Type                    string // movie, series
+	Title                   string
+	SortTitle               string
+	DefaultMetadataLanguage string
+	OriginalTitle           string
+	Year                    int
+	Genres                  []string
+	ContentRating           string // PG-13, TV-MA
+	// AdvisoryAge is a recommended minimum viewer age from an advisory service
+	// (Common Sense Media), distinct from the certification in ContentRating.
+	// It never feeds ContentRating or content_rating_age; a profile's
+	// separate advisory-age limit (access.MaturityLimits.MaxAdvisoryAge)
+	// compares against it, and a nil age never hides a title from that limit.
+	// Nil means no advisory; the column is nullable and a stored age is always
+	// positive, since providers spell "unknown" as zero.
+	AdvisoryAge *int
+	// AdvisorySource attributes AdvisoryAge so the UI can name who recommended
+	// it. Empty when AdvisoryAge is nil.
+	AdvisorySource string
+	Runtime        int // minutes
+	// AudiobookDurationSeconds is an exact transient duration overlay loaded
+	// from active audiobook file stats for protocol adapters that use seconds.
+	AudiobookDurationSeconds     int
 	Overview                     string
 	Tagline                      string
 	RatingIMDB                   *float64

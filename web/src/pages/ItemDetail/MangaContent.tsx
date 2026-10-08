@@ -244,9 +244,11 @@ function MangaRow({
 export default function MangaContent({
   item,
   libraryId,
+  showAdvisoryAge,
 }: {
   item: ItemDetail & { type: "manga" };
   libraryId?: number;
+  showAdvisoryAge?: boolean;
 }) {
   useAmbientColor(item.poster_thumbhash);
   const { user } = useAuth();
@@ -302,18 +304,14 @@ export default function MangaContent({
           <MetadataBadges
             year={year || undefined}
             contentRating={item.content_rating || undefined}
+            advisoryAge={showAdvisoryAge ? (item.advisory_age ?? undefined) : undefined}
+            advisorySource={item.advisory_source || undefined}
             volumeCount={volumeCount}
             chapterCount={looseChapterCount}
             status={item.show_status || undefined}
           />
         }
-        scoreRow={
-          <ScoreRow
-            ratingImdb={item.rating_imdb}
-            ratingRtCritic={item.rating_rt_critic}
-            ratingRtAudience={item.rating_rt_audience}
-          />
-        }
+        scoreRow={<ScoreRow ratings={item.ratings} />}
         overview={item.overview}
         crewLine={<HeroCrewLine crew={item.crew ?? []} />}
         genres={item.genres}

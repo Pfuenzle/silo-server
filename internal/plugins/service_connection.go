@@ -9,9 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/types/known/structpb"
+
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-server/internal/pluginhost"
-	"google.golang.org/protobuf/types/known/structpb"
 )
 
 var ErrConnectionTestUnsupported = errors.New("plugin connection test unsupported")
@@ -35,7 +36,7 @@ func (e *ConnectionTestError) Unwrap() error {
 	return e.Cause
 }
 
-var runPluginConnectionCheck = func(
+func runPluginConnectionCheck(
 	ctx context.Context,
 	client pluginClient,
 	manifest *pluginv1.PluginManifest,
@@ -100,26 +101,6 @@ func (s *Service) TestGlobalConfigWithClears(
 	value map[string]any,
 	clearSecrets []string,
 ) error {
-	return s.TestGlobalConfigWithFieldClears(
-		ctx,
-		installationID,
-		key,
-		value,
-		clearSecrets,
-		nil,
-	)
-}
-
-// TestGlobalConfigWithFieldClears tests the exact prospective configuration,
-// including explicit removals of public fields and saved secrets.
-func (s *Service) TestGlobalConfigWithFieldClears(
-	ctx context.Context,
-	installationID int,
-	key string,
-	value map[string]any,
-	clearSecrets []string,
-	clearFields []string,
-) error {
 	if strings.TrimSpace(key) == "" {
 		return &ConnectionTestError{Message: "Config key is required"}
 	}
@@ -132,45 +113,13 @@ func (s *Service) TestGlobalConfigWithFieldClears(
 		return err
 	}
 
-	if value == nil {
-		value = map[string]any{}
-	}
-	submitted := value
-	publicFields, secretFields := GlobalConfigFieldSets(manifest, key)
-	secretPaths := GlobalConfigSecretPaths(manifest, key)
-	clearSet, err := validatedSecretClearSet(key, secretFields, clearSecrets)
-	if err != nil {
+	value, err = s.prepareStagedGlobalConfig(ctx, installationID, manifest, key, value, clearSecrets, func(err error) error {
 		return &ConnectionTestError{Message: err.Error(), Cause: err}
-	}
-	clearFieldSet, err := validatedPublicClearSet(key, publicFields, clearFields)
-	if err != nil {
-		return &ConnectionTestError{Message: err.Error(), Cause: err}
-	}
-	value, err = s.preserveStoredSecrets(
-		ctx,
-		installationID,
-		key,
-		value,
-		secretPaths,
-	)
+	})
 	if err != nil {
 		return err
 	}
-	for field := range clearSet {
-		delete(value, field)
-	}
-	for field := range clearFieldSet {
-		delete(value, field)
-	}
-	projection := globalConfigValidationProjection(manifest, key, value, submitted)
-	if err := ValidateGlobalConfigValue(manifest, key, projection); err != nil {
-		return &ConnectionTestError{
-			Message: err.Error(),
-			Cause:   err,
-		}
-	}
-	if _, err := requestRouterConnectionCheckCapabilityID(manifest); err == nil {
-	} else if _, err := metadataProviderConnectionCheckCapabilityID(manifest); err != nil {
+	if _, err := metadataProviderConnectionCheckCapabilityID(manifest); err != nil {
 		return err
 	}
 
@@ -182,7 +131,7 @@ func (s *Service) TestGlobalConfigWithFieldClears(
 	testInstallationID := -int(s.testConfigSeq.Add(1))
 	client, err := s.host.Start(ctx, pluginhost.StartRequest{
 		InstallationID: testInstallationID,
-		BinaryPath:     installation.InstallPath,
+		BinaryPath:     s.localInstallPath(installation),
 		Manifest:       manifest,
 		Config:         configEntries,
 	})
@@ -204,18 +153,57 @@ func (s *Service) TestGlobalConfigWithFieldClears(
 		}
 	}()
 
-	if _, err := requestRouterConnectionCheckCapabilityID(manifest); err == nil {
-		capabilityID, capabilityErr := requestRouterConnectionCheckCapabilityID(manifest)
-		if capabilityErr != nil {
-			return capabilityErr
-		}
-		requestRouter, requestErr := client.RequestRouter(capabilityID)
-		if requestErr != nil {
-			return &ConnectionTestError{Message: "Request-router connection check unavailable", Cause: requestErr}
-		}
-		return runRequestRouterConnectionCheck(ctx, requestRouter, manifest, value)
-	}
 	return runPluginConnectionCheck(ctx, client, manifest)
+}
+
+// prepareStagedGlobalConfig applies one staged global config entry the way
+// a save would, without saving it: blank secret fields keep the stored
+// secret, clearSecrets drops stored ones, emptied declared fields are
+// cleared, and the result must validate.
+// invalid wraps a rejected entry in the caller's error type.
+func (s *Service) prepareStagedGlobalConfig(
+	ctx context.Context,
+	installationID int,
+	manifest *pluginv1.PluginManifest,
+	key string,
+	value map[string]any,
+	clearSecrets []string,
+	invalid func(error) error,
+) (map[string]any, error) {
+	if value == nil {
+		value = map[string]any{}
+	}
+	clearSet, err := validatedSecretClearSet(key, GlobalConfigSecretFields(manifest, key), clearSecrets)
+	if err != nil {
+		return nil, invalid(err)
+	}
+	merged, err := s.preserveStoredSecrets(ctx, installationID, key, value, GlobalConfigSecretPaths(manifest, key))
+	if err != nil {
+		return nil, err
+	}
+	if err := applyGlobalConfigClears(manifest, key, merged, value, clearSet); err != nil {
+		return nil, invalid(err)
+	}
+	return merged, nil
+}
+
+// storedGlobalConfigs returns copies of an installation's saved global
+// config entries by key.
+func (s *Service) storedGlobalConfigs(ctx context.Context, installationID int) (map[string]map[string]any, error) {
+	configsByKey := make(map[string]map[string]any)
+	if s.configs == nil {
+		return configsByKey, nil
+	}
+	configs, err := s.configs.ListGlobalConfigs(ctx, installationID)
+	if err != nil {
+		return nil, fmt.Errorf("list plugin runtime configs for installation %d: %w", installationID, err)
+	}
+	for _, config := range configs {
+		if config != nil {
+			configsByKey[config.Key] = cloneConfigMap(config.Value)
+		}
+	}
+	return configsByKey, nil
 }
 
 func (s *Service) mergedGlobalConfigEntries(
@@ -224,21 +212,10 @@ func (s *Service) mergedGlobalConfigEntries(
 	key string,
 	value map[string]any,
 ) ([]*pluginv1.ConfigEntry, error) {
-	configsByKey := make(map[string]map[string]any)
-
-	if s.configs != nil {
-		configs, err := s.configs.ListGlobalConfigs(ctx, installationID)
-		if err != nil {
-			return nil, fmt.Errorf("list plugin runtime configs for installation %d: %w", installationID, err)
-		}
-		for _, config := range configs {
-			if config == nil {
-				continue
-			}
-			configsByKey[config.Key] = cloneConfigMap(config.Value)
-		}
+	configsByKey, err := s.storedGlobalConfigs(ctx, installationID)
+	if err != nil {
+		return nil, err
 	}
-
 	configsByKey[key] = cloneConfigMap(value)
 	return configEntriesFromValues(configsByKey, installationID)
 }

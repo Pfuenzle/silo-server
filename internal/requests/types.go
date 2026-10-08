@@ -7,19 +7,22 @@ import (
 type MediaType string
 
 const (
-	MediaTypeMovie     MediaType = "movie"
-	MediaTypeSeries    MediaType = "series"
-	MediaTypeAudiobook MediaType = "audiobook"
-	MediaTypeAll       MediaType = "all"
+	MediaTypeMovie  MediaType = "movie"
+	MediaTypeSeries MediaType = "series"
+	MediaTypeAll    MediaType = "all"
+)
+
+// Source is what created a request.
+type Source string
+
+const (
+	// SourceDirect is the Request button, or any API create.
+	SourceDirect Source = "direct"
+	// SourceWatchlist is a watchlist add of a title not in the library.
+	SourceWatchlist Source = "watchlist"
 )
 
 type Status string
-
-const (
-	SubmissionStateInFlight  = "in_flight"
-	SubmissionStateFailed    = "failed"
-	SubmissionStateFulfilled = "fulfilled"
-)
 
 const (
 	StatusPending     Status = "pending"
@@ -196,13 +199,17 @@ type Viewer struct {
 }
 
 type Settings struct {
-	Revision                  int64     `json:"-"`
-	RequestsEnabled           bool      `json:"requests_enabled"`
-	GlobalMaxRequests         int       `json:"global_max_requests"`
-	GlobalWindowDays          int       `json:"global_window_days"`
-	GlobalAutoApprovalEnabled bool      `json:"global_auto_approval_enabled"`
-	ForceDualQuality          bool      `json:"force_dual_quality"`
-	UpdatedAt                 time.Time `json:"updated_at"`
+	Revision                  int64 `json:"-"`
+	RequestsEnabled           bool  `json:"requests_enabled"`
+	GlobalMaxRequests         int   `json:"global_max_requests"`
+	GlobalWindowDays          int   `json:"global_window_days"`
+	GlobalAutoApprovalEnabled bool  `json:"global_auto_approval_enabled"`
+	ForceDualQuality          bool  `json:"force_dual_quality"`
+	// WatchlistRequests lets adding a title that is not in the library to a
+	// watchlist request it too. v2 only; the frozen v1 shape does not carry
+	// it, and a v1 settings write keeps the stored value.
+	WatchlistRequests bool      `json:"-"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type FeatureStatus struct {
@@ -215,6 +222,11 @@ type FeatureStatus struct {
 	// MissingSeasonsRequestable reports whether a series already in the
 	// library can be requested for its missing seasons (v2 only).
 	MissingSeasonsRequestable bool `json:"-"`
+	// WatchlistRequests reports that adding a title that is not in the
+	// library to the viewer's watchlist also requests it: the server and
+	// profile settings are on. The caller adds the account's permission
+	// (v2 only).
+	WatchlistRequests bool `json:"-"`
 }
 
 type UserLimit struct {
@@ -241,11 +253,7 @@ type EffectivePolicy struct {
 
 type Request struct {
 	ID                   string    `json:"id"`
-	FulfillmentKey       string    `json:"-"`
-	SubmissionState      string    `json:"-"`
-	SubmissionStartedAt  *time.Time `json:"-"`
 	Provider             string    `json:"provider"`
-	ProviderItemID       string    `json:"provider_item_id,omitempty"`
 	MediaType            MediaType `json:"media_type"`
 	TMDBID               int       `json:"tmdb_id"`
 	TVDBID               *int      `json:"tvdb_id,omitempty"`
@@ -261,23 +269,16 @@ type Request struct {
 	RequestedByProfileID string    `json:"requested_by_profile_id,omitempty"`
 	RequesterEmail       string    `json:"-"`
 	RequesterUsername    string    `json:"-"`
-	DeclineReason        string    `json:"-"`
 	// OutcomeReason is why the request was declined or withdrawn, when a
 	// reason was given. v2 only; the frozen v1 shape does not carry it.
-	OutcomeReason    string     `json:"-"`
+	OutcomeReason string `json:"-"`
+	// Source is what created the request. v2 only.
+	Source           Source     `json:"-"`
 	IntegrationKind  string     `json:"integration_kind,omitempty"`
 	IsAnime          bool       `json:"is_anime"`
 	Targets          []Target   `json:"targets,omitempty"`
 	ExternalID       string     `json:"external_id,omitempty"`
 	ExternalStatus   string     `json:"external_status,omitempty"`
-	ExternalLibraryID string    `json:"external_library_id,omitempty"`
-	ExternalDownloadID string   `json:"external_download_id,omitempty"`
-	ExternalDetail   string     `json:"external_detail,omitempty"`
-	ImportedPath     string     `json:"-"`
-	ScanRunID        string     `json:"-"`
-	SiloAudiobookID  string     `json:"silo_audiobook_id,omitempty"`
-	SiloAudiobookLink string    `json:"silo_audiobook_link,omitempty"`
-	Retryable        bool       `json:"retryable"`
 	LibraryContentID string     `json:"library_content_id,omitempty"`
 	LastError        string     `json:"last_error,omitempty"`
 	CreatedAt        time.Time  `json:"created_at"`
@@ -522,6 +523,9 @@ type CreateRequestInput struct {
 	// series request asks for the whole series and is refused once the
 	// series is in the library.
 	WholeSeries bool `json:"-"`
+	// Source records what created the request; empty means SourceDirect.
+	// Set by the watchlist path, never read from a client body.
+	Source Source `json:"-"`
 }
 
 // RequestPageKey identifies the last emitted request in descending creation order.
@@ -604,18 +608,6 @@ type FulfillmentStatus struct {
 	ExternalID      string
 	ExternalStatus  string
 	Message         string
-}
-
-type RequestLifecycle struct {
-	ExternalLibraryID  string
-	ExternalDownloadID string
-	ExternalStatus     string
-	ExternalDetail     string
-	ImportedPath       string
-	ScanRunID          string
-	SiloAudiobookID    string
-	SiloAudiobookLink  string
-	Retryable          bool
 }
 
 type ReconcileResult struct {

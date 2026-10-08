@@ -1,10 +1,12 @@
-import { MemoryRouter } from "react-router";
-import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SectionItem } from "@/api/types";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { SectionItem } from "@/api/types";
+import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { buildWatchRouteRequest } from "@/pages/watchRouteHelpers";
+import { takePlaybackIntent } from "@/player/first-frame";
 import HeroBanner from "./HeroBanner";
 import { formatHeroMetadata } from "./heroMetadata";
 
@@ -74,27 +76,6 @@ function heroMetadata(container: HTMLElement): string[] {
 }
 
 describe("formatHeroMetadata", () => {
-  it("formats episode identity, runtime, and content rating without movie-only metadata", () => {
-    expect(
-      formatHeroMetadata(
-        movieSlide({
-          type: "episode",
-          season_number: 2,
-          episode_number: 3,
-          year: 2024,
-          runtime: 42,
-          rating_imdb: 7.6,
-          genres: ["Science Fiction", "Drama"],
-          content_rating: " tv-14 ",
-        }),
-      ),
-    ).toEqual([
-      { key: "episode-identity", label: "S2 · E3" },
-      { key: "runtime", label: "42 min" },
-      { key: "content-rating", label: "TV-14" },
-    ]);
-  });
-
   it.each([Number.NaN, Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, -1, 0, 10.1])(
     "omits invalid IMDb rating %s",
     (ratingImdb) => {
@@ -125,7 +106,33 @@ describe("formatHeroMetadata", () => {
       ),
     ).toEqual([
       { key: "year", label: "2025" },
-      { key: "imdb", label: "IMDb 10.0" },
+      {
+        key: "rating",
+        label: "IMDb 10.0",
+        rating: { source: "imdb", name: "IMDb", score: 100, display: "10.0" },
+      },
+    ]);
+  });
+
+  it("falls back to the TMDB score when there is no IMDb score", () => {
+    expect(
+      formatHeroMetadata(
+        movieSlide({
+          runtime: undefined,
+          duration_seconds: undefined,
+          rating_imdb: undefined,
+          rating_tmdb: 7.25,
+          genres: [],
+          content_rating: undefined,
+        }),
+      ),
+    ).toEqual([
+      { key: "year", label: "2025" },
+      {
+        key: "rating",
+        label: "TMDB 7.3",
+        rating: { source: "tmdb", name: "TMDB", score: 72.5, display: "7.3" },
+      },
     ]);
   });
 
@@ -414,36 +421,6 @@ describe("HeroBanner", () => {
     ).toHaveLength(1);
   });
 
-  it("does not render the desktop spotlighting card", () => {
-    const markup = renderToStaticMarkup(
-      <MemoryRouter>
-        <HeroBanner
-          items={[
-            {
-              content_id: "movie-1",
-              type: "movie",
-              title: "Featured Movie",
-              year: 2025,
-              genres: ["Drama"],
-              status: "matched",
-              rating_imdb: 8.1,
-              overview: "Overview",
-              poster_url: "",
-              poster_thumbhash: "",
-              backdrop_url: "",
-              backdrop_thumbhash: "",
-              logo_url: "",
-            },
-          ]}
-        />
-      </MemoryRouter>,
-    );
-
-    expect(markup).not.toContain("Now spotlighting");
-    expect(markup).toContain("Featured Movie");
-    expect(markup).toContain("More Info");
-  });
-
   it("renders editorial metadata in the approved order and caps genres at two", () => {
     const { container } = render(
       <MemoryRouter>
@@ -677,6 +654,37 @@ describe("HeroBanner", () => {
     );
 
     expect(markup).toContain("Listen Again");
+  });
+
+  it("starts the first-frame clock under the request key the watch route rebuilds", async () => {
+    render(
+      <MemoryRouter>
+        <HeroBanner libraryId={7} items={[movieSlide()]} />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(screen.getByRole("link", { name: "Play" }));
+
+    const routeRequest = buildWatchRouteRequest("movie-1", new URLSearchParams("libraryId=7"));
+    expect(takePlaybackIntent(routeRequest.requestKey)).toEqual(expect.any(Number));
+  });
+
+  it("leaves the first-frame clock alone when the Play link opens another tab", () => {
+    render(
+      <MemoryRouter>
+        <HeroBanner libraryId={7} items={[movieSlide()]} />
+      </MemoryRouter>,
+    );
+    const play = screen.getByRole("link", { name: "Play" });
+    // The navigation itself is not under test; keep jsdom from following it.
+    play.addEventListener("click", (event) => event.preventDefault());
+
+    fireEvent.click(play, { ctrlKey: true });
+    fireEvent.click(play, { metaKey: true });
+    fireEvent.click(play, { button: 1 });
+
+    const routeRequest = buildWatchRouteRequest("movie-1", new URLSearchParams("libraryId=7"));
+    expect(takePlaybackIntent(routeRequest.requestKey)).toBeNull();
   });
 
   it("pauses the active audiobook from the hero without navigating", async () => {

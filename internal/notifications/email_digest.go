@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/telemetry"
+
 	"github.com/Silo-Server/silo-server/internal/mail"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/jackc/pgx/v5"
@@ -21,6 +23,7 @@ type emailChannel struct {
 	deliveries *DeliveryRepository
 	settings   *Settings
 	sender     mail.Sender
+	brand      *mail.BrandLoader
 	// profileName resolves a display name for the email copy; best-effort
 	// (empty on any failure). Set by NewSystem after construction.
 	profileName func(ctx context.Context, userID int, profileID string) string
@@ -75,7 +78,9 @@ func (c *emailChannel) markFailure(ctx context.Context, tx pgx.Tx, profileID str
 // send composes and sends one profile's pending notifications. The
 // destination is re-read under the claim so a mid-pass address removal fails
 // cleanly instead of sending to a stale recipient.
-func (c *emailChannel) send(ctx context.Context, tx pgx.Tx, profileID string, mode string, rows []DeliveryRow) error {
+func (c *emailChannel) send(ctx context.Context, tx pgx.Tx, profileID string, mode string, rows []DeliveryRow) (sendErr error) {
+	ctx, finishObservation := telemetry.StartDependency(ctx, "notifications", "worker", "email")
+	defer func() { finishObservation(deliveryObservationError(ctx, sendErr == nil)) }()
 	email, userID, unsubscribeToken, err := c.prefs.destinationForSend(ctx, tx, profileID)
 	if err != nil {
 		return err
@@ -97,6 +102,7 @@ func (c *emailChannel) send(ctx context.Context, tx pgx.Tx, profileID string, mo
 
 	baseURL := c.settings.EmailExternalURL(ctx)
 	opts := emailComposeOptions{
+		Brand:          c.brand.Load(ctx),
 		BaseURL:        baseURL,
 		UnsubscribeURL: emailUnsubscribeURL(baseURL, unsubscribeToken),
 	}
@@ -110,6 +116,7 @@ func (c *emailChannel) send(ctx context.Context, tx pgx.Tx, profileID string, mo
 		Subject:  content.Subject,
 		TextBody: content.Text,
 		HTMLBody: content.HTML,
+		Inline:   opts.Brand.InlineImages(),
 	}
 	if opts.UnsubscribeURL != "" {
 		// RFC 8058 one-click unsubscribe; the POST target is the same URL.
@@ -131,7 +138,7 @@ func emailUnsubscribeURL(baseURL, token string) string {
 	if baseURL == "" || token == "" {
 		return ""
 	}
-	return baseURL + "/api/v1/notifications/email/unsubscribe?token=" + token
+	return baseURL + "/api/v2/notifications/email/unsubscribe?token=" + token
 }
 
 // Errors surfaced by the email preference API layer to map to 4xx responses.

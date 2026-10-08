@@ -253,31 +253,6 @@ func TestPushDeviceFCMTokenHashIsCaseSensitive(t *testing.T) {
 	}
 }
 
-func TestPushDeviceAPNsTokenEncryptionUsesRowAAD(t *testing.T) {
-	cipher := testPushCipher(t)
-	token := strings.Repeat("a", 64)
-	ciphertext, err := cipher.Encrypt(token, pushDeviceAPNsTokenAAD("row-1"))
-	if err != nil {
-		t.Fatalf("encrypt token: %v", err)
-	}
-	if ciphertext == token || strings.Contains(ciphertext, token) {
-		t.Fatalf("ciphertext exposes token: %q", ciphertext)
-	}
-	plaintext, err := cipher.Decrypt(ciphertext, pushDeviceAPNsTokenAAD("row-1"))
-	if err != nil {
-		t.Fatalf("decrypt token: %v", err)
-	}
-	if plaintext != token {
-		t.Fatalf("plaintext = %q, want token", plaintext)
-	}
-	if _, err := cipher.Decrypt(ciphertext, pushDeviceAPNsTokenAAD("row-2")); err == nil {
-		t.Fatalf("decrypt with wrong row AAD succeeded")
-	}
-	if got, want := apnsTokenHash(strings.ToUpper(token)), apnsTokenHash(token); got != want {
-		t.Fatalf("hash should be token-case agnostic: %q != %q", got, want)
-	}
-}
-
 // newPushDeviceTestRepo connects to SILO_TEST_DATABASE_URL (skipping when
 // unset) and shadows push_devices with a session-local temp table, pinning the
 // pool to one connection so every query sees it.
@@ -312,6 +287,8 @@ func newPushDeviceTestRepo(t *testing.T) (*PushDeviceRepository, *pgxpool.Pool) 
 			apns_topic text,
 			apns_token_ciphertext text,
 			apns_token_hash text,
+			fcm_token_ciphertext text,
+			fcm_token_hash text,
 			server_device_id text NOT NULL,
 			push_mode text NOT NULL DEFAULT 'private_push',
 			enabled boolean NOT NULL DEFAULT true,
@@ -326,6 +303,18 @@ func newPushDeviceTestRepo(t *testing.T) (*PushDeviceRepository, *pgxpool.Pool) 
 		) ON COMMIT PRESERVE ROWS`); err != nil {
 		t.Fatalf("create temp push_devices table: %v", err)
 	}
+	for _, name := range []string{"20260906054410_ordered_android_push_registrations.sql", "20260906184134_ordered_apple_push_registrations.sql"} {
+		migration, err := os.ReadFile("../../migrations/sql/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ddl := strings.Split(strings.Split(string(migration), "-- +goose StatementBegin")[1], "-- +goose StatementEnd")[0]
+		ddl = strings.ReplaceAll(ddl, "CREATE TABLE public.", "CREATE TEMP TABLE ")
+		if _, err = pool.Exec(ctx, ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	return NewPushDeviceRepository(pool), pool
 }
 
@@ -372,6 +361,15 @@ func TestPushDeviceRepositoryUpsertApplePreservesStableIDs(t *testing.T) {
 	}
 	if plaintext != registration.APNsToken {
 		t.Fatalf("rotated plaintext = %q", plaintext)
+	}
+	if strings.Contains(second.APNsTokenCiphertext, registration.APNsToken) {
+		t.Fatal("stored ciphertext exposes the token")
+	}
+	if _, err := cipher.Decrypt(second.APNsTokenCiphertext, pushDeviceAPNsTokenAAD(second.ID+"-other")); err == nil {
+		t.Fatal("stored token decrypted with another row's AAD")
+	}
+	if apnsTokenHash(strings.ToUpper(registration.APNsToken)) != second.APNsTokenHash {
+		t.Fatal("APNs token hash must ignore token case")
 	}
 	if !second.Enabled || second.PushMode != PushModeInAppOnly {
 		t.Fatalf("upsert did not re-enable/update mode: %+v", second)

@@ -76,8 +76,9 @@ func TestProxyCapabilitiesPublishCapabilityHash(t *testing.T) {
 	if info.CapabilityHash == "" {
 		t.Fatal("served capability report carries no capability_hash")
 	}
-	if !slices.Contains(info.TransportFeatures, playback.TransportFeatureProgressiveRemuxRelayV1) {
-		t.Fatalf("transport features = %v, want progressive remux relay", info.TransportFeatures)
+	if !slices.Contains(info.TransportFeatures, playback.TransportFeatureProgressiveRemuxRelayV1) ||
+		!slices.Contains(info.TransportFeatures, playback.TransportFeatureThemeAudioEgressV1) {
+		t.Fatalf("transport features = %v, want progressive remux relay and theme audio egress", info.TransportFeatures)
 	}
 	served := info
 	served.CapabilityHash = ""
@@ -237,6 +238,11 @@ func TestProxyCapabilitiesReportNoHardware(t *testing.T) {
 	}
 	if len(info.Transformations) == 0 {
 		t.Fatal("no transformations advertised; the report has nothing the planner can use")
+	}
+	for _, transformation := range info.Transformations {
+		if transformation.Name == "" || transformation.RecipeVersion == "" {
+			t.Fatalf("advertised transformation is missing identity: %#v", transformation)
+		}
 	}
 
 	// The walk's smoke encodes are what this change exists to stop paying for,

@@ -1,7 +1,10 @@
+// @vitest-environment node
+
 import { describe, expect, it } from "vitest";
 
 import {
   canonicalLanguageTag,
+  canonicalLanguageWireValue,
   englishLanguageName,
   getLanguageName,
   normalizeLanguageCode,
@@ -24,10 +27,15 @@ describe("languageNames", () => {
     expect(canonicalLanguageTag("eng")).toBe("en");
     expect(canonicalLanguageTag("pt_BR")).toBe("pt-BR");
     expect(normalizeLanguageCode("fre-CA")).toBe("fr");
+    expect(canonicalLanguageWireValue("Arabic")).toBe("ar");
+    expect(canonicalLanguageWireValue("zh-Hant")).toBe("zh-Hant");
+    expect(canonicalLanguageWireValue("unknown")).toBeNull();
   });
 
   it("distinguishes an unassigned tag from a translated language name", () => {
     expect(englishLanguageName("xx")).toBeNull();
     expect(getLanguageName("xx")).toBe("Unknown language (xx)");
+    expect(getLanguageName("")).toBe("Unknown");
+    expect(getLanguageName("ENG")).toBe("English");
   });
 });

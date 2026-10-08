@@ -1,6 +1,10 @@
 package userstore
 
-import "context"
+import (
+	"context"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
 
 // UserStoreProvider returns a UserStore scoped to a specific user.
 // For SQLite, this returns a store wrapping the per-user SQLite DB from the pool.
@@ -8,6 +12,14 @@ import "context"
 type UserStoreProvider interface {
 	ForUser(ctx context.Context, userID int) (UserStore, error)
 	Close() error
+}
+
+type SectionOverrideEnumerator interface {
+	ListAllSectionOverrides(ctx context.Context) ([]SectionOverride, error)
+}
+
+type SectionProfileResetProvider interface {
+	SupportsAtomicSectionProfileReset(pool *pgxpool.Pool) bool
 }
 
 // ProvisioningCleanupProvider removes all provider-owned state for an account

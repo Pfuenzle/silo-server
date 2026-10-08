@@ -2,6 +2,7 @@ import { memo, useMemo } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import ViewTransitionLink from "@/components/ViewTransitionLink";
 import type { CastMember } from "@/api/types";
+import { usePrefetchPeople } from "@/hooks/queries/people";
 import { useCarouselEmbla } from "@/hooks/useCarouselEmbla";
 import { buildPersonCatalogHref } from "@/pages/catalogSearchParams";
 import { getInitials } from "@/lib/text";
@@ -16,9 +17,16 @@ interface CastCarouselProps {
    * full-bleed rows.
    */
   fullBleed?: boolean;
+  /** Warm person detail for the shown cast so opening one renders at once. */
+  prefetchPeople?: boolean;
 }
 
-function CastCarousel({ cast, limit = 20, fullBleed = false }: CastCarouselProps) {
+function CastCarousel({
+  cast,
+  limit = 20,
+  fullBleed = false,
+  prefetchPeople = false,
+}: CastCarouselProps) {
   const { emblaRef, canScrollPrev, canScrollNext, scrollPrev, scrollNext } = useCarouselEmbla();
   const visible = useMemo(
     () =>
@@ -33,6 +41,7 @@ function CastCarousel({ cast, limit = 20, fullBleed = false }: CastCarouselProps
 
   return (
     <div className="group/carousel relative">
+      {prefetchPeople && <PrefetchCastPeople cast={visible} />}
       {canScrollPrev && (
         <button
           type="button"
@@ -91,6 +100,15 @@ function CastCarousel({ cast, limit = 20, fullBleed = false }: CastCarouselProps
 
 export default memo(CastCarousel);
 
+function PrefetchCastPeople({ cast }: { cast: CastMember[] }) {
+  const personIds = useMemo(
+    () => cast.flatMap((member) => (member.person_id ? [member.person_id] : [])),
+    [cast],
+  );
+  usePrefetchPeople(personIds);
+  return null;
+}
+
 function CastCard({ member, href }: { member: CastMember; href: string | null }) {
   const inner = (
     <>
@@ -110,9 +128,9 @@ function CastCard({ member, href }: { member: CastMember; href: string | null })
         )}
       </div>
       <div className="px-0.5">
-        <div className="text-foreground truncate text-[13px] font-medium">{member.name}</div>
+        <div className="text-foreground truncate text-[0.8125rem] font-medium">{member.name}</div>
         {member.character ? (
-          <div className="text-muted-foreground truncate text-[11px]">{member.character}</div>
+          <div className="text-muted-foreground truncate text-[0.6875rem]">{member.character}</div>
         ) : null}
       </div>
     </>

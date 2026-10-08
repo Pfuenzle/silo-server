@@ -27,16 +27,18 @@ type RecipeCard struct {
 	TranscodeNodeURL     string    `json:"transcode_node_url,omitempty"`
 	TranscodeTransportID string    `json:"transcode_transport_id,omitempty"`
 	OriginalStartedAt    time.Time `json:"original_started_at,omitempty"`
+	StreamLocation       string    `json:"stream_location,omitempty"`
 	// Routing fields freeze the committed media-serving boundary so a token or
 	// stored card cannot lose a proxy-only assignment when it reconstructs a
 	// session on another process. Stable execution and egress identities bind
 	// the artifact to the nodes whose capacity the planner reserved; internal
 	// URLs stay out of the portable recipe.
-	RoutingWorkload        string `json:"routing_workload,omitempty"`
-	RoutingExecution       string `json:"routing_execution,omitempty"`
-	RoutingExecutionNodeID int    `json:"routing_execution_node_id,omitzero"`
-	RoutingEgress          string `json:"routing_egress,omitempty"`
-	RoutingEgressNodeID    int    `json:"routing_egress_node_id,omitempty"`
+	RoutingNetworkProvider *string `json:"routing_network_provider,omitempty"`
+	RoutingWorkload        string  `json:"routing_workload,omitempty"`
+	RoutingExecution       string  `json:"routing_execution,omitempty"`
+	RoutingExecutionNodeID int     `json:"routing_execution_node_id,omitzero"`
+	RoutingEgress          string  `json:"routing_egress,omitempty"`
+	RoutingEgressNodeID    int     `json:"routing_egress_node_id,omitempty"`
 
 	// PlayMethod discriminates which serve path reconstructs this session
 	// (direct / remux / transcode). Empty decodes as PlayTranscode for
@@ -48,6 +50,9 @@ type RecipeCard struct {
 	// re-encode vs repackage).
 	TranscodeAudio bool        `json:"transcode_audio,omitempty"`
 	RemuxDVMode    RemuxDVMode `json:"remux_dv_mode,omitempty"`
+	// RemuxResumeLeadingPictureDrop restores the best-effort leading-picture
+	// drop for a seeked progressive remux after a restart.
+	RemuxResumeLeadingPictureDrop bool `json:"remux_resume_leading_picture_drop,omitempty"`
 
 	// Client metadata mirrored from the session so admin views (client label,
 	// Jellyfin pill) survive reconstruction. Carried only by stored cards —
@@ -103,6 +108,7 @@ type RecipeCard struct {
 	SegmentDuration            int                    `json:"segment_duration"`
 	StartSegmentNumber         int                    `json:"start_segment_number"`
 	HWAccel                    string                 `json:"hw_accel,omitempty"`
+	EncoderHWAccel             string                 `json:"encoder_hw_accel,omitempty"`
 	HWDevice                   string                 `json:"hw_device,omitempty"`
 	SubtitleTrackIndex         int                    `json:"subtitle_track_index"`
 	SubtitleBurnIn             bool                   `json:"subtitle_burn_in,omitempty"`
@@ -117,6 +123,15 @@ type RecipeCard struct {
 const playMethodCopyFMP4V1 PlayMethod = streamtoken.PlayMethodCopyFMP4Transcode
 
 var ErrCopyFMP4RecipeVersionMismatch = errors.New("copy-fmp4 recipe version mismatch")
+
+// EffectiveEncoderHWAccel preserves older cards that recorded only one
+// backend, while new cards distinguish CPU encoding from GPU tone mapping.
+func (c RecipeCard) EffectiveEncoderHWAccel() string {
+	if c.EncoderHWAccel != "" {
+		return c.EncoderHWAccel
+	}
+	return c.HWAccel
+}
 
 // IsTranscodeRecipe reports whether a card is a legacy/current transcode or a
 // versioned copy-fMP4 transcode. The versioned method is deliberately distinct
@@ -197,6 +212,7 @@ func NewRecipeCard(userID int, profileID string, mediaFileID int, transcodeNodeU
 		SegmentDuration:            opts.SegmentDuration,
 		StartSegmentNumber:         opts.StartSegmentNumber,
 		HWAccel:                    opts.HWAccel,
+		EncoderHWAccel:             opts.EffectiveEncoderHWAccel(),
 		HWDevice:                   opts.HWDevice,
 		SubtitleTrackIndex:         opts.SubtitleTrackIndex,
 		SubtitleBurnIn:             opts.SubtitleBurnIn,
@@ -299,6 +315,7 @@ func (c RecipeCard) TranscodeOpts(outputDir, ffmpegPath string, logSink FFmpegLo
 		StartSegmentNumber:         c.StartSegmentNumber,
 		FFmpegPath:                 ffmpegPath,
 		HWAccel:                    c.HWAccel,
+		EncoderHWAccel:             c.EncoderHWAccel,
 		HWDevice:                   c.HWDevice,
 		SubtitleTrackIndex:         c.SubtitleTrackIndex,
 		SubtitleBurnIn:             c.SubtitleBurnIn,
@@ -349,27 +366,30 @@ func (c RecipeCard) ToClaims() streamtoken.Claims {
 		playMethod = streamtoken.PlayMethodToneMapTranscode
 	}
 	return streamtoken.Claims{
-		SessionID:              c.SessionID,
-		MediaPath:              c.InputPath,
-		OutputSubdir:           c.OutputSubdir,
-		DVProfile:              c.DVProfile,
-		AudioOnly:              c.AudioOnly,
-		PlayMethod:             playMethod,
-		TranscodeAudio:         c.TranscodeAudio,
-		RemuxDVMode:            string(c.RemuxDVMode),
-		TranscodeNode:          c.TranscodeNodeURL,
-		TranscodeTransportID:   c.TranscodeTransportID,
-		RoutingWorkload:        c.RoutingWorkload,
-		RoutingExecution:       c.RoutingExecution,
-		RoutingExecutionNodeID: c.RoutingExecutionNodeID,
-		RoutingEgress:          c.RoutingEgress,
-		RoutingEgressNodeID:    c.RoutingEgressNodeID,
-		TargetCodec:            c.TargetCodecVideo,
-		TargetRes:              c.TargetResolution,
-		AudioTrackIndex:        c.AudioTrackIndex,
-		UserID:                 c.UserID,
-		ProfileID:              c.ProfileID,
-		MediaFileID:            c.MediaFileID,
+		SessionID:                     c.SessionID,
+		MediaPath:                     c.InputPath,
+		OutputSubdir:                  c.OutputSubdir,
+		DVProfile:                     c.DVProfile,
+		AudioOnly:                     c.AudioOnly,
+		PlayMethod:                    playMethod,
+		TranscodeAudio:                c.TranscodeAudio,
+		RemuxDVMode:                   string(c.RemuxDVMode),
+		RemuxResumeLeadingPictureDrop: c.RemuxResumeLeadingPictureDrop,
+		TranscodeNode:                 c.TranscodeNodeURL,
+		TranscodeTransportID:          c.TranscodeTransportID,
+		RoutingNetworkProvider:        c.RoutingNetworkProvider,
+		StreamLocation:                c.StreamLocation,
+		RoutingWorkload:               c.RoutingWorkload,
+		RoutingExecution:              c.RoutingExecution,
+		RoutingExecutionNodeID:        c.RoutingExecutionNodeID,
+		RoutingEgress:                 c.RoutingEgress,
+		RoutingEgressNodeID:           c.RoutingEgressNodeID,
+		TargetCodec:                   c.TargetCodecVideo,
+		TargetRes:                     c.TargetResolution,
+		AudioTrackIndex:               c.AudioTrackIndex,
+		UserID:                        c.UserID,
+		ProfileID:                     c.ProfileID,
+		MediaFileID:                   c.MediaFileID,
 		OriginalStartedAtUnixNano: func() int64 {
 			if c.OriginalStartedAt.IsZero() {
 				return 0
@@ -441,61 +461,64 @@ func RecipeCardFromClaims(c *streamtoken.Claims) RecipeCard {
 		sourceRevision = tonemap.SourceRevision{MediaFileID: -1}
 	}
 	card := RecipeCard{
-		SessionID:                  c.SessionID,
-		UserID:                     c.UserID,
-		ProfileID:                  c.ProfileID,
-		MediaFileID:                c.MediaFileID,
-		TranscodeNodeURL:           c.TranscodeNode,
-		TranscodeTransportID:       c.TranscodeTransportID,
-		RoutingWorkload:            c.RoutingWorkload,
-		RoutingExecution:           c.RoutingExecution,
-		RoutingExecutionNodeID:     c.RoutingExecutionNodeID,
-		RoutingEgress:              c.RoutingEgress,
-		RoutingEgressNodeID:        c.RoutingEgressNodeID,
-		PlayMethod:                 method,
-		TranscodeAudio:             c.TranscodeAudio,
-		RemuxDVMode:                RemuxDVMode(c.RemuxDVMode),
-		InputPath:                  c.MediaPath,
-		OutputSubdir:               c.OutputSubdir,
-		DVProfile:                  c.DVProfile,
-		AudioOnly:                  c.AudioOnly,
-		SourceVideoCodec:           c.SourceVideoCodec,
-		SourceVideoProfile:         c.SourceVideoProfile,
-		SourceVideoBitDepth:        c.SourceVideoBitDepth,
-		SourceAudioChannels:        c.SourceAudioChannels,
-		SoftwareVideoDecode:        c.SoftwareVideoDecode,
-		ToneMapPolicy:              tonemap.Policy(c.ToneMapPolicy),
-		ToneMapMode:                tonemap.Mode(c.ToneMapMode),
-		ToneMapSourceKind:          tonemap.SourceKind(c.ToneMapSourceKind),
-		ToneMapRecipeVersion:       c.ToneMapRecipeVersion,
-		CopyFMP4RecipeVersion:      c.CopyFMP4RecipeVersion,
-		ToneMapPreflightRequired:   c.ToneMapPreflightRequired,
-		ToneMapSourceRevision:      sourceRevision,
-		ToneMapDVConfigPresent:     c.ToneMapDVConfigPresent,
-		ToneMapDVBLCompatIDPresent: c.ToneMapDVBLCompatIDPresent,
-		ToneMapDVBLPresent:         c.ToneMapDVBLPresent,
-		ToneMapDVRPUPresent:        c.ToneMapDVRPUPresent,
-		VideoBitstreamFilter:       c.VideoBitstreamFilter,
-		VideoSampleEntry:           c.VideoSampleEntry,
-		CopyVideoMPEGTS:            c.CopyVideoMPEGTS,
-		SeekSeconds:                c.SeekSeconds,
-		StreamOriginSeconds:        c.StreamOriginSeconds,
-		CopySeekAnchorResolved:     c.CopySeekAnchorResolved,
-		TargetResolution:           c.TargetRes,
-		TargetCodecVideo:           c.TargetCodec,
-		TargetCodecAudio:           c.TargetCodecAudio,
-		TargetAudioChannels:        c.TargetAudioChannels,
-		TargetAudioBitrateKbps:     c.TargetAudioBitrateKbps,
-		SegmentDuration:            c.SegmentDuration,
-		StartSegmentNumber:         c.StartSegmentNumber,
-		SubtitleTrackIndex:         c.SubtitleTrackIndex,
-		SubtitleBurnIn:             c.SubtitleBurnIn,
-		SubtitleCodec:              c.SubtitleCodec,
-		AudioTrackIndex:            c.AudioTrackIndex,
-		TargetBitrateKbps:          c.TargetBitrateKbps,
-		TotalDuration:              c.TotalDuration,
-		FastStart:                  c.FastStart,
-		ThrottleSeconds:            c.ThrottleSeconds,
+		SessionID:                     c.SessionID,
+		UserID:                        c.UserID,
+		ProfileID:                     c.ProfileID,
+		MediaFileID:                   c.MediaFileID,
+		TranscodeNodeURL:              c.TranscodeNode,
+		TranscodeTransportID:          c.TranscodeTransportID,
+		RoutingNetworkProvider:        c.RoutingNetworkProvider,
+		StreamLocation:                c.StreamLocation,
+		RoutingWorkload:               c.RoutingWorkload,
+		RoutingExecution:              c.RoutingExecution,
+		RoutingExecutionNodeID:        c.RoutingExecutionNodeID,
+		RoutingEgress:                 c.RoutingEgress,
+		RoutingEgressNodeID:           c.RoutingEgressNodeID,
+		PlayMethod:                    method,
+		TranscodeAudio:                c.TranscodeAudio,
+		RemuxDVMode:                   RemuxDVMode(c.RemuxDVMode),
+		RemuxResumeLeadingPictureDrop: c.RemuxResumeLeadingPictureDrop,
+		InputPath:                     c.MediaPath,
+		OutputSubdir:                  c.OutputSubdir,
+		DVProfile:                     c.DVProfile,
+		AudioOnly:                     c.AudioOnly,
+		SourceVideoCodec:              c.SourceVideoCodec,
+		SourceVideoProfile:            c.SourceVideoProfile,
+		SourceVideoBitDepth:           c.SourceVideoBitDepth,
+		SourceAudioChannels:           c.SourceAudioChannels,
+		SoftwareVideoDecode:           c.SoftwareVideoDecode,
+		ToneMapPolicy:                 tonemap.Policy(c.ToneMapPolicy),
+		ToneMapMode:                   tonemap.Mode(c.ToneMapMode),
+		ToneMapSourceKind:             tonemap.SourceKind(c.ToneMapSourceKind),
+		ToneMapRecipeVersion:          c.ToneMapRecipeVersion,
+		CopyFMP4RecipeVersion:         c.CopyFMP4RecipeVersion,
+		ToneMapPreflightRequired:      c.ToneMapPreflightRequired,
+		ToneMapSourceRevision:         sourceRevision,
+		ToneMapDVConfigPresent:        c.ToneMapDVConfigPresent,
+		ToneMapDVBLCompatIDPresent:    c.ToneMapDVBLCompatIDPresent,
+		ToneMapDVBLPresent:            c.ToneMapDVBLPresent,
+		ToneMapDVRPUPresent:           c.ToneMapDVRPUPresent,
+		VideoBitstreamFilter:          c.VideoBitstreamFilter,
+		VideoSampleEntry:              c.VideoSampleEntry,
+		CopyVideoMPEGTS:               c.CopyVideoMPEGTS,
+		SeekSeconds:                   c.SeekSeconds,
+		StreamOriginSeconds:           c.StreamOriginSeconds,
+		CopySeekAnchorResolved:        c.CopySeekAnchorResolved,
+		TargetResolution:              c.TargetRes,
+		TargetCodecVideo:              c.TargetCodec,
+		TargetCodecAudio:              c.TargetCodecAudio,
+		TargetAudioChannels:           c.TargetAudioChannels,
+		TargetAudioBitrateKbps:        c.TargetAudioBitrateKbps,
+		SegmentDuration:               c.SegmentDuration,
+		StartSegmentNumber:            c.StartSegmentNumber,
+		SubtitleTrackIndex:            c.SubtitleTrackIndex,
+		SubtitleBurnIn:                c.SubtitleBurnIn,
+		SubtitleCodec:                 c.SubtitleCodec,
+		AudioTrackIndex:               c.AudioTrackIndex,
+		TargetBitrateKbps:             c.TargetBitrateKbps,
+		TotalDuration:                 c.TotalDuration,
+		FastStart:                     c.FastStart,
+		ThrottleSeconds:               c.ThrottleSeconds,
 	}
 	if c.OriginalStartedAtUnixNano != 0 {
 		card.OriginalStartedAt = time.Unix(0, c.OriginalStartedAtUnixNano).UTC()

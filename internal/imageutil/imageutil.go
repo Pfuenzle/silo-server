@@ -22,6 +22,13 @@ const (
 	thumbhashSourceDimension = 100
 )
 
+// libvips threading: bimg's package init pins libvips to a single thread per
+// operation (vips_concurrency_set(1)) unless VIPS_CONCURRENCY is set in the
+// environment. Every caller in Silo runs encodes from its own worker pool, so
+// that pool is the only source of parallelism and the pools are sized per
+// CPU core; see tasks.imageCacheWorkerCount. Do not raise VIPS_CONCURRENCY
+// in deployments without lowering those pools, or the host oversubscribes.
+
 // MaxCachedOriginalDimension caps the longest edge of a cached "original"
 // variant. Provider artwork wider than this is downscaled on ingest, so a
 // client asking for the original size never receives more pixels than this.
@@ -101,6 +108,65 @@ func GenerateVariants(data []byte, widths []int) (*VariantResult, error) {
 	}
 
 	return &VariantResult{Variants: variants, Ext: ".webp"}, nil
+}
+
+// EncodeWebPWidth re-encodes the source image as a single WebP no wider than
+// width, with metadata stripped. It is the "w<width>" rung of GenerateVariants
+// for callers that store that one variant and no original. Narrower sources
+// keep their width.
+func EncodeWebPWidth(data []byte, width int) ([]byte, error) {
+	size, err := bimg.NewImage(data).Size()
+	if err != nil {
+		return nil, fmt.Errorf("imageutil: invalid image: %w", err)
+	}
+	opts := bimg.Options{
+		Type:          bimg.WEBP,
+		Quality:       webpQuality,
+		StripMetadata: true,
+	}
+	if size.Width > width {
+		opts.Width = width
+	}
+	out, err := bimg.NewImage(data).Process(opts)
+	if err != nil {
+		return nil, fmt.Errorf("imageutil: resize to w%d: %w", width, err)
+	}
+	return out, nil
+}
+
+// EncodePNGWithin re-encodes the source image as a PNG that fits within
+// maxWidth×maxHeight, keeping its aspect ratio and never upscaling, and
+// returns the encoded dimensions. Email uses it: unlike WebP, PNG renders in
+// every mail client.
+func EncodePNGWithin(data []byte, maxWidth, maxHeight int) (out []byte, width, height int, err error) {
+	size, err := bimg.NewImage(data).Size()
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("imageutil: invalid image: %w", err)
+	}
+	if size.Width <= 0 || size.Height <= 0 {
+		return nil, 0, 0, fmt.Errorf("imageutil: invalid image size %dx%d", size.Width, size.Height)
+	}
+	opts := bimg.Options{
+		Type:          bimg.PNG,
+		StripMetadata: true,
+	}
+	// Constrain only the binding edge so libvips keeps the aspect ratio.
+	if size.Width*maxHeight >= size.Height*maxWidth {
+		if size.Width > maxWidth {
+			opts.Width = maxWidth
+		}
+	} else if size.Height > maxHeight {
+		opts.Height = maxHeight
+	}
+	out, err = bimg.NewImage(data).Process(opts)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("imageutil: encode png: %w", err)
+	}
+	outSize, err := bimg.NewImage(out).Size()
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("imageutil: read png size: %w", err)
+	}
+	return out, outSize.Width, outSize.Height, nil
 }
 
 // GenerateSquareVariants center-crops the source image to a square and returns

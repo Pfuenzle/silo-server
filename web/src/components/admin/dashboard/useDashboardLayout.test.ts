@@ -3,6 +3,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { setAccessToken, setProfileId, setProfileToken } from "@/api/client";
 import type { AdminDashboardLayoutResponse } from "@/api/types";
 import { DASHBOARD_WIDGETS, DEFAULT_LAYOUT } from "./registry";
 import {
@@ -16,17 +17,27 @@ import type { DashboardLayoutEntry } from "./types";
 const ADMIN_USER_ID = 1;
 
 const mocks = vi.hoisted(() => ({
-  query: { data: undefined as AdminDashboardLayoutResponse | undefined, isSuccess: false },
+  query: {
+    data: undefined as (AdminDashboardLayoutResponse & { etag: string }) | undefined,
+    isSuccess: false,
+  },
   save: vi.fn(),
   reset: vi.fn(),
   userId: 1,
 }));
 
-vi.mock("@/hooks/queries/admin/dashboardLayout", () => ({
-  useAdminDashboardLayout: () => mocks.query,
-  useSaveAdminDashboardLayout: () => ({ mutate: mocks.save }),
-  useResetAdminDashboardLayout: () => ({ mutate: mocks.reset }),
-}));
+vi.mock("@/hooks/queries/admin/dashboardLayout", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/hooks/queries/admin/dashboardLayout")>();
+  const mutateCaptured = (
+    intent: import("@/hooks/queries/admin/dashboardLayout").DashboardLayoutSaveIntent,
+  ) => mocks.save(intent.layout);
+  return {
+    ...actual,
+    useAdminDashboardLayout: () => mocks.query,
+    useSaveAdminDashboardLayout: () => ({ mutate: mocks.save, mutateCaptured }),
+    useResetAdminDashboardLayout: () => ({ mutate: mocks.reset }),
+  };
+});
 
 // The layout cache is keyed by the signed-in account, so every test needs an
 // authenticated user; `mocks.userId` is the account the hook sees.
@@ -40,13 +51,13 @@ function storageKey(userId: number = mocks.userId): string {
 
 function serverLayout(entries: unknown, updatedAt = "2026-08-26T10:00:00Z") {
   mocks.query = {
-    data: { layout: { version: 1, entries }, updated_at: updatedAt },
+    data: { etag: '"layout-1"', layout: { version: 1, entries }, updated_at: updatedAt },
     isSuccess: true,
   };
 }
 
 function serverNoLayout() {
-  mocks.query = { data: { layout: null, updated_at: null }, isSuccess: true };
+  mocks.query = { data: { etag: '"layout-1"', layout: null, updated_at: null }, isSuccess: true };
 }
 
 function readStored(userId?: number): { version: number; entries: DashboardLayoutEntry[] } {
@@ -74,18 +85,13 @@ function hiddenWidgetIds(...alsoRemoved: string[]): string[] {
 describe("useDashboardLayout", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    setAccessToken("synthetic-admin");
+    setProfileId("profile-a");
+    setProfileToken("pin-a");
     mocks.userId = ADMIN_USER_ID;
     mocks.query = { data: undefined, isSuccess: false };
     mocks.save.mockReset();
     mocks.reset.mockReset();
-  });
-
-  it("uses the default layout when storage is empty", () => {
-    const { result } = renderHook(() => useDashboardLayout());
-
-    expect(result.current.entries).toEqual(DEFAULT_LAYOUT);
-    expect(result.current.hiddenWidgets.map((w) => w.id)).toEqual(hiddenWidgetIds());
-    expect(result.current.isCustomizing).toBe(false);
   });
 
   it("falls back to the default layout on corrupt JSON", () => {
@@ -268,21 +274,6 @@ describe("useDashboardLayout", () => {
   });
 
   // Picking a window is an everyday viewing action, not an arrangement one.
-  it("setWidgetRange works outside customize mode", () => {
-    writeStored([{ id: "top-titles", span: 6, rows: 3, range: "week" }]);
-    const { result } = renderHook(() => useDashboardLayout());
-
-    expect(result.current.isCustomizing).toBe(false);
-
-    act(() => {
-      result.current.setWidgetRange("top-titles", "month");
-    });
-
-    expect(result.current.entries).toEqual([
-      { id: "top-titles", span: 6, rows: 3, range: "month" },
-    ]);
-    expect(readStored().entries).toEqual([{ id: "top-titles", span: 6, rows: 3, range: "month" }]);
-  });
 
   it("setWidgetRange ignores a window the widget does not offer", () => {
     writeStored([
@@ -304,9 +295,23 @@ describe("useDashboardLayout", () => {
 
   it("round-trips a chosen window through localStorage", () => {
     const first = renderHook(() => useDashboardLayout());
+    expect(first.result.current.isCustomizing).toBe(false);
     act(() => {
       first.result.current.setWidgetRange("egress-24h", "month");
       first.result.current.setWidgetRange("top-profiles", "day");
+      first.result.current.setWidgetRange("top-titles", "month");
+    });
+    expect(first.result.current.entries).toContainEqual({
+      id: "top-titles",
+      span: 6,
+      rows: 3,
+      range: "month",
+    });
+    expect(readStored().entries).toContainEqual({
+      id: "top-titles",
+      span: 6,
+      rows: 3,
+      range: "month",
     });
     const saved = first.result.current.entries;
     first.unmount();
@@ -442,6 +447,10 @@ describe("useDashboardLayout", () => {
   it("removeWidget hides the widget and persists", () => {
     const { result } = renderHook(() => useDashboardLayout());
 
+    expect(result.current.entries).toEqual(DEFAULT_LAYOUT);
+    expect(result.current.hiddenWidgets.map((w) => w.id)).toEqual(hiddenWidgetIds());
+    expect(result.current.isCustomizing).toBe(false);
+
     act(() => {
       result.current.removeWidget("top-titles");
     });
@@ -559,6 +568,9 @@ describe("useDashboardLayout", () => {
   });
 
   it("resetLayout restores the defaults and clears storage", () => {
+    setAccessToken("synthetic-admin");
+    setProfileId("profile-a");
+    setProfileToken("pin-a");
     const { result } = renderHook(() => useDashboardLayout());
 
     act(() => {
@@ -602,6 +614,9 @@ describe("useDashboardLayout", () => {
 describe("useDashboardLayout server persistence", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    setAccessToken("synthetic-admin");
+    setProfileId("profile-a");
+    setProfileToken("pin-a");
     mocks.userId = ADMIN_USER_ID;
     mocks.query = { data: undefined, isSuccess: false };
     mocks.save.mockReset();
@@ -661,7 +676,11 @@ describe("useDashboardLayout server persistence", () => {
   it("keeps the local layout when the server document is not a v1 layout", () => {
     writeStored([{ id: "users", span: 5, rows: 4 }]);
     mocks.query = {
-      data: { layout: { version: 99, entries: [] }, updated_at: "2026-08-26T10:00:00Z" },
+      data: {
+        etag: '"layout-1"',
+        layout: { version: 99, entries: [] },
+        updated_at: "2026-08-26T10:00:00Z",
+      },
       isSuccess: true,
     };
 
@@ -716,6 +735,7 @@ describe("useDashboardLayout server persistence", () => {
       { id: "libraries", span: 7, rows: 4 },
       { id: "users", span: 5, rows: 4 },
     ]);
+    serverLayout(readStored().entries);
     const { result } = renderHook(() => useDashboardLayout());
 
     act(() => {
@@ -738,32 +758,37 @@ describe("useDashboardLayout server persistence", () => {
     });
   });
 
-  it("flushes a queued save when the dashboard unmounts", () => {
-    vi.useFakeTimers();
+  it("resetLayout refuses an obsolete authority callback before local reset", () => {
+    setAccessToken("synthetic-admin");
+    setProfileId("profile-a");
+    setProfileToken("pin-a");
     writeStored([{ id: "users", span: 5, rows: 4 }]);
-    const { result, unmount } = renderHook(() => useDashboardLayout());
-
-    act(() => {
-      result.current.resizeWidget("users", { span: 6, rows: 5 });
-    });
-    expect(mocks.save).not.toHaveBeenCalled();
-
-    unmount();
-
-    expect(mocks.save).toHaveBeenCalledTimes(1);
-    expect(mocks.save).toHaveBeenCalledWith({
-      version: 1,
-      entries: [{ id: "users", span: 6, rows: 5 }],
-    });
+    const { result } = renderHook(() => useDashboardLayout());
+    const prior = result.current.entries;
+    const reset = result.current.resetLayout;
+    act(() => setProfileToken("pin-b"));
+    act(() => reset());
+    expect(mocks.reset).not.toHaveBeenCalled();
+    expect(result.current.entries).toEqual(prior);
+    expect(window.localStorage.getItem(storageKey())).not.toBeNull();
   });
 
   it("resetLayout deletes the server layout and drops the queued save", () => {
+    setAccessToken("synthetic-admin");
+    setProfileId("profile-a");
+    setProfileToken("pin-a");
     vi.useFakeTimers();
-    writeStored([{ id: "users", span: 5, rows: 4 }]);
+    writeStored(DEFAULT_LAYOUT);
+    serverLayout(DEFAULT_LAYOUT);
     const { result } = renderHook(() => useDashboardLayout());
 
     act(() => {
-      result.current.resizeWidget("users", { span: 6 });
+      result.current.removeWidget("users");
+      result.current.resizeWidget("libraries", { span: 12, rows: 6 });
+    });
+    expect(result.current.entries).not.toEqual(DEFAULT_LAYOUT);
+
+    act(() => {
       result.current.resetLayout();
     });
 
@@ -783,6 +808,9 @@ describe("useDashboardLayout account scoping", () => {
 
   beforeEach(() => {
     window.localStorage.clear();
+    setAccessToken("synthetic-admin");
+    setProfileId("profile-a");
+    setProfileToken("pin-a");
     mocks.userId = ADMIN_USER_ID;
     mocks.query = { data: undefined, isSuccess: false };
     mocks.save.mockReset();

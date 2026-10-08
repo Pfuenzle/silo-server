@@ -1,19 +1,25 @@
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Outlet } from "react-router";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 let appInitialEntries = ["/catalog?source=query&q=heat"];
 let latestNavigateTo: string | null = null;
-let appProfile: { id: string } | null = { id: "profile-1" };
+let appProfile: { id: string; is_primary?: boolean } | null = { id: "profile-1" };
+let appUser: { id: number; username: string; role: string } = {
+  id: 1,
+  username: "alex",
+  role: "admin",
+};
 
 const mockUseCatalogWindow = vi.fn();
 const mockUseCatalogFilters = vi.fn();
 const mockItemGrid = vi.fn();
 const mockUseCanRequest = vi.fn();
 const mockUseRequestSearch = vi.fn();
+const mockUsePersonSearch = vi.fn();
 
 vi.mock("react-router", async () => {
   const actual = await vi.importActual<typeof import("react-router")>("react-router");
@@ -39,10 +45,22 @@ vi.mock("react-router", async () => {
   };
 });
 
+// Collection pages read the collection to decide what to offer; every other
+// request answers like an unreachable server.
+vi.mock("@/api/v2/request", async () => (await import("@/test/v2Recorder")).mockV2Request());
+
 vi.mock("@/hooks/queries/catalog", () => ({
   useCatalogWindow: (...args: unknown[]) => mockUseCatalogWindow(...args),
   useCatalogFilters: (...args: unknown[]) => mockUseCatalogFilters(...args),
   useCatalogMetadataFilters: (...args: unknown[]) => mockUseCatalogFilters(...args),
+}));
+
+vi.mock("@/hooks/queries/shuffles", () => ({
+  useStartShuffle: () => ({ startShuffle: vi.fn(), isStarting: false }),
+}));
+
+vi.mock("@/hooks/queries/personSearch", () => ({
+  usePersonSearch: (...args: unknown[]) => mockUsePersonSearch(...args),
 }));
 
 vi.mock("@/hooks/useCanRequest", () => ({
@@ -51,6 +69,11 @@ vi.mock("@/hooks/useCanRequest", () => ({
 
 vi.mock("@/hooks/queries/useRequests", () => ({
   useRequestSearch: (...args: unknown[]) => mockUseRequestSearch(...args),
+  useRequestFeatureStatus: () => ({ data: undefined }),
+}));
+
+vi.mock("@/hooks/queries/watchlistTitles", () => ({
+  useWatchlistTitles: () => ({ data: undefined, isLoading: false, isError: false }),
 }));
 
 vi.mock("@/components/RequestToAddSection", () => ({
@@ -74,7 +97,7 @@ vi.mock("@/components/RequestToAddSection", () => ({
 vi.mock("@/hooks/useAuth", () => ({
   AuthProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
   useAuth: () => ({
-    user: { id: 1, username: "alex", role: "admin" },
+    user: appUser,
     profile: appProfile,
     loading: false,
     setupLoading: false,
@@ -85,7 +108,7 @@ vi.mock("@/hooks/useAuth", () => ({
     clearProfile: vi.fn(),
   }),
   useOptionalAuth: () => ({
-    user: { id: 1, username: "alex", role: "admin" },
+    user: appUser,
     profile: appProfile,
     loading: false,
     setupLoading: false,
@@ -107,6 +130,15 @@ vi.mock("@/components/ErrorBoundary", () => ({
 
 vi.mock("@/components/ui/sonner", () => ({
   Toaster: () => null,
+}));
+
+// The playback chrome reads its snapshot store through useSyncExternalStore
+// with no server snapshot, so a static render of the app shell can't include
+// it. Nothing on the catalog page depends on it.
+vi.mock("@/playback/WatchPlaybackChrome", () => ({
+  WatchPlaybackProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+  WatchPlaybackHost: () => null,
+  WatchPlaybackBar: () => null,
 }));
 
 vi.mock("@/components/Layout", () => ({
@@ -150,7 +182,7 @@ vi.mock("@/pages/Profiles", () => stubPage("Profiles"));
 vi.mock("@/pages/LibraryPage", () => stubPage("Library"));
 vi.mock("@/pages/ItemDetail/index", () => stubPage("Item detail"));
 vi.mock("@/pages/Collections", () => stubPage("Collections"));
-vi.mock("@/pages/CollectionEditor", () => stubPage("Collection editor"));
+vi.mock("@/pages/CollectionEditorPage", () => stubPage("Collection editor"));
 vi.mock("@/pages/AdminDashboard", () => stubPage("Admin dashboard"));
 vi.mock("@/pages/AdminActivity", () => stubPage("Admin activity"));
 vi.mock("@/pages/AdminLogs", () => stubPage("Admin logs"));
@@ -158,9 +190,8 @@ vi.mock("@/pages/AdminUsers", () => stubPage("Admin users"));
 vi.mock("@/pages/AdminLibraries", () => stubPage("Admin libraries"));
 vi.mock("@/pages/admin-settings/AdminSettingsLayout", () => stubPage("Admin settings"));
 vi.mock("@/pages/AdminNodes", () => stubPage("Admin nodes"));
-vi.mock("@/pages/AdminSections", () => stubPage("Admin sections"));
+vi.mock("@/pages/AdminHomeRows", () => stubPage("Admin home rows"));
 vi.mock("@/pages/AdminCollections", () => stubPage("Admin collections"));
-vi.mock("@/pages/AdminCollectionEditor", () => stubPage("Admin collection editor"));
 vi.mock("@/pages/AdminPlaybackHistory", () => stubPage("Admin playback history"));
 vi.mock("@/pages/AdminMaintenance", () => stubPage("Admin maintenance"));
 vi.mock("@/pages/AdminApiKeys", () => stubPage("Admin api keys"));
@@ -184,42 +215,140 @@ vi.mock("@/pages/settings/HistoryImportSettings", () => stubPage("History import
 vi.mock("@/pages/settings/WebhookSyncSettings", () => stubPage("Webhook sync settings"));
 vi.mock("@/pages/settings/SubtitleAppearanceSettings", () => stubPage("Subtitle appearance"));
 vi.mock("@/pages/settings/HomeScreenSettings", () => stubPage("Home screen settings"));
-vi.mock("@/pages/settings/PluginSettings", () => stubPage("Plugin settings"));
 vi.mock("@/pages/WatchRoute", () => stubPage("Watch"));
 
 import App from "../App";
+import { PERSONAL_SCOPE, SERVER_SCOPE } from "@/lib/collections/scope";
+import { queryClient as appQueryClient } from "@/lib/query-client";
+import { v2Recorder } from "@/test/v2Recorder";
+import getAdminCollectionOk from "../../../contracts/api/v2/fixtures/get_admin_collection_ok.json";
+import getCollectionOk from "../../../contracts/api/v2/fixtures/get_collection_ok.json";
+import listProfilesOk from "../../../contracts/api/v2/fixtures/list_profiles_ok.json";
+import {
+  buildLibraryCollectionCatalogHref,
+  buildUserCollectionCatalogHref,
+} from "./catalogSearchParams";
+
+function resetCatalogMocks() {
+  appInitialEntries = ["/catalog?source=query&q=heat"];
+  latestNavigateTo = null;
+  appProfile = { id: "profile-1" };
+  appUser = { id: 1, username: "alex", role: "admin" };
+  v2Recorder.reset();
+  mockUseCatalogWindow.mockReset();
+  mockUseCatalogFilters.mockReset();
+  mockItemGrid.mockReset();
+  mockUseCanRequest.mockReset();
+  mockUseRequestSearch.mockReset();
+  mockUsePersonSearch.mockReset();
+  mockUsePersonSearch.mockReturnValue({ data: [], isLoading: false, isError: false });
+  mockUseCanRequest.mockReturnValue({
+    discoveryEnabled: false,
+    isResolving: false,
+    submitDisabledReason: null,
+  });
+  mockUseRequestSearch.mockReturnValue({ data: undefined, isLoading: false, isError: false });
+
+  mockUseCatalogWindow.mockReturnValue({
+    data: {
+      title: "Heat Search",
+      totalItems: 1,
+      pages: new Map([[0, [{ content_id: "movie-1", title: "Heat", type: "movie" }]]]),
+    },
+    isLoading: false,
+    isError: false,
+    refetch: vi.fn(),
+  });
+  mockUseCatalogFilters.mockReturnValue({
+    data: { genres: ["Drama"], content_ratings: ["R"] },
+    isLoading: false,
+  });
+}
 
 describe("Catalog page", () => {
-  beforeEach(() => {
-    appInitialEntries = ["/catalog?source=query&q=heat"];
-    latestNavigateTo = null;
-    appProfile = { id: "profile-1" };
-    mockUseCatalogWindow.mockReset();
-    mockUseCatalogFilters.mockReset();
-    mockItemGrid.mockReset();
-    mockUseCanRequest.mockReset();
-    mockUseRequestSearch.mockReset();
-    mockUseCanRequest.mockReturnValue({
-      discoveryEnabled: false,
-      isResolving: false,
-      submitDisabledReason: null,
+  beforeAll(async () => {
+    // Catalog is a lazy route, and a static render cannot wait for its chunk.
+    // Import the page first so the slow module load happens once, outside any
+    // render. The first render below then starts React.lazy on a cached
+    // module, and the next one shows the page rather than the route fallback.
+    await import("@/pages/Catalog");
+    resetCatalogMocks();
+    const renderApp = () =>
+      renderToStaticMarkup(
+        <QueryClientProvider client={new QueryClient()}>
+          <App />
+        </QueryClientProvider>,
+      );
+    renderApp();
+    await vi.waitFor(() => expect(renderApp()).not.toContain("Loading page"), {
+      timeout: 5_000,
     });
-    mockUseRequestSearch.mockReturnValue({ data: undefined, isLoading: false, isError: false });
+  }, 15_000);
 
+  beforeEach(() => {
+    resetCatalogMocks();
+  });
+
+  it("offers actor and director results with exact person links when no titles match", () => {
     mockUseCatalogWindow.mockReturnValue({
-      data: {
-        title: "Heat Search",
-        totalItems: 1,
-        pages: new Map([[0, [{ content_id: "movie-1", title: "Heat", type: "movie" }]]]),
-      },
+      data: { totalItems: 0, pages: new Map() },
       isLoading: false,
       isError: false,
-      refetch: vi.fn(),
     });
-    mockUseCatalogFilters.mockReturnValue({
-      data: { genres: ["Drama"], content_ratings: ["R"] },
+    mockUsePersonSearch.mockReturnValue({
+      data: [
+        { id: "137101642343383042", name: "Tom Hanks", photo_url: "/actor.jpg" },
+        { id: "137101697843200002", name: "Christopher Nolan" },
+      ],
       isLoading: false,
+      isError: false,
     });
+
+    const markup = renderToStaticMarkup(
+      <QueryClientProvider client={new QueryClient()}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    expect(markup).toContain("People");
+    expect(markup).toContain('href="/person/137101642343383042"');
+    expect(markup).toContain('href="/person/137101697843200002"');
+    expect(markup).toContain("Tom Hanks");
+    expect(markup).toContain("Christopher Nolan");
+    expect(markup).toContain('src="/actor.jpg"');
+    expect(markup).toContain(">CN<");
+    expect(mockItemGrid).not.toHaveBeenCalled();
+  });
+
+  it("keeps title results visible when people search fails and offers a retry", async () => {
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const refetch = vi.fn();
+    mockUsePersonSearch.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      refetch,
+    });
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("Could not load people results.")).toBeDefined();
+    expect(mockItemGrid).toHaveBeenCalledWith(expect.objectContaining({ totalItems: 1 }));
+    await userEvent.click(screen.getByRole("button", { name: "Retry people search" }));
+    expect(refetch).toHaveBeenCalledOnce();
+  });
+
+  it("does not search people when browsing a personal list", () => {
+    appInitialEntries = ["/catalog?source=favorites"];
+    const markup = renderToStaticMarkup(
+      <QueryClientProvider client={new QueryClient()}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(mockUsePersonSearch).toHaveBeenCalledWith("", 20, false, undefined);
+    expect(markup).not.toContain('aria-label="People"');
   });
 
   it("renders catalog results from the new API route", () => {
@@ -282,6 +411,21 @@ describe("Catalog page", () => {
     expect(mockItemGrid).toHaveBeenCalledWith(
       expect.objectContaining({ narrowPosterActions: true }),
     );
+  });
+
+  it("browses an explicit library without requiring search text", () => {
+    appInitialEntries = ["/catalog?library_id=17&sort=title&order=asc"];
+    const markup = renderToStaticMarkup(
+      <QueryClientProvider client={new QueryClient()}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(mockUseCatalogWindow).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "query", library_id: 17, q: undefined }),
+      expect.objectContaining({ includeTotal: true }),
+    );
+    expect(mockItemGrid).toHaveBeenCalled();
+    expect(markup).not.toContain("Find films, series, performances");
   });
 
   it("renders the search-first landing for empty query catalog routes", () => {
@@ -669,7 +813,7 @@ describe("Catalog page", () => {
       </QueryClientProvider>,
     );
 
-    expect(markup).toContain("Search stopped before it could finish.");
+    expect(markup).toContain("Could not load search results.");
     expect(markup).toContain("Retry search");
     expect(markup).not.toContain('data-kind="item-grid"');
     expect(markup).not.toContain("Stale Result");
@@ -690,7 +834,7 @@ describe("Catalog page", () => {
       </QueryClientProvider>,
     );
 
-    expect(markup).toContain("Catalog stopped before it could finish.");
+    expect(markup).toContain("Could not load catalog results.");
     expect(markup).toContain("Retry catalog");
     expect(markup).not.toContain("Try a more specific title");
   });
@@ -710,6 +854,7 @@ describe("Catalog page", () => {
       }),
       expect.anything(),
     );
+    expect(mockUsePersonSearch).toHaveBeenCalledWith("heat", 20, true, "video");
   });
 
   it("uses approximate totals for interactive query searches", () => {
@@ -745,6 +890,17 @@ describe("Catalog page", () => {
       }),
       expect.anything(),
     );
+    expect(mockUsePersonSearch).toHaveBeenCalledWith("heat", 20, true, undefined);
+  });
+
+  it.each(["movie", "series", "audiobook"])("scopes people to the explicit %s search", (scope) => {
+    appInitialEntries = [`/catalog?source=query&q=heat&type=${scope}`];
+    renderToStaticMarkup(
+      <QueryClientProvider client={new QueryClient()}>
+        <App />
+      </QueryClientProvider>,
+    );
+    expect(mockUsePersonSearch).toHaveBeenCalledWith("heat", 20, true, scope);
   });
 
   it("renders the search scope chips on query results", () => {
@@ -756,5 +912,150 @@ describe("Catalog page", () => {
 
     expect(markup).toContain('aria-label="Search scope"');
     expect(markup).toContain("Audiobooks");
+  });
+});
+
+describe("Catalog collection page actions", () => {
+  const OWNER = { ...listProfilesOk.items[0], id: "profile-1", name: "Alex", is_primary: true };
+  const MAYA = { ...OWNER, id: "p-maya", name: "Maya", is_primary: false };
+
+  beforeAll(async () => {
+    await import("@/pages/Catalog");
+  });
+
+  beforeEach(() => {
+    resetCatalogMocks();
+    // App keeps one query client for the page's life; start each test empty.
+    appQueryClient.clear();
+    mockUseCatalogWindow.mockReturnValue({
+      data: { title: "Rainy days", totalItems: 0, pages: new Map() },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    });
+    v2Recorder.answer("GET /api/v2/profiles", { ...listProfilesOk, items: [OWNER, MAYA] });
+  });
+
+  function renderApp() {
+    render(
+      <QueryClientProvider
+        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+      >
+        <App />
+      </QueryClientProvider>,
+    );
+  }
+
+  function personalCollectionBy(creatorProfileId: string) {
+    v2Recorder.answer("GET /api/v2/collections/{id}", {
+      ...getCollectionOk,
+      profile_id: creatorProfileId,
+      creator_profile_id: creatorProfileId,
+      is_shared: creatorProfileId !== OWNER.id,
+    });
+  }
+
+  async function personalCollectionRead() {
+    await waitFor(() => expect(v2Recorder.callsOf("GET /api/v2/collections/{id}")).toHaveLength(1));
+  }
+
+  it("gives the acting admin Edit and more actions on a server collection", async () => {
+    appProfile = { id: OWNER.id, is_primary: true };
+    v2Recorder.answer("GET /api/v2/admin/collections/{id}", getAdminCollectionOk);
+    appInitialEntries = [buildLibraryCollectionCatalogHref("c1", "Original", 1)];
+
+    renderApp();
+
+    const edit = await screen.findByRole("link", { name: "Edit" });
+    expect(edit).toHaveAttribute("href", SERVER_SCOPE.paths.edit("c1", { libraryId: 1 }));
+    expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument();
+  });
+
+  it("shows no Edit on a server collection to a non-primary profile on an admin account", async () => {
+    appProfile = { id: MAYA.id, is_primary: false };
+    appInitialEntries = [buildLibraryCollectionCatalogHref("c1", "Original", 1)];
+
+    renderApp();
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Rainy days" })).toBeVisible();
+    expect(screen.queryByRole("link", { name: "Edit" })).not.toBeInTheDocument();
+    // A viewer's actions only: the collection's own menu needs the admin read.
+    expect(screen.getByRole("link", { name: "Add to my Home" })).toBeVisible();
+    expect(v2Recorder.callsOf("GET /api/v2/admin/collections/{id}")).toEqual([]);
+  });
+
+  it("offers a regular account Add to my Home on a server collection, not Edit", async () => {
+    appUser = { id: 2, username: "sam", role: "user" };
+    appProfile = { id: OWNER.id, is_primary: true };
+    appInitialEntries = [buildLibraryCollectionCatalogHref("c1", "Original", 1)];
+
+    renderApp();
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Rainy days" })).toBeVisible();
+    expect(screen.queryByRole("link", { name: "Edit" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Add to my Home" })).toHaveAttribute(
+      "href",
+      "/settings/home-screen?page=home&add=collection%3Alibrary%3Ac1",
+    );
+    expect(v2Recorder.callsOf("GET /api/v2/admin/collections/{id}")).toEqual([]);
+  });
+
+  it("gives the owner Edit on their own collection", async () => {
+    personalCollectionBy(OWNER.id);
+    appInitialEntries = [buildUserCollectionCatalogHref("c1", "Rainy days")];
+
+    renderApp();
+
+    const edit = await screen.findByRole("link", { name: "Edit" });
+    expect(edit).toHaveAttribute("href", PERSONAL_SCOPE.paths.edit("c1"));
+    expect(screen.queryByText("Read-only")).not.toBeInTheDocument();
+  });
+
+  it("shows a shared-with-me collection read-only, with its owner, Add to my Home and no Edit", async () => {
+    personalCollectionBy(MAYA.id);
+    appInitialEntries = [buildUserCollectionCatalogHref("c1", "Rainy days")];
+
+    renderApp();
+
+    expect(await screen.findByText("Read-only")).toBeVisible();
+    expect(screen.getByText("Maya")).toBeVisible();
+    expect(screen.queryByRole("link", { name: "Edit" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Add to my Home" })).toHaveAttribute(
+      "href",
+      "/settings/home-screen?page=home&add=collection%3Auser%3Ac1",
+    );
+  });
+
+  it("explains the redirect from another profile's editor link and names the owner", async () => {
+    personalCollectionBy(MAYA.id);
+    appInitialEntries = [`${buildUserCollectionCatalogHref("c1", "Rainy days")}&notice=read-only`];
+
+    renderApp();
+
+    const callout = await screen.findByRole("note");
+    expect(callout).toHaveTextContent(
+      "Only Maya can change Rainy days, so you're on its page instead. You can still watch it and add it to your Home.",
+    );
+  });
+
+  it("shows no lock callout without the read-only notice", async () => {
+    personalCollectionBy(MAYA.id);
+    appInitialEntries = [buildUserCollectionCatalogHref("c1", "Rainy days")];
+
+    renderApp();
+
+    expect(await screen.findByText("Read-only")).toBeVisible();
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("shows no lock callout to the owner, even with the notice", async () => {
+    personalCollectionBy(OWNER.id);
+    appInitialEntries = [`${buildUserCollectionCatalogHref("c1", "Rainy days")}&notice=read-only`];
+
+    renderApp();
+
+    expect(await screen.findByRole("link", { name: "Edit" })).toBeVisible();
+    await personalCollectionRead();
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 });

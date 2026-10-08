@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { sectionTypeLabel } from "@/lib/sectionTypes";
+import { rowKindLabel } from "@/lib/homeRows/catalog";
 import { queryDefinitionFromSectionConfig } from "@/api/types";
 import type { Library } from "@/api/types";
-import type { RecipeCatalogResponse } from "@/lib/recipes";
+import { matchRecipePreset, type RecipeCatalogResponse } from "@/lib/recipes";
 import { Eye, EyeOff, GripVertical, Pencil, Star, Trash2 } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -23,14 +23,19 @@ export interface EditableSectionViewModel {
   config?: Record<string, unknown>;
 }
 
-export function recipeLabel(catalog: RecipeCatalogResponse | undefined, type: string): string {
+export function recipeLabel(
+  catalog: RecipeCatalogResponse | undefined,
+  type: string,
+  config?: Record<string, unknown>,
+): string {
   if (catalog) {
     for (const defs of Object.values(catalog.categories)) {
       const found = defs?.find((def) => def.type === type);
-      if (found?.presets[0]?.display_name) return found.presets[0].display_name;
+      const label = found ? matchRecipePreset(found, config)?.display_name : undefined;
+      if (label) return label;
     }
   }
-  return sectionTypeLabel(type);
+  return rowKindLabel(type);
 }
 
 function continueTypeLabel(config?: Record<string, unknown>): string | null {
@@ -72,7 +77,7 @@ export function SectionSummaryBadges({
 
   return (
     <div className="flex flex-wrap gap-1">
-      <Badge variant="secondary">{recipeLabel(catalog, section.sectionType)}</Badge>
+      <Badge variant="secondary">{recipeLabel(catalog, section.sectionType, section.config)}</Badge>
       {resumeLabel ? <Badge variant="outline">{resumeLabel}</Badge> : null}
       {queryDefinition.media_scope === "movie" ? <Badge variant="outline">Movies</Badge> : null}
       {queryDefinition.media_scope === "series" ? <Badge variant="outline">Series</Badge> : null}
@@ -119,7 +124,7 @@ export function SectionDragOverlay({
       <GripVertical className="text-muted-foreground h-4 w-4" />
       <span className="font-medium">{section.title}</span>
       <Badge variant="secondary" className="ml-2">
-        {recipeLabel(catalog, section.sectionType)}
+        {recipeLabel(catalog, section.sectionType, section.config)}
       </Badge>
     </div>
   );
@@ -202,7 +207,13 @@ export function SortableSectionTableRow({
       </TableCell>
       <TableCell>
         <div className="flex gap-1">
-          <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={onEdit}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0"
+            onClick={onEdit}
+            aria-label={`Edit ${section.title}`}
+          >
             <Pencil className="h-3.5 w-3.5" />
           </Button>
           <Button
@@ -210,6 +221,7 @@ export function SortableSectionTableRow({
             size="sm"
             className="text-destructive h-7 w-7 p-0"
             onClick={onDelete}
+            aria-label={`Delete ${section.title}`}
           >
             <Trash2 className="h-3.5 w-3.5" />
           </Button>
@@ -232,8 +244,10 @@ export function SortableSectionCardRow({
   disabled?: boolean;
   catalog?: RecipeCatalogResponse;
   onToggleHidden: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
+  /** Omit to leave the row without an edit button. */
+  onEdit?: () => void;
+  /** Omit to leave the row without a delete button. */
+  onDelete?: () => void;
   actions?: ReactNode;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -285,30 +299,34 @@ export function SortableSectionCardRow({
           <SectionSummaryBadges section={section} catalog={catalog} showVisibility />
         </div>
         <div className="text-muted-foreground text-[13px]">
-          {sectionTypeLabel(section.sectionType)} . {section.itemLimit} items
+          {rowKindLabel(section.sectionType)} . {section.itemLimit} items
         </div>
       </div>
       {actions}
-      <Button
-        variant="ghost"
-        size="sm"
-        className="h-8 w-8 p-0"
-        aria-label={`Edit ${section.title}`}
-        disabled={disabled}
-        onClick={onEdit}
-      >
-        <Pencil className="h-3.5 w-3.5" />
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        className="text-destructive hover:bg-destructive/10 hover:text-destructive h-8 w-8 p-0"
-        aria-label={`Delete ${section.title}`}
-        disabled={disabled}
-        onClick={onDelete}
-      >
-        <Trash2 className="h-3.5 w-3.5" />
-      </Button>
+      {onEdit ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 w-8 p-0"
+          aria-label={`Edit ${section.title}`}
+          disabled={disabled}
+          onClick={onEdit}
+        >
+          <Pencil className="h-3.5 w-3.5" />
+        </Button>
+      ) : null}
+      {onDelete ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-destructive hover:bg-destructive/10 hover:text-destructive h-8 w-8 p-0"
+          aria-label={`Delete ${section.title}`}
+          disabled={disabled}
+          onClick={onDelete}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      ) : null}
     </div>
   );
 }

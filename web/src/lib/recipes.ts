@@ -1,4 +1,5 @@
-import { api } from "../api/client";
+import { v2 } from "../api/v2/request";
+import type { components } from "../api/v2/schema";
 
 export type Category =
   | "library_staples"
@@ -33,10 +34,28 @@ export interface RecipeCatalogResponse {
   categories: Partial<Record<Category, RecipeDefinition[]>>;
 }
 
-export interface Candidate {
-  value: string;
-  display_name: string;
-  subtitle?: string;
+// matchRecipePreset returns the preset a section's config came from.
+// Several presets can share one recipe type and differ only in their params
+// (TMDB Trending Today vs This Week), so the type alone cannot name the
+// section. The preset whose default params the config matches on the most
+// keys wins; a config that matches none falls back to the first preset.
+export function matchRecipePreset(
+  def: RecipeDefinition,
+  config: Record<string, unknown> | undefined,
+): GalleryPreset | undefined {
+  let best: GalleryPreset | undefined;
+  let bestScore = -1;
+  for (const preset of def.presets) {
+    const entries = Object.entries(preset.default_params ?? {});
+    const matches = entries.every(
+      ([key, value]) => JSON.stringify(config?.[key]) === JSON.stringify(value),
+    );
+    if (matches && entries.length > bestScore) {
+      best = preset;
+      bestScore = entries.length;
+    }
+  }
+  return best ?? def.presets[0];
 }
 
 export interface PreviewRequest {
@@ -48,24 +67,64 @@ export interface PreviewRequest {
 }
 
 export interface PreviewResponse {
-  items: Array<{ content_id: string; title?: string; poster_path?: string }>;
+  items: Array<{
+    content_id: string;
+    title?: string;
+    /** The presigned v2 `poster_url`, ready to load; absent when the item has no poster. */
+    poster_path?: string;
+    poster_thumbhash?: string;
+  }>;
   total_count: number;
 }
 
 export async function fetchRecipeCatalog(): Promise<RecipeCatalogResponse> {
-  return api<RecipeCatalogResponse>("/sections/recipes");
+  return recipeCatalogFromV2(await v2("GET /api/v2/sections/recipes"));
 }
 
-export async function fetchCandidates(recipeType: string): Promise<Candidate[]> {
-  const body = await api<{ candidates: Candidate[] }>(
-    `/sections/recipes/${encodeURIComponent(recipeType)}/candidates`,
-  );
-  return body.candidates;
+/** The GET /api/v2/sections/recipes body keyed by category, as the web reads it. */
+export function recipeCatalogFromV2(
+  catalog: components["schemas"]["RecipeCatalog"],
+): RecipeCatalogResponse {
+  const categories: Partial<Record<Category, RecipeDefinition[]>> = {};
+  for (const group of catalog.categories) {
+    categories[group.category as Category] = group.recipes.map((def) => ({
+      type: def.type,
+      category: def.category as Category,
+      presets: def.presets.map((preset) => ({
+        key: preset.key,
+        display_name: preset.display_name,
+        icon: preset.icon,
+        description_short: preset.description_short,
+        ...(preset.description_long ? { description_long: preset.description_long } : {}),
+        default_params: preset.default_params,
+      })),
+      avoid_duplicates: def.avoid_duplicates,
+      supports_rotation: def.supports_rotation,
+      admin_only: def.admin_only,
+    }));
+  }
+  return { categories };
 }
 
-export async function previewSection(req: PreviewRequest): Promise<PreviewResponse> {
-  return api<PreviewResponse>("/admin/sections/preview", {
-    method: "POST",
-    body: JSON.stringify(req),
+export async function previewSection(
+  req: PreviewRequest,
+  signal?: AbortSignal,
+): Promise<PreviewResponse> {
+  const result = await v2("POST /api/v2/admin/sections/preview", {
+    signal,
+    body: {
+      ...req,
+      library_id: req.library_id === undefined ? undefined : String(req.library_id),
+      library_ids: req.library_ids?.map(String),
+    },
   });
+  return {
+    items: result.items.map((item) => ({
+      content_id: item.content_id,
+      title: item.title,
+      poster_path: item.poster_url,
+      poster_thumbhash: item.poster_thumbhash,
+    })),
+    total_count: result.total_count,
+  };
 }

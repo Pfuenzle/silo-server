@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,6 +74,23 @@ type ChapterThumbnailQueuer interface {
 	QueuePriorityFileAtPosition(ctx context.Context, fileID int, targetSeconds float64)
 }
 
+// TrickplayAvailability reports the servable seek-bar previews of files.
+type TrickplayAvailability interface {
+	TrickplayGrids(ctx context.Context, fileIDs []int) (map[int]TrickplayGrid, error)
+}
+
+// TrickplayGrid is how a file's published seek-bar previews are laid out:
+// ThumbnailCount thumbnails of Width by Height pixels, one per IntervalMS of
+// media time, TileColumns by TileRows to a sheet. Bandwidth is Jellyfin's
+// bits-per-second estimate for fetching them.
+type TrickplayGrid struct {
+	Width, Height         int
+	TileColumns, TileRows int
+	ThumbnailCount        int
+	IntervalMS            int
+	Bandwidth             int
+}
+
 // ImageResolver resolves image paths (potentially plugin-prefixed) to usable URLs.
 type ImageResolver interface {
 	// ResolveImageURL resolves a single image path. Plugin-prefixed paths (e.g.,
@@ -106,6 +124,10 @@ type expiringImageResolver interface {
 
 type WorkSummaryProvider interface {
 	GetSummaryForContentID(ctx context.Context, contentID string, filter AccessFilter) (*WorkSummary, error)
+}
+
+type LiteraryWorkLinker interface {
+	AutoLinkContent(ctx context.Context, contentID string) (string, bool, error)
 }
 
 type WorkSummaryBatchProvider interface {
@@ -165,41 +187,53 @@ func (s *DetailService) ProbedDurationsByEpisodeIDs(ctx context.Context, ids []s
 type ItemDetail struct {
 	ContentID     string `json:"content_id"`
 	PlayContentID string `json:"play_content_id,omitempty"`
-	Type          string `json:"type"`
+	// PlaySeasonNumber is the season of PlayContentID when it is an episode.
+	// The native v2 detail carries it; the frozen v1 detail does not.
+	PlaySeasonNumber *int   `json:"-"`
+	Type             string `json:"type"`
 
 	// Metadata (served inline from Postgres).
 	Title         string `json:"title"`
 	SortTitle     string `json:"sort_title,omitempty"`
 	OriginalTitle string `json:"original_title,omitempty"`
-	Year          int    `json:"year,omitempty"`
-	Overview      string `json:"overview,omitempty"`
-	Tagline       string `json:"tagline,omitempty"`
+	// OriginalLanguage feeds the Jellyfin-compat BaseItemDto field; it is
+	// kept out of the native JSON contract.
+	OriginalLanguage string `json:"-"`
+	Year             int    `json:"year,omitempty"`
+	Overview         string `json:"overview,omitempty"`
+	Tagline          string `json:"tagline,omitempty"`
 	// PendingTranslationLanguage, when set, is the viewer's presentation
 	// language that the description is missing — the on-view AI translation
 	// affordance keys off it.
-	PendingTranslationLanguage string       `json:"pending_translation_language,omitempty"`
-	Runtime                    int          `json:"runtime,omitempty"`
-	ContentRating              string       `json:"content_rating,omitempty"`
-	Genres                     []string     `json:"genres"`
-	RatingIMDB                 *float64     `json:"rating_imdb,omitempty"`
-	RatingTMDB                 *float64     `json:"rating_tmdb,omitempty"`
-	RatingRTCritic             *int         `json:"rating_rt_critic,omitempty"`
-	RatingRTAudience           *int         `json:"rating_rt_audience,omitempty"`
-	ImdbID                     string       `json:"imdb_id,omitempty"`
-	TmdbID                     string       `json:"tmdb_id,omitempty"`
-	TvdbID                     string       `json:"tvdb_id,omitempty"`
-	Cast                       []CastCredit `json:"cast"`
-	Crew                       []CrewCredit `json:"crew"`
-	Studios                    []string     `json:"studios"`
-	Networks                   []string     `json:"networks"`
-	Countries                  []string     `json:"countries,omitempty"`
-	LockedFields               []int        `json:"locked_fields,omitempty"`
-	FirstAirDate               *string      `json:"first_air_date,omitempty"`
-	LastAirDate                *string      `json:"last_air_date,omitempty"`
-	ReleaseDate                *string      `json:"release_date,omitempty"`
-	AirTime                    *string      `json:"air_time,omitempty"`
-	AirTimezone                *string      `json:"air_timezone,omitempty"`
-	ShowStatus                 string       `json:"show_status,omitempty"`
+	PendingTranslationLanguage string `json:"pending_translation_language,omitempty"`
+	Runtime                    int    `json:"runtime,omitempty"`
+	ContentRating              string `json:"content_rating,omitempty"`
+	// AdvisoryAge and AdvisorySource carry the item's advisory to the
+	// v2 renderer. Kept out of this JSON contract the way OriginalLanguage is:
+	// /api/v1 is frozen, so the fields ride the Go struct and apiv2 emits them
+	// under its own names.
+	AdvisoryAge      *int         `json:"-"`
+	AdvisorySource   string       `json:"-"`
+	Genres           []string     `json:"genres"`
+	RatingIMDB       *float64     `json:"rating_imdb,omitempty"`
+	RatingTMDB       *float64     `json:"rating_tmdb,omitempty"`
+	RatingRTCritic   *int         `json:"rating_rt_critic,omitempty"`
+	RatingRTAudience *int         `json:"rating_rt_audience,omitempty"`
+	ImdbID           string       `json:"imdb_id,omitempty"`
+	TmdbID           string       `json:"tmdb_id,omitempty"`
+	TvdbID           string       `json:"tvdb_id,omitempty"`
+	Cast             []CastCredit `json:"cast"`
+	Crew             []CrewCredit `json:"crew"`
+	Studios          []string     `json:"studios"`
+	Networks         []string     `json:"networks"`
+	Countries        []string     `json:"countries,omitempty"`
+	LockedFields     []int        `json:"locked_fields,omitempty"`
+	FirstAirDate     *string      `json:"first_air_date,omitempty"`
+	LastAirDate      *string      `json:"last_air_date,omitempty"`
+	ReleaseDate      *string      `json:"release_date,omitempty"`
+	AirTime          *string      `json:"air_time,omitempty"`
+	AirTimezone      *string      `json:"air_timezone,omitempty"`
+	ShowStatus       string       `json:"show_status,omitempty"`
 
 	// Presigned image URLs.
 	PosterURL         string `json:"poster_url,omitempty"`
@@ -235,6 +269,18 @@ type ItemDetail struct {
 	// Remote provider videos (YouTube trailers, teasers, ...) for
 	// movies/series, ordered for display (trailers first, official first).
 	Videos []ItemVideoInfo `json:"videos,omitempty"`
+
+	// Per-source ratings (IMDb, Metacritic, Letterboxd, ...) for movies and
+	// series, in display order. Kept out of this JSON contract because
+	// /api/v1 is frozen; apiv2 emits them as rating_sources.
+	RatingSources []ItemRatingSourceInfo `json:"-"`
+
+	// ViewerCurates is true when the viewer may curate this item's metadata
+	// (admins and accounts with metadata curation), the same check that
+	// shows them file paths. apiv2 gives them every stored rating for the
+	// metadata editor and everyone else only the ratings clients show. Not
+	// part of any JSON contract.
+	ViewerCurates bool `json:"-"`
 
 	// Local extras (scanner-discovered trailers, featurettes, deleted
 	// scenes, ...) playable via their own content_id through /watch.
@@ -292,6 +338,14 @@ type ItemVideoInfo struct {
 	Name       string `json:"name,omitempty"`
 	Language   string `json:"language,omitempty"`
 	IsOfficial bool   `json:"is_official"`
+}
+
+// ItemRatingSourceInfo is one source's rating of an item on a 0-100 scale.
+// Votes is nil when the source did not report a count.
+type ItemRatingSourceInfo struct {
+	Source string
+	Score  float64
+	Votes  *int64
 }
 
 // ItemExtraInfo is the API shape of a local extra. ContentID is a playable
@@ -396,6 +450,9 @@ type CastCredit struct {
 	PlexGUID       string `json:"plex_guid,omitempty"`
 	PhotoURL       string `json:"photo_url,omitempty"`
 	PhotoThumbhash string `json:"photo_thumbhash,omitempty"`
+	// PhotoPath is the stored photo key behind PhotoURL. It is internal: the
+	// Jellyfin compatibility layer signs person image tags over it.
+	PhotoPath string `json:"-"`
 }
 
 // CrewCredit is the item-detail API shape for a crew member.
@@ -409,6 +466,8 @@ type CrewCredit struct {
 	PlexGUID       string `json:"plex_guid,omitempty"`
 	PhotoURL       string `json:"photo_url,omitempty"`
 	PhotoThumbhash string `json:"photo_thumbhash,omitempty"`
+	// PhotoPath is internal; see CastCredit.PhotoPath.
+	PhotoPath string `json:"-"`
 }
 
 // PersonCredit represents a person's credit on a media item for API responses.
@@ -424,6 +483,8 @@ type PersonCredit struct {
 	PlexGUID       string            `json:"plex_guid,omitempty"`
 	PhotoURL       string            `json:"photo_url,omitempty"`
 	PhotoThumbhash string            `json:"photo_thumbhash,omitempty"`
+	// PhotoPath is internal; see CastCredit.PhotoPath.
+	PhotoPath string `json:"-"`
 }
 
 // FileVersion represents a single file version available for playback.
@@ -458,6 +519,42 @@ type FileVersion struct {
 	Credits                  *Marker                `json:"credits,omitempty"`
 	Recap                    *Marker                `json:"recap,omitempty"`
 	Preview                  *Marker                `json:"preview,omitempty"`
+	MarkerSegments           []models.MarkerSegment `json:"-"`
+	// Trickplay is the layout of the file's servable seek-bar previews, nil
+	// when it has none. The v2 watch and Jellyfin views carry it; the frozen
+	// v1 view does not.
+	Trickplay *TrickplayGrid `json:"-"`
+	// Unreadable is models.MediaFile.ProbeRejected: ffprobe rejected the file
+	// and nothing usable is recorded for it, so it cannot play until it is
+	// replaced. Jellyfin PlaybackInfo leaves such versions out. Neither the v1
+	// nor the v2 view carries the flag.
+	Unreadable bool `json:"-"`
+}
+
+// SetMarkers refreshes the marker projection without rebuilding file metadata.
+func (v *FileVersion) SetMarkers(file *models.MediaFile) {
+	v.Intro = markerFromRange(file.IntroStart, file.IntroEnd)
+	v.Credits = markerFromRange(file.CreditsStart, file.CreditsEnd)
+	v.Recap = markerFromRange(file.RecapStart, file.RecapEnd)
+	v.Preview = markerFromRange(file.PreviewStart, file.PreviewEnd)
+	v.MarkerSegments = models.EffectiveMarkerSegments(file)
+}
+
+func (v FileVersion) EffectiveMarkerSegments() []models.MarkerSegment {
+	file := models.MediaFile{MarkerSegments: v.MarkerSegments}
+	if v.Intro != nil {
+		file.IntroStart, file.IntroEnd = &v.Intro.Start, &v.Intro.End
+	}
+	if v.Credits != nil {
+		file.CreditsStart, file.CreditsEnd = &v.Credits.Start, &v.Credits.End
+	}
+	if v.Recap != nil {
+		file.RecapStart, file.RecapEnd = &v.Recap.Start, &v.Recap.End
+	}
+	if v.Preview != nil {
+		file.PreviewStart, file.PreviewEnd = &v.Preview.Start, &v.Preview.End
+	}
+	return models.EffectiveMarkerSegments(&file)
 }
 
 // PlaybackVariant is one logical watch choice, optionally spanning multiple ordered parts.
@@ -498,6 +595,7 @@ type VersionSubtitleTrack struct {
 	Language        string `json:"language,omitempty"`
 	Codec           string `json:"codec,omitempty"`
 	Title           string `json:"title,omitempty"`
+	TitleIsFallback bool   `json:"-"` // An external title filled from its file name.
 	EmbeddedTitle   string `json:"embedded_title,omitempty"`
 	Resolution      string `json:"resolution,omitempty"`
 	Forced          bool   `json:"forced"`
@@ -676,16 +774,19 @@ type DetailService struct {
 	}
 	fileFetcher       FileVersionFetcher
 	videoRepo         *VideoRepository
+	ratingSourceRepo  *RatingSourceRepository
 	extraRepo         *ExtraRepository
 	rootClaimRepo     *RootClaimRepository
 	groupClaimRepo    *GroupClaimRepository
 	imageResolver     ImageResolver
 	userStoreProvider userstore.UserStoreProvider
 	workSummary       WorkSummaryProvider
+	workLinker        LiteraryWorkLinker
 	originalLangFn    func(context.Context, string) string
 	probeEnsurer      PlaybackProbeEnsurer
 	copySafetyRacer   CopySafetyRacer
 	chapterThumbs     ChapterThumbnailQueuer
+	trickplay         TrickplayAvailability
 
 	// resolver is built once on first use; see settingsResolver.
 	resolverOnce sync.Once
@@ -701,16 +802,17 @@ func NewDetailService(
 	fileFetcher FileVersionFetcher,
 ) *DetailService {
 	return &DetailService{
-		itemRepo:       itemRepo,
-		episodeRepo:    episodeRepo,
-		seasonRepo:     seasonRepo,
-		personRepo:     personRepo,
-		itemLocRepo:    NewMediaItemLocalizationRepository(itemRepo.pool),
-		seasonLocRepo:  NewSeasonLocalizationRepository(itemRepo.pool),
-		episodeLocRepo: NewEpisodeLocalizationRepository(itemRepo.pool),
-		videoRepo:      NewVideoRepository(itemRepo.pool),
-		extraRepo:      NewExtraRepository(itemRepo.pool),
-		fileFetcher:    fileFetcher,
+		itemRepo:         itemRepo,
+		episodeRepo:      episodeRepo,
+		seasonRepo:       seasonRepo,
+		personRepo:       personRepo,
+		itemLocRepo:      NewMediaItemLocalizationRepository(itemRepo.pool),
+		seasonLocRepo:    NewSeasonLocalizationRepository(itemRepo.pool),
+		episodeLocRepo:   NewEpisodeLocalizationRepository(itemRepo.pool),
+		videoRepo:        NewVideoRepository(itemRepo.pool),
+		ratingSourceRepo: NewRatingSourceRepository(itemRepo.pool),
+		extraRepo:        NewExtraRepository(itemRepo.pool),
+		fileFetcher:      fileFetcher,
 	}
 }
 
@@ -731,6 +833,10 @@ func (s *DetailService) SetWorkSummaryProvider(provider WorkSummaryProvider) {
 	}
 }
 
+func (s *DetailService) SetLiteraryWorkLinker(linker LiteraryWorkLinker) {
+	s.workLinker = linker
+}
+
 func (s *DetailService) SetProbeEnsurer(ensurer PlaybackProbeEnsurer) {
 	s.probeEnsurer = ensurer
 }
@@ -746,6 +852,61 @@ func (s *DetailService) SetCopySafetyRacer(racer CopySafetyRacer) {
 
 func (s *DetailService) SetChapterThumbnailQueuer(queuer ChapterThumbnailQueuer) {
 	s.chapterThumbs = queuer
+}
+
+// SetTrickplayAvailability wires in the seek-bar preview reader.
+func (s *DetailService) SetTrickplayAvailability(availability TrickplayAvailability) {
+	s.trickplay = availability
+}
+
+// markTrickplay sets Trickplay on versions. Previews are an enhancement, so
+// a failed lookup leaves every version without them.
+func (s *DetailService) markTrickplay(ctx context.Context, versions []FileVersion, availability TrickplayAvailability) {
+	if availability == nil || len(versions) == 0 {
+		return
+	}
+	ids := make([]int, len(versions))
+	for i, v := range versions {
+		ids[i] = v.FileID
+	}
+	grids, err := availability.TrickplayGrids(ctx, ids)
+	if err != nil {
+		slog.WarnContext(ctx, "trickplay lookup failed", "component", "catalog", "error", err)
+		return
+	}
+	for i := range versions {
+		if grid, ok := grids[versions[i].FileID]; ok {
+			versions[i].Trickplay = &grid
+		}
+	}
+}
+
+// prefetchedTrickplay makes the page's availability lookup reusable by each
+// detail builder, including a failed lookup that returned no previews.
+type prefetchedTrickplay map[int]TrickplayGrid
+
+func (p prefetchedTrickplay) TrickplayGrids(context.Context, []int) (map[int]TrickplayGrid, error) {
+	return p, nil
+}
+
+func (s *DetailService) prefetchTrickplay(ctx context.Context, filesByID map[string][]*models.MediaFile) TrickplayAvailability {
+	if s.trickplay == nil {
+		return nil
+	}
+	var fileIDs []int
+	for _, files := range filesByID {
+		for _, file := range files {
+			if file != nil {
+				fileIDs = append(fileIDs, file.ID)
+			}
+		}
+	}
+	grids, err := s.trickplay.TrickplayGrids(ctx, fileIDs)
+	if err != nil {
+		slog.WarnContext(ctx, "trickplay lookup failed", "component", "catalog", "error", err)
+		grids = nil
+	}
+	return prefetchedTrickplay(grids)
 }
 
 func (s *DetailService) SetFolderRepository(repo interface {
@@ -1141,7 +1302,17 @@ func (s *DetailService) LocalizeSeasonModel(ctx context.Context, season *models.
 	if err != nil || loc == nil {
 		return cloneSeason(season), err
 	}
-	return applySeasonLocalization(season, loc), nil
+	imagesLocked := false
+	if s.itemRepo != nil {
+		series, err := s.itemRepo.GetByID(ctx, season.SeriesID)
+		if err != nil {
+			return cloneSeason(season), err
+		}
+		if series != nil {
+			imagesLocked = slices.Contains(series.LockedFields, fieldImagesLocked)
+		}
+	}
+	return applySeasonLocalization(season, loc, imagesLocked), nil
 }
 
 // LocalizeSeasonModels applies presentation-language localization to a batch
@@ -1207,6 +1378,18 @@ func (s *DetailService) LocalizeSeasonModels(ctx context.Context, seasons []*mod
 			locs[seasonID] = localization
 		}
 	}
+	imageLocksBySeries := make(map[string]bool)
+	if len(locs) > 0 && s.itemRepo != nil {
+		series, err := s.itemRepo.GetByIDs(ctx, seriesIDs)
+		if err != nil {
+			return localized, err
+		}
+		for _, item := range series {
+			if item != nil {
+				imageLocksBySeries[item.ContentID] = slices.Contains(item.LockedFields, fieldImagesLocked)
+			}
+		}
+	}
 	for i, season := range seasons {
 		if season == nil {
 			continue
@@ -1214,7 +1397,7 @@ func (s *DetailService) LocalizeSeasonModels(ctx context.Context, seasons []*mod
 		if loc := locs[season.ContentID]; loc != nil {
 			target := targets[season.ContentID]
 			if target != "" && !sameMetadataLanguage(season.DefaultMetadataLanguage, target) {
-				localized[i] = applySeasonLocalization(season, loc)
+				localized[i] = applySeasonLocalization(season, loc, imageLocksBySeries[season.SeriesID])
 			}
 		}
 	}
@@ -1501,6 +1684,13 @@ type seriesDetailContext struct {
 	crewCredits []CrewCredit
 	versionPref versionDefaults
 	backdropURL string
+	// The viewer's audio and subtitle preferences depend only on the series
+	// and the library a file lives in, so a batch resolves them once per
+	// series (and library) instead of once per episode.
+	audio            *audioPrefResolver
+	subtitleDefaults map[int]subtitleDefaults
+	filesByEpisode   map[string][]*models.MediaFile
+	trickplay        TrickplayAvailability
 }
 
 // buildSeriesDetailContext loads the parent series row, localizes it, fetches
@@ -1519,12 +1709,40 @@ func (s *DetailService) buildSeriesDetailContext(ctx context.Context, seriesID s
 	}
 	castCredits, crewCredits := s.fetchCredits(ctx, seriesID, filter)
 	return &seriesDetailContext{
-		series:      series,
-		castCredits: castCredits,
-		crewCredits: crewCredits,
-		versionPref: s.effectiveVersionDefaults(ctx, filter, seriesID),
-		backdropURL: s.PresignImageURL(ctx, series.BackdropPath, "backdrop", string(filter.ImageSize)),
+		series:           series,
+		castCredits:      castCredits,
+		crewCredits:      crewCredits,
+		versionPref:      s.effectiveVersionDefaults(ctx, filter, seriesID),
+		backdropURL:      s.PresignImageURL(ctx, series.BackdropPath, "backdrop", string(filter.ImageSize)),
+		audio:            s.newAudioPrefResolver(ctx, filter, seriesID),
+		subtitleDefaults: map[int]subtitleDefaults{},
+		trickplay:        s.trickplay,
 	}, nil
+}
+
+// episodeAudioResolver returns the series' shared audio resolver, or a fresh
+// one for an episode of another series.
+func (s *DetailService) episodeAudioResolver(ctx context.Context, seriesCtx *seriesDetailContext, filter AccessFilter, seriesID string) *audioPrefResolver {
+	if seriesID != seriesCtx.series.ContentID {
+		return s.newAudioPrefResolver(ctx, filter, seriesID)
+	}
+	return seriesCtx.audio
+}
+
+// episodeSubtitleDefaults memoizes effectiveSubtitleDefaults for the series by
+// the library that decides the settings scope. An episode of another series
+// resolves its own.
+func (s *DetailService) episodeSubtitleDefaults(ctx context.Context, seriesCtx *seriesDetailContext, filter AccessFilter, seriesID string, files []*models.MediaFile) subtitleDefaults {
+	if seriesID != seriesCtx.series.ContentID {
+		return s.effectiveSubtitleDefaults(ctx, filter, seriesID, files)
+	}
+	libraryID := preferredPlayableLibraryID(files, filter.SelectedFileID)
+	if defaults, ok := seriesCtx.subtitleDefaults[libraryID]; ok {
+		return defaults
+	}
+	defaults := s.effectiveSubtitleDefaults(ctx, filter, seriesID, files)
+	seriesCtx.subtitleDefaults[libraryID] = defaults
+	return defaults
 }
 
 // GetEpisodeDetailsForSeries returns ItemDetails for the requested episodes,
@@ -1548,6 +1766,20 @@ func (s *DetailService) GetEpisodeDetailsForSeries(
 	seriesCtx, err := s.buildSeriesDetailContext(ctx, seriesID, filter)
 	if err != nil {
 		return nil, err
+	}
+	if fetcher, ok := s.fileFetcher.(interface {
+		ListByEpisodeIDs(context.Context, []string) (map[string][]*models.MediaFile, error)
+	}); ok {
+		files, err := fetcher.ListByEpisodeIDs(ctx, episodeContentIDs)
+		if err == nil {
+			if files == nil {
+				files = map[string][]*models.MediaFile{}
+			}
+			seriesCtx.filesByEpisode = files
+			seriesCtx.trickplay = s.prefetchTrickplay(ctx, files)
+		}
+		// A failed optional batch leaves the per-episode reads in place. Their
+		// existing error handling skips only the detail that could not be built.
 	}
 	for _, contentID := range episodeContentIDs {
 		episode, err := s.episodeRepo.GetByID(ctx, contentID)
@@ -1678,6 +1910,11 @@ func (s *DetailService) GetItemDetailsByIDs(ctx context.Context, contentIDs []st
 		}
 	}
 
+	trickplay := s.trickplay
+	if haveFileBatch {
+		trickplay = s.prefetchTrickplay(ctx, filesByID)
+	}
+
 	// Remote videos and local extras for movie/series items in two queries.
 	movieSeriesIDs := make([]string, 0, len(visible))
 	for _, item := range visible {
@@ -1686,10 +1923,17 @@ func (s *DetailService) GetItemDetailsByIDs(ctx context.Context, contentIDs []st
 		}
 	}
 	var videosByID map[string][]models.ItemVideo
+	var ratingSourcesByID map[string][]models.ItemRatingSource
 	var extrasByID map[string][]ExtraWithFile
 	if len(movieSeriesIDs) > 0 {
 		if s.videoRepo != nil {
 			videosByID, err = s.videoRepo.ListByContentIDs(ctx, movieSeriesIDs)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if s.ratingSourceRepo != nil {
+			ratingSourcesByID, err = s.ratingSourceRepo.ListByContentIDs(ctx, movieSeriesIDs)
 			if err != nil {
 				return nil, err
 			}
@@ -1727,6 +1971,7 @@ func (s *DetailService) GetItemDetailsByIDs(ctx context.Context, contentIDs []st
 			pendingTranslation: pending,
 			localizedItem:      s.localizeItemModelWith(item, language, loc),
 			haveCredits:        s.personRepo != nil,
+			trickplay:          trickplay,
 		}
 		if s.personRepo != nil {
 			pf.castCredits, pf.crewCredits = splitCastCrew(s.personCredits(ctx, creditsByID[id], filter))
@@ -1743,6 +1988,10 @@ func (s *DetailService) GetItemDetailsByIDs(ctx context.Context, contentIDs []st
 			if s.videoRepo != nil {
 				pf.haveVideos = true
 				pf.videos = videosByID[id]
+			}
+			if s.ratingSourceRepo != nil {
+				pf.haveRatingSources = true
+				pf.ratingSources = ratingSourcesByID[id]
 			}
 			if s.extraRepo != nil {
 				pf.haveExtras = true
@@ -1787,6 +2036,35 @@ func (s *DetailService) fetchItemVideos(ctx context.Context, contentID string, p
 			Name:       v.Name,
 			Language:   v.Language,
 			IsOfficial: v.IsOfficial,
+		})
+	}
+	return infos
+}
+
+// fetchItemRatingSources returns the item's per-source ratings in API shape,
+// honoring a batch prefetch when present. Lookup failures degrade to no
+// sources.
+func (s *DetailService) fetchItemRatingSources(ctx context.Context, contentID string, pf *itemDetailPrefetch) []ItemRatingSourceInfo {
+	var sources []models.ItemRatingSource
+	if pf != nil && pf.haveRatingSources {
+		sources = pf.ratingSources
+	} else if s.ratingSourceRepo != nil {
+		fetched, err := s.ratingSourceRepo.GetByContentID(ctx, contentID)
+		if err != nil {
+			slog.WarnContext(ctx, "failed to fetch item rating sources", "content_id", contentID, "error", err)
+			return nil
+		}
+		sources = fetched
+	}
+	if len(sources) == 0 {
+		return nil
+	}
+	infos := make([]ItemRatingSourceInfo, 0, len(sources))
+	for _, source := range sources {
+		infos = append(infos, ItemRatingSourceInfo{
+			Source: source.Source,
+			Score:  source.Score,
+			Votes:  source.Votes,
 		})
 	}
 	return infos
@@ -1842,6 +2120,7 @@ func (s *DetailService) fetchCredits(ctx context.Context, contentID string, filt
 // identical to the unbatched GetItemDetail path regardless of which pieces were
 // prefetched. A nil prefetch reproduces the original per-item behavior exactly.
 type itemDetailPrefetch struct {
+	trickplay          TrickplayAvailability
 	haveLocalization   bool
 	pendingTranslation string
 	localizedItem      *models.MediaItem
@@ -1854,6 +2133,8 @@ type itemDetailPrefetch struct {
 	workSummary        *WorkSummary
 	haveVideos         bool
 	videos             []models.ItemVideo
+	haveRatingSources  bool
+	ratingSources      []models.ItemRatingSource
 	haveExtras         bool
 	extras             []ExtraWithFile
 }
@@ -1898,12 +2179,15 @@ func (s *DetailService) buildMediaItemDetail(ctx context.Context, item *models.M
 		Title:                      item.Title,
 		SortTitle:                  item.SortTitle,
 		OriginalTitle:              item.OriginalTitle,
+		OriginalLanguage:           item.OriginalLanguage,
 		Year:                       item.Year,
 		Overview:                   item.Overview,
 		Tagline:                    item.Tagline,
 		PendingTranslationLanguage: pendingTranslation,
 		Runtime:                    item.Runtime,
 		ContentRating:              item.ContentRating,
+		AdvisoryAge:                item.AdvisoryAge,
+		AdvisorySource:             item.AdvisorySource,
 		Genres:                     item.Genres,
 		RatingIMDB:                 item.RatingIMDB,
 		RatingTMDB:                 item.RatingTMDB,
@@ -1916,7 +2200,7 @@ func (s *DetailService) buildMediaItemDetail(ctx context.Context, item *models.M
 		Crew:                       crewCredits,
 		Studios:                    item.Studios,
 		Networks:                   item.Networks,
-		Countries:                  item.Countries,
+		Countries:                  lang.UniqueCountries(item.Countries),
 		LockedFields:               item.LockedFields,
 		FirstAirDate:               item.FirstAirDate,
 		LastAirDate:                item.LastAirDate,
@@ -1958,11 +2242,12 @@ func (s *DetailService) buildMediaItemDetail(ctx context.Context, item *models.M
 			sortAudiobookMediaFiles(files)
 		}
 		files = s.prepareBrowseFiles(ctx, files)
-		detail.Versions, detail.PlaybackVariants, detail.Subtitles, detail.Intro, detail.Credits, detail.Recap, detail.Preview = s.buildPlaybackInfo(
-			ctx,
-			files,
-			filter,
-			item.ContentID,
+		availability := s.trickplay
+		if pf != nil {
+			availability = pf.trickplay
+		}
+		detail.Versions, detail.PlaybackVariants, detail.Subtitles, detail.Intro, detail.Credits, detail.Recap, detail.Preview = s.buildPlaybackInfoWith(
+			ctx, files, filter, s.newAudioPrefResolver(ctx, filter, item.ContentID), availability,
 		)
 		detail.OverlaySummary = overlays.BuildSummary(files)
 		// Movie pre-play selectors need the same effective subtitle defaults
@@ -1975,9 +2260,10 @@ func (s *DetailService) buildMediaItemDetail(ctx context.Context, item *models.M
 		}
 	}
 
-	// Trailers/extras apply to movies and series only.
+	// Trailers, extras and per-source ratings apply to movies and series only.
 	if item.Type == "movie" || item.Type == "series" {
 		detail.Videos = s.fetchItemVideos(ctx, contentID, pf)
+		detail.RatingSources = s.fetchItemRatingSources(ctx, contentID, pf)
 		detail.Extras = s.fetchItemExtras(ctx, contentID, pf)
 	}
 
@@ -2110,6 +2396,7 @@ func (s *DetailService) personCredits(ctx context.Context, people []models.ItemP
 			ImdbID:    p.ImdbID,
 			TvdbID:    p.TvdbID,
 			PlexGUID:  p.PlexGUID,
+			PhotoPath: p.PhotoPath,
 		}
 		if strings.HasPrefix(p.PhotoPath, "http://") || strings.HasPrefix(p.PhotoPath, "https://") {
 			pc.PhotoURL = p.PhotoPath
@@ -2143,6 +2430,7 @@ func splitCastCrew(credits []PersonCredit) ([]CastCredit, []CrewCredit) {
 				PlexGUID:       pc.PlexGUID,
 				PhotoURL:       pc.PhotoURL,
 				PhotoThumbhash: pc.PhotoThumbhash,
+				PhotoPath:      pc.PhotoPath,
 			})
 		default:
 			crew = append(crew, CrewCredit{
@@ -2155,6 +2443,7 @@ func splitCastCrew(credits []PersonCredit) ([]CastCredit, []CrewCredit) {
 				PlexGUID:       pc.PlexGUID,
 				PhotoURL:       pc.PhotoURL,
 				PhotoThumbhash: pc.PhotoThumbhash,
+				PhotoPath:      pc.PhotoPath,
 			})
 		}
 	}
@@ -2400,7 +2689,7 @@ func appendAudiobookItemAccessConditions(
 		*args = append(*args, filter.DisabledLibraryIDs)
 		*argIdx = *argIdx + 1
 	}
-	ApplySectionAccessFilter(alias, AccessFilter{MaxContentRating: filter.MaxContentRating}, conditions, args, argIdx)
+	ApplySectionAccessFilter(alias, AccessFilter{MaturityLimits: filter.MaturityLimits}, conditions, args, argIdx)
 	return true
 }
 
@@ -2835,27 +3124,36 @@ func (s *DetailService) buildEpisodeDetail(ctx context.Context, episode *models.
 	detail.PosterURL = s.PresignImageURL(ctx, episode.StillPath, "still", string(filter.ImageSize))
 	detail.BackdropURL = seriesCtx.backdropURL
 
-	files, err := s.fileFetcher.GetByEpisodeID(ctx, episode.ContentID)
-	if err != nil {
-		return nil, fmt.Errorf("fetching file versions: %w", err)
+	files := seriesCtx.filesByEpisode[episode.ContentID]
+	if seriesCtx.filesByEpisode == nil {
+		var err error
+		files, err = s.fileFetcher.GetByEpisodeID(ctx, episode.ContentID)
+		if err != nil {
+			return nil, fmt.Errorf("fetching file versions: %w", err)
+		}
 	}
 	files = FilterMediaFilesByAccess(files, filter)
 	files = s.prepareBrowseFiles(ctx, files)
-	detail.Versions, detail.PlaybackVariants, detail.Subtitles, detail.Intro, detail.Credits, detail.Recap, detail.Preview = s.buildPlaybackInfo(
+	detail.Versions, detail.PlaybackVariants, detail.Subtitles, detail.Intro, detail.Credits, detail.Recap, detail.Preview = s.buildPlaybackInfoWith(
 		ctx,
 		files,
 		filter,
-		episode.SeriesID,
+		s.episodeAudioResolver(ctx, seriesCtx, filter, episode.SeriesID),
+		seriesCtx.trickplay,
 	)
 	detail.OverlaySummary = overlays.BuildSummary(files)
-	s.effectiveSubtitleDefaults(ctx, filter, episode.SeriesID, files).applyToItemDetail(detail)
-	if seriesCtx.versionPref.HasAny {
-		if seriesCtx.versionPref.Resolution != "" {
-			detail.EffectiveVersionResolution = stringPtr(seriesCtx.versionPref.Resolution)
+	s.episodeSubtitleDefaults(ctx, seriesCtx, filter, episode.SeriesID, files).applyToItemDetail(detail)
+	versionPref := seriesCtx.versionPref
+	if episode.SeriesID != seriesCtx.series.ContentID {
+		versionPref = s.effectiveVersionDefaults(ctx, filter, episode.SeriesID)
+	}
+	if versionPref.HasAny {
+		if versionPref.Resolution != "" {
+			detail.EffectiveVersionResolution = stringPtr(versionPref.Resolution)
 		}
-		detail.EffectiveVersionHDR = boolPtr(seriesCtx.versionPref.HDR)
-		if seriesCtx.versionPref.CodecVideo != "" {
-			detail.EffectiveVersionCodecVideo = stringPtr(seriesCtx.versionPref.CodecVideo)
+		detail.EffectiveVersionHDR = boolPtr(versionPref.HDR)
+		if versionPref.CodecVideo != "" {
+			detail.EffectiveVersionCodecVideo = stringPtr(versionPref.CodecVideo)
 		}
 	}
 
@@ -3103,7 +3401,7 @@ func (s *DetailService) effectiveSubtitleDefaults(
 		return defaults
 	}
 
-	rc := settingsresolve.Context{ProfileID: filter.ProfileID}
+	rc := settingsresolve.Context{ProfileID: filter.ProfileID, DeviceID: filter.DeviceID}
 	if libraryID := preferredPlayableLibraryID(files, filter.SelectedFileID); libraryID > 0 {
 		rc.LibraryIDs = []int{libraryID}
 	}
@@ -3406,7 +3704,7 @@ func (s *DetailService) effectiveAudioSelectionWith(
 		return originalLanguage
 	}
 
-	usesOriginal := preferredLang == playback.OriginalLanguageSentinel
+	usesOriginal := playback.IsOriginalLanguagePreference(preferredLang)
 	if usesOriginal {
 		preferredLang = resolveOriginalLanguage()
 		if preferredLang == "" {
@@ -3415,7 +3713,7 @@ func (s *DetailService) effectiveAudioSelectionWith(
 			// failure behavior while moving the content-scoped read to canonical
 			// storage.
 			preferredLang = r.profileLanguage(ctx)
-			if preferredLang == playback.OriginalLanguageSentinel {
+			if playback.IsOriginalLanguagePreference(preferredLang) {
 				preferredLang = resolveOriginalLanguage()
 			}
 		}
@@ -3533,13 +3831,23 @@ func (s *DetailService) buildPlaybackInfo(
 	filter AccessFilter,
 	audioPreferenceContentID string,
 ) ([]FileVersion, []PlaybackVariant, []SubtitleInfo, *Marker, *Marker, *Marker, *Marker) {
+	// Resolve the request-invariant audio preferences once; a multi-track item
+	// would otherwise re-query the profile/preference rows for every file.
+	return s.buildPlaybackInfoWith(ctx, files, filter, s.newAudioPrefResolver(ctx, filter, audioPreferenceContentID), s.trickplay)
+}
+
+// buildPlaybackInfoWith is buildPlaybackInfo with a caller-owned audio
+// resolver, so a batch over one series can share it across episodes.
+func (s *DetailService) buildPlaybackInfoWith(
+	ctx context.Context,
+	files []*models.MediaFile,
+	filter AccessFilter,
+	audioResolver *audioPrefResolver,
+	availability TrickplayAvailability,
+) ([]FileVersion, []PlaybackVariant, []SubtitleInfo, *Marker, *Marker, *Marker, *Marker) {
 	versions := make([]FileVersion, 0, len(files))
 	subtitleSet := make(map[string]SubtitleInfo)
 	var firstIntro, firstCredits, firstRecap, firstPreview *Marker
-
-	// Resolve the request-invariant audio preferences once; a multi-track item
-	// would otherwise re-query the profile/preference rows for every file.
-	audioResolver := s.newAudioPrefResolver(ctx, filter, audioPreferenceContentID)
 
 	for _, f := range files {
 		if f == nil {
@@ -3594,6 +3902,8 @@ func (s *DetailService) buildPlaybackInfo(
 			Credits:                  versionCredits,
 			Recap:                    versionRecap,
 			Preview:                  versionPreview,
+			MarkerSegments:           models.EffectiveMarkerSegments(f),
+			Unreadable:               f.ProbeRejected(),
 		})
 
 		for _, sub := range f.SubtitleTracks {
@@ -3630,6 +3940,7 @@ func (s *DetailService) buildPlaybackInfo(
 		subtitles = append(subtitles, sub)
 	}
 
+	s.markTrickplay(ctx, versions, availability)
 	variants := buildPlaybackVariants(versions, filter.SelectedFileID)
 	selectedVersionExists := playbackVersionExists(versions, filter.SelectedFileID)
 	pick := func(field func(v FileVersion) *Marker, fallback *Marker) *Marker {
@@ -3929,6 +4240,13 @@ func (s *DetailService) buildVersionChapters(ctx context.Context, file *models.M
 		return []VersionChapter{}
 	}
 
+	paths := make([]string, 0, len(file.Chapters))
+	for _, chapter := range file.Chapters {
+		if chapter.ThumbnailPath != "" {
+			paths = append(paths, chapter.ThumbnailPath)
+		}
+	}
+	resolved := s.PresignURLsWithExpiry(ctx, paths, "card")
 	chapters := make([]VersionChapter, 0, len(file.Chapters))
 	for _, chapter := range file.Chapters {
 		ch := VersionChapter{
@@ -3940,7 +4258,7 @@ func (s *DetailService) buildVersionChapters(ctx context.Context, file *models.M
 			ThumbnailThumbhash: chapter.ThumbnailThumbhash,
 		}
 		if chapter.ThumbnailPath != "" {
-			ch.ThumbnailURL = s.PresignURL(ctx, strings.Replace(chapter.ThumbnailPath, "/original.", "/w300.", 1), "card")
+			ch.ThumbnailURL = resolved[chapter.ThumbnailPath].URL
 		}
 		chapters = append(chapters, ch)
 	}
@@ -3984,6 +4302,7 @@ func buildVersionSubtitleTracks(file *models.MediaFile) []VersionSubtitleTrack {
 			Language:        sub.Language,
 			Codec:           sub.Format,
 			Title:           firstNonEmpty(sub.Title, filepath.Base(sub.Path)),
+			TitleIsFallback: strings.TrimSpace(sub.Title) == "",
 			EmbeddedTitle:   sub.EmbeddedTitle,
 			Resolution:      sub.Resolution,
 			Forced:          sub.Forced,

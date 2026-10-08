@@ -20,6 +20,7 @@ import { SettingsPageRail } from "@/components/settings/SettingsPageRail";
 import GeneralSettings from "./GeneralSettings";
 import AppearanceSettings from "./AppearanceSettings";
 import SecurityAccessSettings from "./SecurityAccessSettings";
+import SignInSettings from "./SignInSettings";
 import LibraryMetadataSettings from "./LibraryMetadataSettings";
 import PlaybackSettings from "./PlaybackSettings";
 import DownloadsSettings from "./DownloadsSettings";
@@ -29,6 +30,7 @@ import WatchSyncSettings from "./WatchSyncSettings";
 import AISettings from "./AISettings";
 import NotificationsAdminSettings from "./NotificationsAdminSettings";
 import CompatibilityProxiesSettings from "./CompatibilityProxiesSettings";
+import NetworkAccessSettings from "./NetworkAccessSettings";
 import InfrastructureSettings from "./InfrastructureSettings";
 import SettingsOverview from "./SettingsOverview";
 import "@/styles/admin-settings.css";
@@ -41,6 +43,7 @@ const SETTINGS_COMPONENTS: Record<string, ComponentType> = {
   general: GeneralSettings,
   appearance: AppearanceSettings,
   security: SecurityAccessSettings,
+  "sign-in": SignInSettings,
   library: LibraryMetadataSettings,
   playback: PlaybackSettings,
   downloads: DownloadsSettings,
@@ -50,6 +53,7 @@ const SETTINGS_COMPONENTS: Record<string, ComponentType> = {
   ai: AISettings,
   notifications: NotificationsAdminSettings,
   compatibility: CompatibilityProxiesSettings,
+  "network-access": NetworkAccessSettings,
   infrastructure: InfrastructureSettings,
 };
 

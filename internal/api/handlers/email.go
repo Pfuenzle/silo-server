@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,11 +16,13 @@ import (
 // features; this handler only owns configuration verification.
 type EmailHandler struct {
 	sender silomail.Sender
+	brand  *silomail.BrandLoader
 }
 
-// NewEmailHandler creates an EmailHandler.
-func NewEmailHandler(sender silomail.Sender) *EmailHandler {
-	return &EmailHandler{sender: sender}
+// NewEmailHandler creates an EmailHandler. brand styles the test message so
+// it previews the server's branded emails; nil sends Silo's default branding.
+func NewEmailHandler(sender silomail.Sender, brand *silomail.BrandLoader) *EmailHandler {
+	return &EmailHandler{sender: sender, brand: brand}
 }
 
 type emailTestRequest struct {
@@ -50,23 +53,10 @@ func (h *EmailHandler) HandleTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	started := time.Now()
-	err := h.sender.Send(r.Context(), silomail.Message{
-		To:      []string{req.To},
-		Subject: "Silo test email",
-		TextBody: "This is a test email from your Silo server.\n\n" +
-			"If you received it, outbound email is configured correctly.",
-		HTMLBody: silomail.RenderLayout(silomail.LayoutOptions{
-			Preheader: "Outbound email from your Silo server is configured correctly.",
-			Title:     "Outbound email is working",
-			BodyHTML: silomail.EmailParagraph("This is a test email from your Silo server.") +
-				silomail.EmailParagraph("If you're reading it, the SMTP settings are correct and "+
-					"notification emails will look like this one."),
-		}),
-	})
+	duration, err := h.sendTestEmail(r.Context(), req.To)
 	response := emailTestResponse{
 		OK:         err == nil,
-		DurationMS: time.Since(started).Milliseconds(),
+		DurationMS: duration,
 	}
 	switch {
 	case err == nil:
@@ -76,4 +66,26 @@ func (h *EmailHandler) HandleTest(w http.ResponseWriter, r *http.Request) {
 		response.Message = err.Error()
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+// sendTestEmail constructs and dispatches the same message for both transports.
+func (h *EmailHandler) sendTestEmail(ctx context.Context, to string) (int64, error) {
+	started := time.Now()
+	brand := h.brand.Load(ctx)
+	err := h.sender.Send(ctx, silomail.Message{
+		To:      []string{to},
+		Subject: "Silo test email",
+		TextBody: "This is a test email from your Silo server.\n\n" +
+			"If you received it, outbound email is configured correctly.",
+		HTMLBody: silomail.RenderLayout(silomail.LayoutOptions{
+			Brand:     brand,
+			Preheader: "Outbound email from your Silo server is configured correctly.",
+			Title:     "Outbound email is working",
+			BodyHTML: silomail.EmailParagraph("This is a test email from your Silo server.") +
+				silomail.EmailParagraph("If you're reading it, the SMTP settings are correct and "+
+					"notification emails will look like this one."),
+		}),
+		Inline: brand.InlineImages(),
+	})
+	return time.Since(started).Milliseconds(), err
 }

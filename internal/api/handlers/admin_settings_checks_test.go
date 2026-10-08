@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -70,10 +71,21 @@ func (f *fakeServerSettingsStore) UpdateAtomic(
 
 func TestAdminGetEffectiveSettingsReturnsRuntimeDefaultsAndRedactsSecrets(t *testing.T) {
 	settings := &fakeServerSettingsStore{values: map[string]string{
-		"server.log_level": "debug",
-		"tmdb.api_key":     "never-return-this",
+		"server.log_level":         "debug",
+		"tmdb.api_key":             "never-return-this",
+		"clientip.trusted_proxies": "10.0.0.0/8",
 	}}
-	handler := &AdminHandler{SettingsRepo: settings}
+	handler := &AdminHandler{
+		SettingsRepo: settings,
+		BootstrapSensitiveConfigured: map[string]bool{
+			"clientip.trusted_proxies": true,
+			"redis.url":                true,
+		},
+		BootstrapSensitiveValues: map[string]string{
+			"clientip.trusted_proxies": "192.0.2.0/24, 2001:db8::/32",
+			"redis.url":                "redis://private.example.invalid:6379",
+		},
+	}
 	rec := httptest.NewRecorder()
 
 	handler.HandleGetEffectiveSettings(rec, httptest.NewRequest(http.MethodGet, "/admin/settings/effective", nil))
@@ -96,6 +108,12 @@ func TestAdminGetEffectiveSettingsReturnsRuntimeDefaultsAndRedactsSecrets(t *tes
 	}
 	if _, leaked := values["tmdb.api_key"]; leaked {
 		t.Fatal("effective settings response leaked tmdb.api_key")
+	}
+	if got := values["clientip.trusted_proxies"]; got != "192.0.2.0/24, 2001:db8::/32" {
+		t.Fatalf("clientip.trusted_proxies = %q, want active environment value", got)
+	}
+	if _, leaked := values["redis.url"]; leaked {
+		t.Fatal("effective settings response leaked environment-managed redis.url")
 	}
 }
 
@@ -212,40 +230,6 @@ func TestAdminSettingsWritesRejectMachineManagedCheckpoint(t *testing.T) {
 			t.Fatalf("atomic update calls = %d, want 0", settings.atomicCalls)
 		}
 	})
-}
-
-func TestAdminGetEffectiveSettingsUsesEnvironmentManagedRuntimeValue(t *testing.T) {
-	settings := &fakeServerSettingsStore{values: map[string]string{
-		"clientip.trusted_proxies": "10.0.0.0/8",
-	}}
-	handler := &AdminHandler{
-		SettingsRepo: settings,
-		BootstrapSensitiveConfigured: map[string]bool{
-			"clientip.trusted_proxies": true,
-			"redis.url":                true,
-		},
-		BootstrapSensitiveValues: map[string]string{
-			"clientip.trusted_proxies": "192.0.2.0/24, 2001:db8::/32",
-			"redis.url":                "redis://private.example.invalid:6379",
-		},
-	}
-	rec := httptest.NewRecorder()
-
-	handler.HandleGetEffectiveSettings(rec, httptest.NewRequest(http.MethodGet, "/admin/settings/effective", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var values map[string]string
-	if err := json.NewDecoder(rec.Body).Decode(&values); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if got := values["clientip.trusted_proxies"]; got != "192.0.2.0/24, 2001:db8::/32" {
-		t.Fatalf("clientip.trusted_proxies = %q, want active environment value", got)
-	}
-	if _, leaked := values["redis.url"]; leaked {
-		t.Fatal("effective settings response leaked environment-managed redis.url")
-	}
 }
 
 func TestAdminSettingsValidationIncludesEnvironmentManagedValues(t *testing.T) {
@@ -674,7 +658,7 @@ func TestAdminSettingsRejectClearingOnlyRedisTransport(t *testing.T) {
 		}
 	})
 
-	t.Run("bootstrap Sentinel", func(t *testing.T) {
+	t.Run("bootstrap Redis URL", func(t *testing.T) {
 		settings := newStore()
 		handler := &AdminHandler{
 			SettingsRepo:            settings,
@@ -1028,12 +1012,14 @@ func TestCheckS3ObjectPermissionsCleansUpAfterAmbiguousPutFailure(t *testing.T) 
 func TestCheckS3ObjectPermissionsUsesFreshContextForFailureCleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var cleanupContextErr error
+	cleanupCalled := false
 	client := &fakeS3SettingsCheckClient{
 		getObject: func(context.Context, string, string) ([]byte, error) {
 			cancel()
 			return nil, context.Canceled
 		},
 		delete: func(ctx context.Context, _, _ string) error {
+			cleanupCalled = true
 			cleanupContextErr = ctx.Err()
 			return nil
 		},
@@ -1044,8 +1030,8 @@ func TestCheckS3ObjectPermissionsUsesFreshContextForFailureCleanup(t *testing.T)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context cancellation", err)
 	}
-	if cleanupContextErr != nil {
-		t.Fatalf("cleanup context error = %v, want live cleanup context", cleanupContextErr)
+	if !cleanupCalled || cleanupContextErr != nil {
+		t.Fatalf("cleanup called = %v, context error = %v; want cleanup on a live context", cleanupCalled, cleanupContextErr)
 	}
 }
 
@@ -1067,21 +1053,6 @@ func TestCheckS3ObjectPermissionsSurfacesCleanupFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "read probe object: read failed") {
 		t.Fatalf("error = %v, want original read failure", err)
 	}
-}
-
-type fakeRedisSettingsCheckClient struct {
-	ping func(ctx context.Context) error
-}
-
-func (f *fakeRedisSettingsCheckClient) Ping(ctx context.Context) error {
-	if f.ping != nil {
-		return f.ping(ctx)
-	}
-	return nil
-}
-
-func (f *fakeRedisSettingsCheckClient) Close() error {
-	return nil
 }
 
 type fakeEmbeddingsSettingsCheckClient struct {
@@ -1132,7 +1103,7 @@ func (f *fakeAISettingsCheckClient) Transcribe(
 	if f.transcribe != nil {
 		return f.transcribe(ctx, req)
 	}
-	return &llm.Transcription{}, nil
+	return &llm.Transcription{Segments: []llm.TranscriptionSegment{{Start: 0, End: 1, Text: "Subtitle test."}}}, nil
 }
 
 func TestHandleCheckSettingsConnectionAIChatDoesNotSendStoredKeyToDraftEndpoint(t *testing.T) {
@@ -1251,9 +1222,13 @@ func TestHandleCheckSettingsConnectionAITranscriptionUsesDedicatedASR(t *testing
 	newAdminAISettingsCheckClient = func(cfg llm.Config) aiSettingsCheckClient {
 		captured = cfg
 		return &fakeAISettingsCheckClient{
-			transcribe: func(_ context.Context, req llm.TranscribeRequest) (*llm.Transcription, error) {
+			transcribe: func(ctx context.Context, req llm.TranscribeRequest) (*llm.Transcription, error) {
 				request = req
-				return &llm.Transcription{}, nil
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) < req.Timeout || time.Until(deadline) > 80*time.Second {
+					t.Fatal("outer check deadline does not cover the transcription request")
+				}
+				return &llm.Transcription{Segments: []llm.TranscriptionSegment{{Start: 0, End: 1, Text: "Subtitle test."}}}, nil
 			},
 		}
 	}
@@ -1293,7 +1268,7 @@ func TestHandleCheckSettingsConnectionAITranscriptionUsesDedicatedASR(t *testing
 		captured.ASRModel != "whisper-model" {
 		t.Fatalf("captured ASR config = %+v", captured)
 	}
-	if len(request.Audio) == 0 || request.Filename == "" || request.Timeout <= 0 {
+	if len(request.Audio) == 0 || request.Filename == "" || request.Timeout <= 60*time.Second || request.Timeout > 75*time.Second {
 		t.Fatalf("transcription probe request = %+v, want bounded WAV probe", request)
 	}
 }
@@ -1523,53 +1498,6 @@ func TestHandleCheckSettingsConnectionRejectsInvalidDraftValues(t *testing.T) {
 	}
 }
 
-func TestSettingsCheckRouteIsNotShadowedByKeyRoute(t *testing.T) {
-	originalFactory := newAdminRedisSettingsCheckClient
-	t.Cleanup(func() {
-		newAdminRedisSettingsCheckClient = originalFactory
-	})
-
-	newAdminRedisSettingsCheckClient = func(cfg config.RedisConfig) (redisSettingsCheckClient, error) {
-		return &fakeRedisSettingsCheckClient{}, nil
-	}
-
-	handler := &AdminHandler{
-		SettingsRepo: &fakeServerSettingsStore{
-			values: map[string]string{
-				"redis.url": "redis://cache:6379",
-			},
-		},
-	}
-
-	router := chi.NewRouter()
-	router.Post("/admin/settings/check/{kind}", handler.HandleCheckSettingsConnection)
-	router.Get("/admin/settings/{key}", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusTeapot)
-	})
-
-	body, err := json.Marshal(map[string]any{
-		"values": map[string]string{
-			"redis.url": "redis://cache:6379",
-		},
-		"dirty_keys": []string{"redis.url"},
-	})
-	if err != nil {
-		t.Fatalf("Marshal() returned error: %v", err)
-	}
-
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/admin/settings/check/redis",
-		bytes.NewReader(body),
-	)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-}
-
 func TestAdminGetSettingRedactsSensitiveSetting(t *testing.T) {
 	for _, key := range []string{"watchsync.trakt.client_secret", "watchsync.simkl.client_secret"} {
 		t.Run(key, func(t *testing.T) {
@@ -1703,6 +1631,7 @@ func TestAdminUpdateSettingNormalizesAIEndpointAndModelValues(t *testing.T) {
 		{key: "ai.base_url", value: "  https://text.example.test/v1  ", want: "https://text.example.test/v1"},
 		{key: "ai.chat_model", value: "  chat-model  ", want: "chat-model"},
 		{key: "ai.asr_base_url", value: "  https://speech.example.test  ", want: "https://speech.example.test"},
+		{key: "ai.asr_base_url", value: "  https://openrouter.ai/api/v1  ", want: "https://openrouter.ai/api/v1"},
 		{key: "ai.asr_model", value: "  whisper-model  ", want: "whisper-model"},
 	} {
 		t.Run(tc.key, func(t *testing.T) {
@@ -1921,6 +1850,52 @@ func TestAdminGetSettingReportsRestartRequired(t *testing.T) {
 			// omitempty must keep the flag off the wire for live keys.
 			if seen := strings.Contains(rec.Body.String(), "restart_required"); seen != tc.wantRestartSeen {
 				t.Fatalf("restart_required present = %v, want %v; body=%s", seen, tc.wantRestartSeen, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAdminBatchAllowsOpenRouterASR(t *testing.T) {
+	settings := &fakeServerSettingsStore{}
+	handler := &AdminHandler{SettingsRepo: settings}
+	rec := httptest.NewRecorder()
+	handler.HandleUpdateSettings(rec, httptest.NewRequest(http.MethodPut, "/admin/settings", strings.NewReader(`{"values":{"ai.asr_base_url":"https://openrouter.ai/api/v1","ai.asr_model":"openai/whisper-large-v3","subtitle_ai.transcribe_enabled":"true"}}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body = %s", rec.Code, rec.Body.String())
+	}
+	if settings.values["ai.asr_base_url"] != "https://openrouter.ai/api/v1" || settings.values["subtitle_ai.transcribe_enabled"] != "true" {
+		t.Fatalf("settings not saved: %+v", settings.values)
+	}
+}
+
+func TestAITranscriptionConnectionRequiresTimestampedSpeech(t *testing.T) {
+	originalFactory := newAdminAISettingsCheckClient
+	t.Cleanup(func() { newAdminAISettingsCheckClient = originalFactory })
+	for _, tc := range []struct {
+		name   string
+		result *llm.Transcription
+		want   bool
+	}{
+		{name: "nil response"},
+		{name: "empty segments", result: &llm.Transcription{}},
+		{name: "blank text", result: &llm.Transcription{Segments: []llm.TranscriptionSegment{{Start: 0, End: 1, Text: " "}}}},
+		{name: "no timestamps", result: &llm.Transcription{Segments: []llm.TranscriptionSegment{{Text: "Test"}}}},
+		{name: "timestamped speech", result: &llm.Transcription{Segments: []llm.TranscriptionSegment{{Start: 0, End: 1, Text: "Test"}}}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newAdminAISettingsCheckClient = func(llm.Config) aiSettingsCheckClient {
+				return &fakeAISettingsCheckClient{transcribe: func(_ context.Context, req llm.TranscribeRequest) (*llm.Transcription, error) {
+					if !bytes.Equal(req.Audio[:4], []byte("RIFF")) || len(bytes.Trim(req.Audio[44:], "\x00")) == 0 {
+						t.Fatal("connection probe must contain audio, not silence")
+					}
+					return tc.result, nil
+				}}
+			}
+			cfg := &config.Config{}
+			cfg.AI.BaseURL = "https://openrouter.ai/api/v1"
+			cfg.AI.ASRModel = "openai/whisper-large-v3"
+			if got := checkAITranscriptionConnection(t.Context(), cfg); got.Success != tc.want {
+				t.Fatalf("connection result = %+v, want success = %v", got, tc.want)
 			}
 		})
 	}

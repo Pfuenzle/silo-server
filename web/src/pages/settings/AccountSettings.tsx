@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAccountPasswordCapability, useChangeAccountPassword } from "@/hooks/queries/account";
+import { AccountSignInSection } from "./AccountSignInSection";
 
 function passwordByteLength(value: string) {
   return new TextEncoder().encode(value).length;
@@ -25,7 +26,7 @@ export default function AccountSettings() {
     setFormError(null);
 
     const limits = capability.data;
-    if (!limits?.change_password) {
+    if (!limits?.allowed) {
       setFormError("Password changes are unavailable for this account.");
       return;
     }
@@ -79,7 +80,7 @@ export default function AccountSettings() {
           <p className="text-destructive text-sm">
             Password settings could not be loaded. Refresh the page to try again.
           </p>
-        ) : !capability.data?.change_password ? (
+        ) : !capability.data?.allowed ? (
           <div className="max-w-2xl space-y-1 text-sm">
             <p className="font-medium">Local password changes are unavailable.</p>
             <p className="text-muted-foreground">
@@ -142,6 +143,8 @@ export default function AccountSettings() {
           </form>
         )}
       </SettingsGroup>
+
+      <AccountSignInSection />
     </div>
   );
 }

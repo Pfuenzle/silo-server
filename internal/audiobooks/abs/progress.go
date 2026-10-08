@@ -319,8 +319,9 @@ func (p syncPayload) timeDelta() float64 {
 // IDOR guard: the session must belong to the calling user (404 otherwise
 // so session existence isn't leaked to other users).
 //
-// Existing rows use UpdateProgressPosition so is_finished remains preserved;
-// a positive first heartbeat creates the missing progress row.
+// Uses UpdateProgressPosition (not UpsertProgress) to avoid overwriting
+// is_finished / progress_pct that the user set explicitly — a sync tick
+// that arrives after the user marks a book finished must not un-finish it.
 func (h *Handler) handleSessionSync(w http.ResponseWriter, r *http.Request) {
 	a, ok := absAuthFrom(r)
 	if !ok {
@@ -365,26 +366,14 @@ func (h *Handler) handleSessionSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Update position in user_watch_progress. Must NOT be a full upsert —
+	// see comment in handleSetItemProgress re: not overwriting is_finished.
 	if h.deps.ProgressStore != nil {
-		var syncErr error
-		existing, getErr := h.deps.ProgressStore.GetProgress(r.Context(), a.UserID, a.ProfileID, sess.ContentID)
-		if getErr == nil && existing == nil && p.CurrentTime > 0 {
-			syncErr = h.deps.ProgressStore.UpsertProgress(r.Context(), ProgressRow{
-				UserID:          a.UserID,
-				ProfileID:       a.ProfileID,
-				ContentID:       sess.ContentID,
-				CurrentSeconds:  p.CurrentTime,
-				DurationSeconds: float64(item.Runtime),
-				UpdatedAt:       time.Now(),
-			})
-		} else {
-			syncErr = h.deps.ProgressStore.UpdateProgressPosition(
-				r.Context(), a.UserID, a.ProfileID, sess.ContentID, p.CurrentTime,
-			)
-		}
-		if syncErr != nil {
+		if err := h.deps.ProgressStore.UpdateProgressPosition(
+			r.Context(), a.UserID, a.ProfileID, sess.ContentID, p.CurrentTime,
+		); err != nil {
 			slog.WarnContext(r.Context(), "abs session sync: update progress position failed", "component", "audiobooks",
-				"session_id", sid, "content_id", sess.ContentID, "error", syncErr)
+				"session_id", sid, "content_id", sess.ContentID, "error", err)
 		}
 	}
 	h.updateNativePlaybackProgress(r.Context(), sid, p.CurrentTime)

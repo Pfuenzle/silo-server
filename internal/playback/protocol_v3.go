@@ -11,16 +11,18 @@ import (
 )
 
 const (
-	ProtocolV3                   = 3
-	FeaturePlaybackPlanV3        = "playback_plan_v3"
-	FeatureEmbeddedSubtitlesV3   = "embedded_subtitles_v1"
-	FeatureNeutralContractV3     = "neutral_playback_v3_contract_v1"
-	FeatureLayoutPassthrough     = "layout_aware_passthrough"
-	FeatureClientVideoTransforms = "client_video_transformations_v1"
-	FeatureRouteDiagnostics      = "playback_route_diagnostics"
-	FeatureDeviceQuirksV3        = "device_quirks_v1"
-	FeatureSeekReanchorV3        = "seek_reanchor_v1"
-	FeatureOutputChangeV3        = "output_change_v1"
+	ProtocolV3                               = 3
+	FeaturePlaybackPlanV3                    = "playback_plan_v3"
+	FeatureServerRemoteStreamBitratePolicyV3 = "server_remote_stream_bitrate_policy_v1"
+	FeatureServerLocalStreamBitratePolicyV3  = "server_local_stream_bitrate_policy_v1"
+	FeatureEmbeddedSubtitlesV3               = "embedded_subtitles_v1"
+	FeatureNeutralContractV3                 = "neutral_playback_v3_contract_v1"
+	FeatureLayoutPassthrough                 = "layout_aware_passthrough"
+	FeatureClientVideoTransforms             = "client_video_transformations_v1"
+	FeatureRouteDiagnostics                  = "playback_route_diagnostics"
+	FeatureDeviceQuirksV3                    = "device_quirks_v1"
+	FeatureSeekReanchorV3                    = "seek_reanchor_v1"
+	FeatureOutputChangeV3                    = "output_change_v1"
 	// FeatureOutputDisplayEvidenceV3 tells a client this server understands
 	// output.display and its hdr_evidence tier. A pre-feature server ignores
 	// the field and falls back from a missing output.hdr_details to the
@@ -66,7 +68,14 @@ const (
 	// negotiate the token, or has no realtime connection, is stopped instead;
 	// the client's ordinary recovery then mints a fresh attempt that plans
 	// against the now-persisted verdict.
-	FeaturePlanInvalidatedV3   = "plan_invalidated_v1"
+	FeaturePlanInvalidatedV3 = "plan_invalidated_v1"
+	// FeatureSubripSidecarV3 is the client's statement that it parses SubRip
+	// itself, including {\anN} placement. An opted-in client receives
+	// external and downloaded SRT tracks as the original .srt bytes instead
+	// of the WebVTT conversion, which cannot carry every SRT feature. Embedded
+	// SRT tracks keep their existing delivery. It exists only on /api/v2 (see
+	// NativeServerFeaturesV3).
+	FeatureSubripSidecarV3     = "subrip_sidecar_v1"
 	PlanRecipeVersionV3        = "v3.4"
 	ClientDV7ToDV81V3          = "client_dv7_to_dv81"
 	ClientDV7ToHDR10V3         = "client_dv7_to_hdr10"
@@ -100,10 +109,39 @@ const (
 const (
 	TransportFeatureProgressiveRemuxExecutionV1 = "progressive_remux_execution_v1"
 	TransportFeatureProgressiveRemuxRelayV1     = "progressive_remux_relay_v1"
+	// Theme audio markers: a proxy that serves /stream/theme, and a transcode
+	// node that approves theme files as progressive AAC inputs.
+	TransportFeatureThemeAudioEgressV1    = "theme_audio_egress_v1"
+	TransportFeatureThemeAudioExecutionV1 = "theme_audio_execution_v1"
+	// A transcode node that executes the multi-track prepared-download layout
+	// (PreparedTracksRecipeVersion).
+	TransportFeaturePreparedTracksV1 = "prepared_tracks_v1"
+	// A transcode node that makes trickplay sheets (POST /trickplay/extract).
+	TransportFeatureTrickplayExtractV1 = "trickplay_extract_v1"
 )
 
 // Degradation warning codes reported by playback plans.
-const DegradationWarningHDRToneMappedV3 = "hdr_tone_mapped"
+const (
+	DegradationWarningHDRToneMappedV3 = "hdr_tone_mapped"
+	// A carried-over audio selection is not on the effective file, so the plan
+	// plays the file's default audio track instead of refusing to start.
+	DegradationWarningAudioTrackUnavailableV3 = "audio_track_unavailable"
+	// A carried-over subtitle selection has no equivalent on the effective
+	// file, so the plan starts with subtitles off instead of refusing to start.
+	DegradationWarningSubtitleTrackUnavailableV3 = "subtitle_track_unavailable"
+)
+
+// AudioTrackUnavailableWarningV3 reports an audio selection that fell back to
+// the file's default track.
+func AudioTrackUnavailableWarningV3() DegradationWarningV3 {
+	return DegradationWarningV3{Code: DegradationWarningAudioTrackUnavailableV3, Message: "The selected audio track is not on this file; playing its default instead."}
+}
+
+// SubtitleTrackUnavailableWarningV3 reports a subtitle selection that was
+// dropped because the effective file has no equivalent track.
+func SubtitleTrackUnavailableWarningV3() DegradationWarningV3 {
+	return DegradationWarningV3{Code: DegradationWarningSubtitleTrackUnavailableV3, Message: "The selected subtitle track is not on this file; starting without it."}
+}
 
 // ServerFeaturesV3 returns the complete feature set advertised by protocol-v3
 // capability and decision responses. A fresh slice prevents callers from
@@ -111,6 +149,8 @@ const DegradationWarningHDRToneMappedV3 = "hdr_tone_mapped"
 func ServerFeaturesV3() []string {
 	return []string{
 		FeaturePlaybackPlanV3,
+		FeatureServerRemoteStreamBitratePolicyV3,
+		FeatureServerLocalStreamBitratePolicyV3,
 		FeatureNeutralContractV3,
 		FeatureEmbeddedSubtitlesV3,
 		FeatureLayoutPassthrough,
@@ -131,6 +171,20 @@ func ServerFeaturesV3() []string {
 		// fallback is still required.
 		FeaturePlanSourceDurationV3,
 	}
+}
+
+// NativeServerFeaturesV3 is ServerFeaturesV3 plus the features the server
+// advertises and honors only on /api/v2. They postdate the /api/v1 freeze, so
+// the frozen surface neither advertises nor negotiates them.
+func NativeServerFeaturesV3() []string {
+	return append(ServerFeaturesV3(), FeatureSubripSidecarV3)
+}
+
+// WithoutFeatureV3 returns features with every spelling of feature removed.
+func WithoutFeatureV3(features []string, feature string) []string {
+	return slices.DeleteFunc(slices.Clone(features), func(candidate string) bool {
+		return strings.EqualFold(strings.TrimSpace(candidate), feature)
+	})
 }
 
 type DecisionOutcomeV3 string
@@ -211,10 +265,12 @@ const (
 const (
 	TransformationAudioToAACV3      = "audio_to_aac"
 	TransformationVideoToH264V3     = "video_to_h264"
+	TransformationVideoToHEVCV3     = "video_to_hevc"
 	TransformationServerDV7HDR10V3  = "server_dv7_to_hdr10"
 	TransformationHDRToSDRToneMapV3 = "hdr_to_sdr_tonemap"
 
 	TransformationVideoToH264RecipeVersionV3     = "2"
+	TransformationVideoToHEVCRecipeVersionV3     = "1"
 	TransformationAudioToAACRecipeVersionV3      = "4"
 	TransformationHDRToSDRToneMapRecipeVersionV3 = "1"
 )
@@ -232,6 +288,7 @@ const (
 const (
 	ClaimAudioDecodeV3                = "audio_decode"
 	ClaimH264DecodeV3                 = "h264_decode"
+	ClaimHEVCDecodeV3                 = "hevc_decode"
 	ClaimDolbyVisionMetadataRemovedV3 = "dolby_vision_metadata_removed"
 	ClaimHDR10BaseLayerPreservedV3    = "hdr10_base_layer_preserved"
 	ClaimEnhancementLayerDiscardedV3  = "enhancement_layer_discarded"
@@ -252,6 +309,20 @@ const (
 	TerminalHDRTranscodeUnsupportedV3    = "hdr_transcode_unsupported"
 	TerminalDVConversionUnsupportedV3    = "dv_conversion_unsupported"
 )
+
+// TerminalSourceUnreadableV3 reports that ffprobe rejected the effective file
+// (zero-byte, corrupt, truncated) and no stream metadata exists for it. Unlike
+// source_metadata_incomplete, which covers a file that has not been probed
+// yet, retrying cannot help until the file is replaced and rescanned.
+const TerminalSourceUnreadableV3 = "source_unreadable"
+
+// TerminalSourceUnreadableMessageV3 is the planner message for
+// TerminalSourceUnreadableV3.
+const TerminalSourceUnreadableMessageV3 = "The source file could not be read; it appears to be empty or damaged."
+
+// TerminalBitratePolicyUnavailableV3 reports that no route fits the
+// administrator's local or remote per-stream bitrate limit for this version.
+const TerminalBitratePolicyUnavailableV3 = "bitrate_policy_unavailable"
 
 type SubtitleModeV3 string
 
@@ -474,20 +545,25 @@ type DeliverySubtitleCapabilitiesV3 struct {
 }
 
 type DeliveryCapabilityV3 struct {
-	Enabled                bool                           `json:"enabled"`
-	SupportedOnDevice      bool                           `json:"supported_on_device"`
-	FailureReason          string                         `json:"failure_reason,omitempty"`
-	Containers             []string                       `json:"containers"`
-	VideoCodecs            []string                       `json:"video_codecs"`
-	AudioDecodeCodecs      []string                       `json:"audio_decode_codecs"`
-	AudioPassthroughCodecs []string                       `json:"audio_passthrough_codecs"`
-	MaxChannels            *int                           `json:"max_channels,omitempty"`
-	HDRDetails             *HDRCapabilitiesV3             `json:"hdr_details,omitempty"`
-	Subtitles              DeliverySubtitleCapabilitiesV3 `json:"subtitles"`
-	Features               []string                       `json:"features"`
-	AuthHeaderRefresh      bool                           `json:"auth_header_refresh"`
-	ValidatedClaims        []string                       `json:"validated_claims"`
-	Transformations        []TransformationV3             `json:"transformations"`
+	Enabled                bool     `json:"enabled"`
+	SupportedOnDevice      bool     `json:"supported_on_device"`
+	FailureReason          string   `json:"failure_reason,omitempty"`
+	Containers             []string `json:"containers"`
+	VideoCodecs            []string `json:"video_codecs"`
+	AudioDecodeCodecs      []string `json:"audio_decode_codecs"`
+	AudioPassthroughCodecs []string `json:"audio_passthrough_codecs"`
+	// MaxChannels caps the channel count of the audio stream this class
+	// delivers: the most channels the client can play from it. A client whose
+	// player downmixes surround itself omits it. A source track above it is
+	// converted to AAC within the ceiling, on a video-copy remux when the
+	// video can be copied. Zero or less means unset.
+	MaxChannels       *int                           `json:"max_channels,omitempty"`
+	HDRDetails        *HDRCapabilitiesV3             `json:"hdr_details,omitempty"`
+	Subtitles         DeliverySubtitleCapabilitiesV3 `json:"subtitles"`
+	Features          []string                       `json:"features"`
+	AuthHeaderRefresh bool                           `json:"auth_header_refresh"`
+	ValidatedClaims   []string                       `json:"validated_claims"`
+	Transformations   []TransformationV3             `json:"transformations"`
 }
 
 // ClientPlaybackContextV3 carries the client's execution context. Feature
@@ -508,12 +584,15 @@ type ClientPlaybackContextV3 struct {
 }
 
 type StartRequestV3 struct {
-	ProtocolVersion            int                       `json:"protocol_version"`
-	ClientFeatures             []string                  `json:"client_features"`
-	FileID                     int                       `json:"file_id"`
-	ProfileID                  string                    `json:"profile_id"`
-	PlaybackAttemptID          string                    `json:"playback_attempt_id"`
-	QualityPreference          string                    `json:"quality_preference"`
+	ProtocolVersion   int      `json:"protocol_version"`
+	ClientFeatures    []string `json:"client_features"`
+	FileID            int      `json:"file_id"`
+	ProfileID         string   `json:"profile_id"`
+	PlaybackAttemptID string   `json:"playback_attempt_id"`
+	QualityPreference string   `json:"quality_preference"`
+	// False pins the source file through start and every replan. Encoding and
+	// delivery can still adapt to the viewer without changing the timeline.
+	AllowAlternateVersions     *bool                     `json:"allow_alternate_versions,omitempty"`
 	SubtitleFidelityPreference SubtitleFidelityV3        `json:"subtitle_fidelity_preference"`
 	StartPosition              *float64                  `json:"start_position,omitempty"`
 	ProgressPersistence        ProgressPersistenceV3     `json:"progress_persistence,omitempty"`
@@ -526,6 +605,10 @@ type StartRequestV3 struct {
 	BandwidthCapKbps           *int                      `json:"bandwidth_cap_kbps,omitempty"`
 	Capabilities               ClientCodecCapabilitiesV3 `json:"client_capabilities"`
 	ClientPlaybackContext      ClientPlaybackContextV3   `json:"client_playback_context"`
+}
+
+func (r StartRequestV3) AllowsAlternateVersions() bool {
+	return r.AllowAlternateVersions == nil || *r.AllowAlternateVersions
 }
 
 // ProgressPersistenceV3 declares which side owns durable item resume/history.
@@ -1349,10 +1432,13 @@ func HasFeatureV3(features []string, wanted string) bool {
 //   - software_video_decode_v1 widens the direct-play evidence tiers. Dropping
 //     it on a replan silently converts a direct route into a transcode and
 //     persists that downgrade into the durable normalized request.
+//   - subrip_sidecar_v1 picks the representation of every SRT sidecar URL.
+//     Switching it mid-attempt would publish one track under two URLs, and a
+//     seek reanchor must reproduce the frozen plan's artifact exactly.
 //
 // Stop/start is the explicit boundary for changing any of them.
 func AttemptStickyFeaturesV3() []string {
-	return []string{FeatureHeaderAuthenticatedMediaV3, FeatureAuthorizedMediaOriginsV3, FeatureSoftwareVideoDecodeV3}
+	return []string{FeatureHeaderAuthenticatedMediaV3, FeatureAuthorizedMediaOriginsV3, FeatureSoftwareVideoDecodeV3, FeatureSubripSidecarV3}
 }
 
 // PinAttemptStickyFeaturesV3 returns requested with every attempt-sticky

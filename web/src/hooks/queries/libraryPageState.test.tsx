@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiClientError } from "@/api/client";
+import { v2Problem } from "@/api/v2/problems.test-support";
 import {
   libraryPageStateWriteRetryDelay,
   shouldRetryLibraryPageStateWrite,
@@ -65,52 +65,9 @@ describe("useLibraryPageStatePreference", () => {
     };
   });
 
-  it("serializes whole-document saves and preserves queued library changes", async () => {
-    let resolveFirst: ((value: unknown) => void) | undefined;
-    mocks.mutateAsync
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            resolveFirst = resolve;
-          }),
-      )
-      .mockResolvedValueOnce({});
-    const { result } = renderHook(() => useLibraryPageStatePreference());
-
-    act(() => {
-      void result.current.saveLibrarySearch(7, "tab=library&sort=year");
-      void result.current.saveLibrarySearch(9, "tab=collections");
-    });
-
-    await waitFor(() => expect(mocks.mutateAsync).toHaveBeenCalledTimes(1));
-    expect(mocks.mutate).not.toHaveBeenCalled();
-
-    await act(async () => {
-      resolveFirst?.({});
-      await Promise.resolve();
-    });
-    await waitFor(() => expect(mocks.mutateAsync).toHaveBeenCalledTimes(2));
-
-    expect(mocks.mutateAsync.mock.calls[0][0].value).toEqual({
-      version: 1,
-      libraries: {
-        "3": { search: "tab=collections" },
-        "7": { search: "tab=library&sort=year" },
-      },
-    });
-    expect(mocks.mutateAsync.mock.calls[1][0].value).toEqual({
-      version: 1,
-      libraries: {
-        "3": { search: "tab=collections" },
-        "7": { search: "tab=library&sort=year" },
-        "9": { search: "tab=collections" },
-      },
-    });
-  });
-
   it("allows the same desired state to retry after a failed write", async () => {
     mocks.mutateAsync
-      .mockRejectedValueOnce(new ApiClientError(429, "rate_limited", "rate limited"))
+      .mockRejectedValueOnce(v2Problem(429, "rate_limited", "rate limited"))
       .mockResolvedValueOnce({});
     const { result } = renderHook(() => useLibraryPageStatePreference());
 
@@ -162,8 +119,8 @@ describe("useLibraryPageStatePreference", () => {
 
     await waitFor(() => expect(mocks.mutateAsync).toHaveBeenCalledTimes(1));
     await act(async () => {
-      rejectFirst?.(new ApiClientError(429, "rate_limited", "rate limited"));
-      expect(await rejectedError).toEqual(new ApiClientError(429, "rate_limited", "rate limited"));
+      rejectFirst?.(v2Problem(429, "rate_limited", "rate limited"));
+      expect(await rejectedError).toEqual(v2Problem(429, "rate_limited", "rate limited"));
       await queued;
     });
 
@@ -212,7 +169,7 @@ describe("useLibraryPageStatePreference", () => {
 
   it("treats a server error as ambiguous before advancing the queue", async () => {
     mocks.mutateAsync
-      .mockRejectedValueOnce(new ApiClientError(503, "unavailable", "service unavailable"))
+      .mockRejectedValueOnce(v2Problem(503, "unavailable", "service unavailable"))
       .mockResolvedValueOnce({});
     const { result } = renderHook(() => useLibraryPageStatePreference());
 
@@ -503,7 +460,7 @@ describe("useLibraryPageStatePreference", () => {
       rerender();
     });
     await act(async () => {
-      rejectFirst?.(new ApiClientError(429, "rate_limited", "rate limited"));
+      rejectFirst?.(v2Problem(429, "rate_limited", "rate limited"));
       await rejectedError;
       await queued;
     });
@@ -527,7 +484,7 @@ describe("useLibraryPageStatePreference", () => {
             resolveFirst = resolve;
           }),
       )
-      .mockRejectedValueOnce(new ApiClientError(429, "rate_limited", "rate limited"));
+      .mockRejectedValueOnce(v2Problem(429, "rate_limited", "rate limited"));
     const { result } = renderHook(() => useLibraryPageStatePreference());
 
     const first = result.current.saveLibrarySearch(7, "tab=library&sort=year");
@@ -544,13 +501,13 @@ describe("useLibraryPageStatePreference", () => {
     });
 
     await expect(coalesced).resolves.toEqual({});
-    expect(await tailError).toEqual(new ApiClientError(429, "rate_limited", "rate limited"));
+    expect(await tailError).toEqual(v2Problem(429, "rate_limited", "rate limited"));
     expect(mocks.mutateAsync).toHaveBeenCalledTimes(2);
   });
 
   it("returns the rejected promise for a matching middle write", async () => {
     let resolveFirst: ((value: unknown) => void) | undefined;
-    const rejected = new ApiClientError(429, "rate_limited", "rate limited");
+    const rejected = v2Problem(429, "rate_limited", "rate limited");
     mocks.mutateAsync
       .mockImplementationOnce(
         () =>
@@ -657,6 +614,13 @@ describe("useLibraryPageStatePreference", () => {
 
     const first = firstHook.result.current.saveLibrarySearch(7, "tab=library&sort=year");
     await waitFor(() => expect(mocks.mutateAsync).toHaveBeenCalledTimes(1));
+    expect(mocks.mutateAsync.mock.calls[0][0].value).toEqual({
+      version: 1,
+      libraries: {
+        "3": { search: "tab=collections" },
+        "7": { search: "tab=library&sort=year" },
+      },
+    });
     firstHook.unmount();
 
     const secondHook = renderHook(() => useLibraryPageStatePreference());
@@ -791,14 +755,13 @@ describe("useLibraryPageStatePreference", () => {
   });
 
   it("honors a rate-limit retry hint while keeping retries bounded by the caller", () => {
-    const error = new ApiClientError(429, "rate_limit_exceeded", "rate limited");
-    error.body = { retry_after: 30 };
+    const error = v2Problem(429, "rate_limited", "rate limited", { retryAfterSeconds: 30 });
 
     expect(shouldRetryLibraryPageStateWrite(error)).toBe(true);
     expect(libraryPageStateWriteRetryDelay(error, 2_000)).toBe(30_000);
     expect(
       libraryPageStateWriteRetryDelay(
-        new ApiClientError(422, "validation_failed", "invalid setting"),
+        v2Problem(422, "validation_failed", "invalid setting"),
         2_000,
       ),
     ).toBeNull();

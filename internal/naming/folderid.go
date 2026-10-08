@@ -1,16 +1,18 @@
 package naming
 
 import (
+	"path/filepath"
 	"regexp"
 	"strings"
 
+	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/providerid"
 )
 
 // folderIDPattern matches patterns like [tmdbid-27205], {tmdb-27205},
 // [imdbid-tt1375666], {imdb-tt1375666}, [tvdbid-81189], {tvdb-81189}, etc.
 // The regex captures the provider prefix and the ID value.
-var folderIDPattern = regexp.MustCompile(`(?i)(?:\((tmdb|tmdbid|imdb|imdbid|tvdb|tvdbid)-([a-z0-9]+)\)|\[(tmdb|tmdbid|imdb|imdbid|tvdb|tvdbid)-([a-z0-9]+)\]|\{(tmdb|tmdbid|imdb|imdbid|tvdb|tvdbid)-([a-z0-9]+)\})`)
+var folderIDPattern = regexp.MustCompile(`(?i)(?:\((tmdb|tmdbid|imdb|imdbid|tvdb|tvdbid)[-=]([a-z0-9]+)\)|\[(tmdb|tmdbid|imdb|imdbid|tvdb|tvdbid)[-=]([a-z0-9]+)\]|\{(tmdb|tmdbid|imdb|imdbid|tvdb|tvdbid)[-=]([a-z0-9]+)\})`)
 var trailingImdbIDPattern = regexp.MustCompile(`(?i)(?:^|\s)(tt\d{7,10})$`)
 
 // bracketedBareImdbPattern matches a bare IMDb id wrapped in brackets without a
@@ -62,6 +64,24 @@ func ParseStructuredFolderIDs(name string) *FolderIDHints {
 		return nil
 	}
 	return hints
+}
+
+// FileNameHasProviderTag reports whether a file's own name, without its
+// extension, carries a structured provider tag such as {tmdb-438631}.
+func FileNameHasProviderTag(filePath string) bool {
+	stem := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
+	return ParseStructuredFolderIDs(stem) != nil
+}
+
+// AnyFileNameHasProviderTag reports whether any of files, typically the files
+// of one movie root, carries a provider tag in its own name.
+func AnyFileNameHasProviderTag(files []*models.MediaFile) bool {
+	for _, file := range files {
+		if file != nil && FileNameHasProviderTag(file.FilePath) {
+			return true
+		}
+	}
+	return false
 }
 
 func isIMDbProviderID(value string) bool {

@@ -17,9 +17,11 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/mediaprobe"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/netaccess"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
@@ -93,7 +95,7 @@ func writeCompatAudioRecipeFFmpeg(t *testing.T, supportsV2 bool, output string) 
 	if supportsV2 {
 		smokeResult = "exit 0"
 	}
-	execute := "sleep 30"
+	execute := "exec sleep 30"
 	if output != "" {
 		execute = fmt.Sprintf("printf '%%s' %q", output)
 	}
@@ -228,7 +230,7 @@ func TestEnsureTranscodeSessionDoesNotHoldLifecycleLockWhileWaitingForManifest(t
 		"eval \"last=\\\"\\${$#}\\\"\"\n" +
 		"if [ \"$last\" = '-' ]; then exit 0; fi\n" +
 		"touch " + startedMarker + "\n" +
-		"sleep 30\n"
+		"exec sleep 30\n"
 	if err := os.WriteFile(ffmpegPath, []byte(ffmpegScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -333,13 +335,13 @@ func TestEnsureTranscodeSessionGivesSoftwareFallbackFreshManifestBudget(t *testi
 
 	ffmpegPath := filepath.Join(t.TempDir(), "fallback-ffmpeg.sh")
 	script := "#!/bin/sh\n" +
-		"case \"$*\" in *-hwaccels*) printf 'videotoolbox\\n'; exit 0;; *-encoders*) printf ' V..... h264_videotoolbox VideoToolbox H.264 encoder\\n'; exit 0;; *' -f lavfi '*) exit 0;; *scale_vt*) sleep 30; exit 0;; esac\n" +
+		"case \"$*\" in *-hwaccels*) printf 'videotoolbox\\n'; exit 0;; *-encoders*) printf ' V..... h264_videotoolbox VideoToolbox H.264 encoder\\n'; exit 0;; *' -f lavfi '*) exit 0;; *scale_vt*) exec sleep 30;; esac\n" +
 		"out=\"\"\n" +
 		"for arg in \"$@\"; do case \"$arg\" in *.m3u8) out=\"$(dirname \"$arg\")\";; esac; done\n" +
 		"mkdir -p \"$out\"\n" +
 		"for name in seg_00000.m4s seg_00001.m4s seg_00002.m4s; do printf segment > \"$out/$name\"; done\n" +
 		"printf '#EXTM3U\\n#EXT-X-TARGETDURATION:2\\n#EXT-X-MEDIA-SEQUENCE:0\\n#EXTINF:2,\\nseg_00000.m4s\\n#EXTINF:2,\\nseg_00001.m4s\\n#EXTINF:2,\\nseg_00002.m4s\\n' > \"$out/stream.m3u8\"\n" +
-		"sleep 30\n"
+		"exec sleep 30\n"
 	if err := os.WriteFile(ffmpegPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -419,6 +421,20 @@ func TestGenerateFullManifest_HLSVersionForResumeStartTag(t *testing.T) {
 				t.Fatalf("EXT-X-START presence = %v, want %v; manifest:\n%s", hasStart, tc.wantStart, got)
 			}
 		})
+	}
+}
+
+func TestCompatHLSUsesFMP4ForEncodedHEVC(t *testing.T) {
+	hevc := PlaybackMediaSource{TargetVideoCodec: compatVideoCodecHEVC}
+	if !compatHLSUsesFMP4(hevc) {
+		t.Fatal("encoded HEVC did not select fMP4 manifest")
+	}
+	manifest := string(generateFullManifest(60, 2, compatHLSUsesFMP4(hevc), 0))
+	if !strings.Contains(manifest, `#EXT-X-MAP:URI="init.mp4"`) || !strings.Contains(manifest, "seg_00000.m4s") || strings.Contains(manifest, "seg_00000.ts") {
+		t.Fatalf("encoded HEVC manifest does not match fMP4 output: %s", manifest)
+	}
+	if compatHLSUsesFMP4(PlaybackMediaSource{}) {
+		t.Fatal("legacy H264 encode unexpectedly selected fMP4")
 	}
 }
 
@@ -560,6 +576,7 @@ func TestBuildProxyRedirectURLRequestsSourceAlignedCompatManifest(t *testing.T) 
 		"http://transcode-1",
 		0,
 		&nodepool.Node{URL: "http://proxy-1"},
+		netaccess.Path{},
 	)
 	if err != nil {
 		t.Fatalf("buildProxyRedirectURL: %v", err)
@@ -575,7 +592,7 @@ func TestBuildProxyRedirectURLMarksCopyFMP4ForOldReaderRejection(t *testing.T) {
 	redirectURL, err := h.buildProxyRedirectURL(
 		"play-1", "upstream-1", string(playback.PlayTranscode),
 		&models.MediaFile{FilePath: "/media/movie.mkv"}, source, nil, time.Time{},
-		"http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"},
+		"http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"}, netaccess.Path{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -599,7 +616,7 @@ func TestBuildProxyRedirectURLCarriesMPEGTSForRemoteCopyRecipe(t *testing.T) {
 	redirectURL, err := h.buildProxyRedirectURL(
 		"play-1", "upstream-1", string(playback.PlayTranscode),
 		&models.MediaFile{FilePath: "/media/movie.mkv"}, source, nil, time.Time{},
-		"http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"},
+		"http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"}, netaccess.Path{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -616,7 +633,7 @@ func TestBuildProxyRedirectURLCarriesMPEGTSForRemoteCopyRecipe(t *testing.T) {
 func TestBuildProxyRedirectURLMarksToneMapForOldReaderRejection(t *testing.T) {
 	h := &PlaybackHandler{JWTSecret: "test-secret"}
 	source := PlaybackMediaSource{Version: catalog.FileVersion{HDR: true, VideoTracks: []models.VideoTrack{{VideoRangeType: "HDR10", ColorTransfer: "smpte2084"}}}}
-	redirectURL, err := h.buildProxyRedirectURL("play-1", "upstream-1", string(playback.PlayTranscode), &models.MediaFile{FilePath: "/media/hdr.mkv"}, source, nil, time.Time{}, "http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"})
+	redirectURL, err := h.buildProxyRedirectURL("play-1", "upstream-1", string(playback.PlayTranscode), &models.MediaFile{FilePath: "/media/hdr.mkv"}, source, nil, time.Time{}, "http://transcode-1", 0, &nodepool.Node{URL: "http://proxy-1"}, netaccess.Path{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -653,6 +670,7 @@ func TestBuildProxyRedirectURLCarriesAudioOnlyRemuxClaim(t *testing.T) {
 		"",
 		0,
 		&nodepool.Node{URL: "http://proxy-1"},
+		netaccess.Path{},
 	)
 	if err != nil {
 		t.Fatalf("buildProxyRedirectURL: %v", err)
@@ -894,11 +912,11 @@ func TestProxyRedirectURLClaimGrowthBudget(t *testing.T) {
 
 	for _, method := range []string{string(playback.PlayDirect), string(playback.PlayRemux), string(playback.PlayTranscode)} {
 		t.Run(method, func(t *testing.T) {
-			withClaims, err := h.buildProxyRedirectURL("play", "upstream", method, file, source, session, createdAt, transcodeNodeURL, 12.5, proxyNode)
+			withClaims, err := h.buildProxyRedirectURL("play", "upstream", method, file, source, session, createdAt, transcodeNodeURL, 12.5, proxyNode, netaccess.Path{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			withoutClaims, err := h.buildProxyRedirectURL("play", "upstream", method, file, source, nil, time.Time{}, transcodeNodeURL, 12.5, proxyNode)
+			withoutClaims, err := h.buildProxyRedirectURL("play", "upstream", method, file, source, nil, time.Time{}, transcodeNodeURL, 12.5, proxyNode, netaccess.Path{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1141,9 +1159,13 @@ func newActiveEncodingsHandler(mgr *testCompatSessionManager) (*PlaybackHandler,
 func TestHandleDeleteActiveEncodings_StopsTranscodeAndDeletesSession(t *testing.T) {
 	mgr := &testCompatSessionManager{sessions: map[string]*playback.Session{"upstream-1": {ID: "upstream-1"}}}
 	h, store := newActiveEncodingsHandler(mgr)
+	recipeStore := &stubRecipeNodeStore{cards: map[string]playback.RecipeCard{
+		"upstream-1": {SessionID: "upstream-1"},
+	}}
+	h.RecipeNodeStore = recipeStore
 	store.Put(PlaybackSession{ID: "ps-1", UpstreamSessionID: "upstream-1", CompatToken: "tok"})
 
-	req := withCompatSession(httptest.NewRequest("DELETE", "/Videos/ActiveEncodings?PlaySessionId=ps-1", nil), "tok")
+	req := withCompatSession(httptest.NewRequest("DELETE", "/Videos/ActiveEncodings?DeviceId=dev1&playSessionId=ps-1", nil), "tok")
 	rec := httptest.NewRecorder()
 	h.HandleDeleteActiveEncodings(rec, req)
 
@@ -1153,29 +1175,6 @@ func TestHandleDeleteActiveEncodings_StopsTranscodeAndDeletesSession(t *testing.
 	if _, ok := store.Get("ps-1"); ok {
 		t.Fatal("play session should be deleted")
 	}
-	if len(mgr.stopCalls) != 1 || mgr.stopCalls[0] != "upstream-1" {
-		t.Fatalf("expected StopSession(upstream-1); got %v", mgr.stopCalls)
-	}
-}
-
-// TestTeardownPlaySession_DeletesNodeRecipe verifies the deliberate stop path
-// drops the node recipe keyed by the upstream session id, so a buffered/retrying
-// request after a node restart cannot resurrect ffmpeg for the stopped session.
-func TestTeardownPlaySession_DeletesNodeRecipe(t *testing.T) {
-	mgr := &testCompatSessionManager{sessions: map[string]*playback.Session{"upstream-1": {ID: "upstream-1"}}}
-	h, store := newActiveEncodingsHandler(mgr)
-	recipeStore := &stubRecipeNodeStore{cards: map[string]playback.RecipeCard{
-		"upstream-1": {SessionID: "upstream-1"},
-	}}
-	h.RecipeNodeStore = recipeStore
-	store.Put(PlaybackSession{ID: "ps-1", UpstreamSessionID: "upstream-1", CompatToken: "tok"})
-
-	playSession, ok := store.Get("ps-1")
-	if !ok {
-		t.Fatal("expected play session")
-	}
-	h.teardownPlaySession(context.Background(), playSession, nil, nil)
-
 	if _, ok := recipeStore.Get("upstream-1"); ok {
 		t.Fatal("node recipe should be deleted on deliberate teardown")
 	}
@@ -1224,26 +1223,6 @@ func TestHandleDeleteActiveEncodings_UnknownPlaySessionReturns204(t *testing.T) 
 	}
 }
 
-// TestHandleDeleteActiveEncodings_CaseInsensitivePlaySessionId verifies a
-// lowercase playSessionId key (as Wholphin sends) still resolves and tears down
-// the session — the reason newCaseInsensitiveQuery is used.
-func TestHandleDeleteActiveEncodings_CaseInsensitivePlaySessionId(t *testing.T) {
-	mgr := &testCompatSessionManager{sessions: map[string]*playback.Session{"upstream-1": {ID: "upstream-1"}}}
-	h, store := newActiveEncodingsHandler(mgr)
-	store.Put(PlaybackSession{ID: "ps-1", UpstreamSessionID: "upstream-1", CompatToken: "tok"})
-
-	req := withCompatSession(httptest.NewRequest("DELETE", "/Videos/ActiveEncodings?playSessionId=ps-1", nil), "tok")
-	rec := httptest.NewRecorder()
-	h.HandleDeleteActiveEncodings(rec, req)
-
-	if rec.Code != 204 {
-		t.Fatalf("status = %d, body = %s; want 204", rec.Code, rec.Body.String())
-	}
-	if _, ok := store.Get("ps-1"); ok {
-		t.Fatal("lowercase playSessionId should still resolve and delete the session")
-	}
-}
-
 // TestHandleDeleteActiveEncodings_ForeignPlaySessionNotTornDown proves the
 // ownership guard: a caller whose token differs from the play session's
 // CompatToken gets a uniform 204 no-op and does NOT tear down the foreign
@@ -1265,29 +1244,6 @@ func TestHandleDeleteActiveEncodings_ForeignPlaySessionNotTornDown(t *testing.T)
 	}
 	if len(mgr.stopCalls) != 0 {
 		t.Fatalf("expected no StopSession calls; got %v", mgr.stopCalls)
-	}
-}
-
-// TestHandleDeleteActiveEncodings_RealClientShape exercises the dominant real
-// JellyCon call shape (DeviceId present alongside PlaySessionId): with a
-// matching-token session the session is still torn down (DeviceId ignored).
-func TestHandleDeleteActiveEncodings_RealClientShape(t *testing.T) {
-	mgr := &testCompatSessionManager{sessions: map[string]*playback.Session{"upstream-1": {ID: "upstream-1"}}}
-	h, store := newActiveEncodingsHandler(mgr)
-	store.Put(PlaybackSession{ID: "ps-1", UpstreamSessionID: "upstream-1", CompatToken: "tok"})
-
-	req := withCompatSession(httptest.NewRequest("DELETE", "/Videos/ActiveEncodings?DeviceId=dev1&PlaySessionId=ps-1", nil), "tok")
-	rec := httptest.NewRecorder()
-	h.HandleDeleteActiveEncodings(rec, req)
-
-	if rec.Code != 204 {
-		t.Fatalf("status = %d, body = %s; want 204", rec.Code, rec.Body.String())
-	}
-	if _, ok := store.Get("ps-1"); ok {
-		t.Fatal("play session should be torn down when DeviceId accompanies a matching PlaySessionId")
-	}
-	if len(mgr.stopCalls) != 1 || mgr.stopCalls[0] != "upstream-1" {
-		t.Fatalf("expected StopSession(upstream-1); got %v", mgr.stopCalls)
 	}
 }
 
@@ -1504,13 +1460,75 @@ type recordingSessionSyncer struct {
 	calls           int
 	lastCtxErr      error
 	lastHadDeadline bool
+	onSync          func()
 }
 
 func (s *recordingSessionSyncer) SyncNow(ctx context.Context) error {
 	s.calls++
 	s.lastCtxErr = ctx.Err()
 	_, s.lastHadDeadline = ctx.Deadline()
+	if s.onSync != nil {
+		s.onSync()
+	}
 	return nil
+}
+
+type outputFormatTestSessionManager struct {
+	*testCompatSessionManager
+}
+
+func (m *outputFormatTestSessionManager) SetOutputFormat(id, container, protocol string) error {
+	session, err := m.GetSession(id)
+	if err != nil {
+		return err
+	}
+	session.OutputContainer, session.OutputProtocol = container, protocol
+	return nil
+}
+
+func TestHandleVideoStreamSyncsChangedRemuxOutputFormat(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		t.Run(fmt.Sprintf("direct_%t", direct), func(t *testing.T) {
+			handler, routeID, directBody := newStaticDirectPlayHandler(t)
+			source := testCompatSource(handler.codec, testCompatVersion())
+			source.SupportsDirectPlay, source.SupportsDirectStream = direct, true
+			method := "remux"
+			wantBody := "remuxed"
+			if direct {
+				method, wantBody = "direct", directBody
+			} else {
+				handler.FFmpegPath, _, _ = writeCompatAudioRecipeFFmpeg(t, false, wantBody)
+			}
+			mgr := &outputFormatTestSessionManager{&testCompatSessionManager{sessions: map[string]*playback.Session{
+				"upstream-1": {ID: "upstream-1", PlayMethod: playback.PlayMethod(method), BasePlayMethod: playback.PlayMethod(method)},
+			}}}
+			handler.sessionMgr = mgr
+			handler.playbackStore.Put(PlaybackSession{
+				ID: "play-1", CompatToken: "token-1", RouteItemID: routeID,
+				UpstreamSessionID: "upstream-1", UpstreamPlayMethod: method, MediaSources: []PlaybackMediaSource{source},
+			})
+			syncer := &recordingSessionSyncer{onSync: func() {
+				session, _ := mgr.GetSession("upstream-1")
+				if session.OutputContainer != playback.OutputContainerFMP4 || session.OutputProtocol != playback.OutputProtocolHTTP {
+					t.Fatal("immediate admin sync ran before the remux output format was recorded")
+				}
+			}}
+			handler.SessionSyncer = syncer
+			for range 2 {
+				rec := serveCompatVideoStream(handler, routeID, "PlaySessionId=play-1&MediaSourceId="+url.QueryEscape(source.ID), false)
+				if rec.Code != http.StatusOK || rec.Body.String() != wantBody {
+					t.Fatalf("stream = %d %q, want 200 %q", rec.Code, rec.Body.String(), wantBody)
+				}
+				wantCalls := 1
+				if direct {
+					wantCalls = 0
+				}
+				if syncer.calls != wantCalls {
+					t.Fatalf("admin sync calls = %d, want %d; unchanged requests must not flush again", syncer.calls, wantCalls)
+				}
+			}
+		})
+	}
 }
 
 // TestHandleSessionPlayingStopped_TearsDownAndSyncsImmediately verifies the
@@ -1624,5 +1642,87 @@ func TestEnsureUpstreamPlayback_SyncsOnNewSession(t *testing.T) {
 	}
 	if syncer.calls != 1 {
 		t.Fatalf("SyncNow calls after reuse = %d; want 1", syncer.calls)
+	}
+}
+
+func TestEnsureUpstreamPlayback_KeepsNegotiatedStreamLocation(t *testing.T) {
+	store := NewPlaybackSessionStore(time.Hour, nil)
+	store.Put(PlaybackSession{ID: "ps-location", CompatToken: "tok"})
+	manager := playback.NewSessionManager(0, 0)
+	h := &PlaybackHandler{playbackStore: store, sessionMgr: manager}
+	source := PlaybackMediaSource{ID: "source", FileID: 42, StreamLocation: "remote"}
+	// The media request is local, but PlaybackInfo selected the remote policy.
+	ctx := clientip.SetContext(t.Context(), "192.168.1.8")
+	playSession, err := h.ensureUpstreamPlayback(ctx, &Session{Token: "tok", StreamAppUserID: 7, ProfileID: "profile"}, "ps-location", source, "direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream, err := manager.GetSession(playSession.UpstreamSessionID)
+	if err != nil || upstream.StreamLocation != "remote" || upstream.ClientIP != "192.168.1.8" {
+		t.Fatalf("upstream policy location = %v, err = %v", upstream, err)
+	}
+	card := h.upstreamRecipeCard(playSession, &Session{StreamAppUserID: 7, ProfileID: "profile"}, source, "direct")
+	if card.StreamLocation != "remote" {
+		t.Fatalf("reconstruction location = %q", card.StreamLocation)
+	}
+}
+
+func TestGenerateCompatCopyVideoMasterManifestJellyfin12DolbyVisionVariant(t *testing.T) {
+	source := PlaybackMediaSource{
+		ID: "source-1",
+		Version: catalog.FileVersion{
+			Bitrate: 18_000,
+			VideoTracks: []models.VideoTrack{{
+				Codec: "hevc", Profile: "Main 10", Level: 153, Width: 3840, Height: 2160,
+				DVProfile: 5, DVLevel: 6, VideoRangeType: compatRangeDOVI,
+			}},
+			AudioTracks: []models.AudioTrack{{Codec: "eac3", Default: true}},
+		},
+		HLSRemux:    true,
+		DOVIVariant: true,
+	}
+
+	got := string(generateCompatCopyVideoMasterManifest(source, "item-1", "play-1", ""))
+	variants := strings.Split(strings.TrimSpace(got), "#EXT-X-STREAM-INF:")
+	if len(variants) != 3 {
+		t.Fatalf("want a Dolby Vision variant plus the hvc1 fallback:\n%s", got)
+	}
+	if !strings.Contains(variants[1], `VIDEO-RANGE=PQ,CODECS="dvh1.05.06,ec-3",RESOLUTION=3840x2160`) {
+		t.Fatalf("first variant must be the spec-compliant dvh1 stream:\n%s", got)
+	}
+	if !strings.Contains(variants[2], `CODECS="hvc1.2.4.L153.B0,ec-3"`) {
+		t.Fatalf("second variant must stay the hvc1 fallback:\n%s", got)
+	}
+
+	source.HLSRemuxMPEGTS = true
+	if ts := string(generateCompatCopyVideoMasterManifest(source, "item-1", "play-1", "")); strings.Contains(ts, "dvh1") {
+		t.Fatalf("MPEG-TS remuxes cannot carry the Dolby Vision variant:\n%s", ts)
+	}
+}
+
+func TestCompatMasterAudioCodecJellyfin12Strings(t *testing.T) {
+	cases := []struct {
+		codec, profile string
+		transcode      bool
+		want           string
+	}{
+		{"aac", "HE-AAC", false, "mp4a.40.5"},
+		{"aac", "HE-AACv2", false, "mp4a.40.29"},
+		{"aac", "LC", false, "mp4a.40.2"},
+		{"aac", "HE-AAC", true, "mp4a.40.2"},
+		{"truehd", "", false, "mlpa"},
+		{"dts", "DTS-HD MA + DTS:X", false, "dtsh"},
+		{"dts", "DTS-HD HRA", false, "dtsh"},
+		{"dts", "DTS-HD HRA + DTS:X", false, "dtsh"},
+		{"dts", "DTS-HD HRA + DTS:X IMAX", false, "dtsh"},
+		{"dts", "DTS Express", false, "dtse"},
+		{"dts", "DTS-ES", false, "dtsc"},
+		{"dts", "", false, "dtsc"},
+	}
+	for _, tc := range cases {
+		source := PlaybackMediaSource{HLSRemux: true, TranscodeAudio: tc.transcode}
+		if got := compatMasterAudioCodec(source, models.AudioTrack{Codec: tc.codec, Profile: tc.profile}); got != tc.want {
+			t.Errorf("%s/%s transcode=%v = %q, want %q", tc.codec, tc.profile, tc.transcode, got, tc.want)
+		}
 	}
 }

@@ -71,14 +71,15 @@ export function nodeInventoriesDiverge(detection: HWAccelInfo | undefined): bool
   return inventories.length > 1 && new Set(inventories).size > 1;
 }
 
-// Helpers for the "Generate chapter thumbnails on" select. Two of its three
-// modes need a transcode node to run on: `transcode_nodes_only` fails every
-// extraction without one, and `prefer_transcode_nodes` silently degrades to
-// local — so both are offered only when the node pool can actually serve them.
+// Helpers for the "Generate chapter thumbnails on" and "Generate seek previews
+// on" selects, which share three modes. Two of them need a transcode node to
+// run on: `transcode_nodes_only` makes nothing without one, and
+// `prefer_transcode_nodes` silently degrades to local — so both are offered
+// only when the node pool can actually serve them.
 
-export const CHAPTER_THUMBNAIL_EXECUTION_DEFAULT = "local";
+export const IMAGE_EXECUTION_DEFAULT = "local";
 
-const NODE_BACKED_CHAPTER_THUMBNAIL_MODES = ["prefer_transcode_nodes", "transcode_nodes_only"];
+const NODE_BACKED_IMAGE_MODES = ["prefer_transcode_nodes", "transcode_nodes_only"];
 
 /**
  * True when at least one transcode node could take an extraction. Mirrors the
@@ -89,7 +90,21 @@ export function hasUsableTranscodeNode(nodes: StreamNode[] | undefined): boolean
   return (nodes ?? []).some((node) => node.type === "transcode" && node.enabled && node.healthy);
 }
 
-export interface ChapterThumbnailExecutionOption {
+/** True when a node can extract seek previews with its current capability snapshot. */
+export function hasUsableTrickplayNode(nodes: StreamNode[] | undefined): boolean {
+  return (nodes ?? []).some(
+    (node) =>
+      node.type === "transcode" &&
+      node.enabled &&
+      node.healthy &&
+      node.capabilities?.transport_features?.includes("trickplay_extract_v1") &&
+      (node.advertised_capabilities_hash === undefined ||
+        (node.advertised_capabilities_hash !== "" &&
+          node.advertised_capabilities_hash === node.capabilities_hash)),
+  );
+}
+
+export interface ImageExecutionOption {
   value: string;
   label: string;
   disabled: boolean;
@@ -101,20 +116,58 @@ export interface ChapterThumbnailExecutionOption {
  * nodes that have not joined yet is legitimate, and a persisted node-only value
  * has to stay visible and editable so the admin can switch back off it.
  */
-export function chapterThumbnailExecutionOptions(
+export function imageExecutionOptions(
   current: string,
   transcodeNodeAvailable: boolean,
-): ChapterThumbnailExecutionOption[] {
-  return [
-    { value: CHAPTER_THUMBNAIL_EXECUTION_DEFAULT, label: "This server" },
-    { value: "prefer_transcode_nodes", label: "Transcode nodes when available" },
-    { value: "transcode_nodes_only", label: "Transcode nodes only" },
-  ].map((option) => ({
+): ImageExecutionOption[] {
+  return gateNodeBackedModes(
+    [
+      { value: IMAGE_EXECUTION_DEFAULT, label: "This server" },
+      { value: "prefer_transcode_nodes", label: "Transcode nodes when available" },
+      { value: "transcode_nodes_only", label: "Transcode nodes only" },
+    ],
+    current,
+    transcodeNodeAvailable,
+  );
+}
+
+/** Mirrors `subtitles.sync_execution` in `adminSettingDefaults`. */
+export const SUBTITLE_SYNC_EXECUTION_DEFAULT = "prefer_transcode_nodes";
+
+/**
+ * Where subtitle sync analyzes audio. It shares the chapter thumbnail modes
+ * and the same rule for disabling node-backed modes without a node.
+ */
+export function subtitleSyncExecutionOptions(
+  current: string,
+  transcodeNodeAvailable: boolean,
+): ImageExecutionOption[] {
+  return gateNodeBackedModes(
+    [
+      { value: "local", label: "Local server" },
+      { value: "prefer_transcode_nodes", label: "Prefer transcode nodes" },
+      { value: "transcode_nodes_only", label: "Transcode nodes only" },
+    ],
+    current,
+    transcodeNodeAvailable,
+  );
+}
+
+export function isNodeBackedExecution(mode: string): boolean {
+  return NODE_BACKED_IMAGE_MODES.includes(mode);
+}
+
+function gateNodeBackedModes(
+  options: { value: string; label: string }[],
+  current: string,
+  transcodeNodeAvailable: boolean,
+): ImageExecutionOption[] {
+  return options.map((option) => ({
     ...option,
     disabled:
       !transcodeNodeAvailable &&
       option.value !== current &&
-      NODE_BACKED_CHAPTER_THUMBNAIL_MODES.includes(option.value),
+      NODE_BACKED_IMAGE_MODES.includes(option.value),
   }));
 }
 
@@ -127,4 +180,41 @@ function detectedDevices(
   }
   // Older nodes report only render_devices paths.
   return (detection.render_devices ?? []).map((path) => ({ path, description: "GPU" }));
+}
+
+/** The `playback.hw_accel` choices, in the order the select shows them. */
+export const HW_ACCEL_OPTIONS = [
+  { value: "auto", label: "Auto" },
+  { value: "qsv", label: "Intel Quick Sync (QSV)" },
+  { value: "vaapi", label: "VA-API" },
+  { value: "nvenc", label: "NVIDIA NVENC" },
+  { value: "videotoolbox", label: "VideoToolbox (macOS)" },
+  { value: "none", label: "Software" },
+];
+
+/** Human name for a resolved hardware-acceleration backend. */
+export function formatResolved(resolved: string): string {
+  return HW_ACCEL_OPTIONS.find((option) => option.value === resolved)?.label ?? resolved;
+}
+
+/**
+ * One-line detection result, e.g. "Detected VA-API on renderD128". Returns
+ * undefined while nothing has been probed yet so the caller can show its own
+ * "detecting" state instead of an empty phrase.
+ */
+export function describeDetection(detection: HWAccelInfo | undefined): string | undefined {
+  if (!detection) return undefined;
+  if (detection.resolved === "none") return "No supported graphics hardware found";
+  const device = detection.render_devices?.[0];
+  const onNode = detection.source === "transcode_node" ? " (transcode node)" : "";
+  return `Detected ${formatResolved(detection.resolved)}${device ? ` on ${device}` : ""}${onNode}`;
+}
+
+/**
+ * Whether the probed executor inventory contains a validated hardware tone
+ * mapper. The server only lists capabilities it has actually verified, so an
+ * empty or missing list means hardware HDR-to-SDR is not available here.
+ */
+export function hasHardwareToneMapCapability(detection: HWAccelInfo | undefined): boolean {
+  return (detection?.tone_map_capabilities ?? []).some((cap) => cap.mode === "hardware");
 }

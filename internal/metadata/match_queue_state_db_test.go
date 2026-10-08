@@ -77,9 +77,9 @@ func TestNormalizeMatchFailureKindTreatsUnknownAsTransient(t *testing.T) {
 
 func TestMatchQueueFingerprintIncludesMatcherAndProviderConfiguration(t *testing.T) {
 	t.Parallel()
-	expression := matchQueueInputFingerprintSQL("mf.file_path", "'movie'", "mf.media_folder_id", "folders.metadata_language", movieMatcherRevision)
+	expression := matchQueueInputFingerprintSQL(movieMatchQueueFileIdentitySQL, "'movie'", "mf.media_folder_id", "folders.metadata_language", movieMatcherRevision)
 	for _, required := range []string{
-		"mf.file_path", "'movie'", "folders.metadata_language", "installation.version",
+		"mf.file_path", "mf.content_group_key", "'movie'", "folders.metadata_language", "installation.version",
 		"chain.priority", "chain.capability_id", "plugin_runtime_configs", "config.updated_at::text",
 		fmt.Sprintf("|%d|", movieMatcherRevision),
 	} {
@@ -92,23 +92,22 @@ func TestMatchQueueFingerprintIncludesMatcherAndProviderConfiguration(t *testing
 func TestSeriesMatchQueueFingerprintIncludesEpisodePathShape(t *testing.T) {
 	t.Parallel()
 	expression := seriesMatchQueueInputFingerprintSQL("q.observed_root_path", "q.media_folder_id", "folders.metadata_language")
-	for _, required := range []string{"shape_file.file_path", "shape_file.observed_root_path", "shape_file.missing_since", "shape_file.extra_id", fmt.Sprintf("|%d|", seriesMatcherRevision)} {
+	for _, required := range []string{"shape_file.file_path", "shape_file.content_group_key", "shape_file.observed_root_path", "shape_file.missing_since", "shape_file.extra_id", fmt.Sprintf("|%d|", seriesMatcherRevision)} {
 		if !strings.Contains(expression, required) {
 			t.Fatalf("series fingerprint expression %q does not contain %q", expression, required)
 		}
 	}
-	if movieMatcherRevision != 10 {
-		t.Fatalf("movie matcher revision = %d, want shared title-normalization revision 10", movieMatcherRevision)
+	if movieMatcherRevision != 11 {
+		t.Fatalf("movie matcher revision = %d, want flexible filename matching revision 11", movieMatcherRevision)
 	}
-	if seriesMatcherRevision != 10 {
-		t.Fatalf("series matcher revision = %d, want consensus revision 10", seriesMatcherRevision)
+	if seriesMatcherRevision != 11 {
+		t.Fatalf("series matcher revision = %d, want naming parity revision 11", seriesMatcherRevision)
 	}
 }
 
 func TestMatchQueueSharedTitleRevisionWakesMoviesAndSeries(t *testing.T) {
 	pool := chainBuiltinTestPool(t)
-	ctx := context.Background()
-	previousMatcherRevision := movieMatcherRevision - 1
+	ctx := t.Context()
 
 	movieFolderID := insertTestFolder(t, pool, "movie")
 	moviePath := fmt.Sprintf("/test/revision-isolation-%d/Movie.mkv", time.Now().UnixNano())
@@ -128,7 +127,7 @@ func TestMatchQueueSharedTitleRevisionWakesMoviesAndSeries(t *testing.T) {
 		SET state = 'parked', available_at = NOW() + interval '24 hours', parked_at = NOW(),
 			matcher_revision = $2
 		WHERE media_file_id = $1
-	`, movieFileID, previousMatcherRevision); err != nil {
+	`, movieFileID, movieMatcherRevision-1); err != nil {
 		t.Fatalf("park movie row: %v", err)
 	}
 
@@ -151,7 +150,7 @@ func TestMatchQueueSharedTitleRevisionWakesMoviesAndSeries(t *testing.T) {
 		SET state = 'parked', available_at = NOW() + interval '24 hours', parked_at = NOW(),
 			matcher_revision = $3
 		WHERE media_folder_id = $1 AND observed_root_path = $2
-	`, seriesFolderID, seriesRoot, previousMatcherRevision); err != nil {
+	`, seriesFolderID, seriesRoot, seriesMatcherRevision-1); err != nil {
 		t.Fatalf("seed pre-change series revision: %v", err)
 	}
 
@@ -649,5 +648,188 @@ func TestMatchQueueSyncDeletesIneligibleReruns(t *testing.T) {
 		if remaining != 0 {
 			t.Fatalf("ineligible series reruns remaining = %d, want 0", remaining)
 		}
+	})
+}
+
+func TestMatchQueueRescannedGroupIdentityWakesBackedOffRows(t *testing.T) {
+	pool := chainBuiltinTestPool(t)
+	ctx := context.Background()
+	prefix := fmt.Sprintf("/test/rescanned-identity-%d", time.Now().UnixNano())
+	backOff := func(table, where string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `UPDATE `+table+` SET available_at = NOW() + interval '24 hours',
+			failure_kind = 'provider_transient', last_error = 'filename identity changed since the last scan'
+			WHERE `+where, args...); err != nil {
+			t.Fatalf("back off %s row: %v", table, err)
+		}
+	}
+	awake := func(table, where string, args ...any) bool {
+		t.Helper()
+		var availableAt time.Time
+		if err := pool.QueryRow(ctx, `SELECT available_at FROM `+table+` WHERE `+where, args...).Scan(&availableAt); err != nil {
+			t.Fatalf("load %s row: %v", table, err)
+		}
+		return !availableAt.After(time.Now().Add(time.Minute))
+	}
+
+	movieFolderID := insertTestFolder(t, pool, "movie")
+	var fileID int
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO media_files (media_folder_id, file_path, base_type, content_group_key, file_size)
+		VALUES ($1, $2, 'movie', 'old-movie-group', 0) RETURNING id
+	`, movieFolderID, prefix+"/Example Movie 2049.mkv").Scan(&fileID); err != nil {
+		t.Fatalf("seed movie file: %v", err)
+	}
+	movies := NewMovieMatchQueueRepository(pool, scannerrepo.NewFileRepository(pool))
+	if err := movies.EnqueueMovieFile(ctx, fileID); err != nil {
+		t.Fatalf("EnqueueMovieFile(): %v", err)
+	}
+	backOff("movie_match_queue", "media_file_id = $1", fileID)
+	if err := movies.EnqueueMovieFile(ctx, fileID); err != nil || awake("movie_match_queue", "media_file_id = $1", fileID) {
+		t.Fatalf("unchanged movie identity woke a backed-off row (err %v)", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE media_files SET content_group_key = 'new-movie-group' WHERE id = $1`, fileID); err != nil {
+		t.Fatalf("rescan movie identity: %v", err)
+	}
+	if err := movies.EnqueueMovieFile(ctx, fileID); err != nil || !awake("movie_match_queue", "media_file_id = $1", fileID) {
+		t.Fatalf("rescanned movie identity stayed backed off (err %v)", err)
+	}
+
+	seriesFolderID := insertTestFolder(t, pool, "series")
+	root := prefix + "/Example Show"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO media_files (media_folder_id, file_path, observed_root_path, base_type, content_group_key, file_size)
+		VALUES ($1, $2, $3, 'series', 'old-series-group', 0)
+	`, seriesFolderID, root+"/Example.Show.S01E01.mkv", root); err != nil {
+		t.Fatalf("seed series file: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM series_root_match_queue WHERE media_folder_id = $1`, seriesFolderID)
+	})
+	series := NewSeriesRootMatchQueueRepository(pool)
+	if err := series.EnqueueSeriesRoot(ctx, seriesFolderID, root); err != nil {
+		t.Fatalf("EnqueueSeriesRoot(): %v", err)
+	}
+	where := "media_folder_id = $1 AND observed_root_path = $2"
+	backOff("series_root_match_queue", where, seriesFolderID, root)
+	if err := series.EnqueueSeriesRoot(ctx, seriesFolderID, root); err != nil || awake("series_root_match_queue", where, seriesFolderID, root) {
+		t.Fatalf("unchanged series identity woke a backed-off row (err %v)", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE media_files SET content_group_key = 'new-series-group' WHERE observed_root_path = $1`, root); err != nil {
+		t.Fatalf("rescan series identity: %v", err)
+	}
+	if err := series.EnqueueSeriesRoot(ctx, seriesFolderID, root); err != nil || !awake("series_root_match_queue", where, seriesFolderID, root) {
+		t.Fatalf("rescanned series identity stayed backed off (err %v)", err)
+	}
+}
+
+// The matcher reads a group's operator override, so a row parked or backed off
+// without it must wake when the override is saved, changed, or removed.
+func TestMatchQueueGroupOverrideWakesBackedOffRows(t *testing.T) {
+	pool := chainBuiltinTestPool(t)
+	ctx := context.Background()
+	prefix := fmt.Sprintf("/test/override-wake-%d", time.Now().UnixNano())
+
+	check := func(t *testing.T, table, where string, args []any, folderID int, groupKey string, enqueue, wakeChanged func() error) {
+		t.Helper()
+		backOff := func() {
+			t.Helper()
+			if _, err := pool.Exec(ctx, `UPDATE `+table+` SET available_at = NOW() + interval '24 hours',
+				failure_kind = 'candidate_rejected', last_error = 'no acceptable candidate'
+				WHERE `+where, args...); err != nil {
+				t.Fatalf("back off %s row: %v", table, err)
+			}
+		}
+		awake := func() bool {
+			t.Helper()
+			var availableAt time.Time
+			if err := pool.QueryRow(ctx, `SELECT available_at FROM `+table+` WHERE `+where, args...).Scan(&availableAt); err != nil {
+				t.Fatalf("load %s row: %v", table, err)
+			}
+			return !availableAt.After(time.Now().Add(time.Minute))
+		}
+		override := func(query string, values ...any) {
+			t.Helper()
+			if _, err := pool.Exec(ctx, query, append([]any{folderID, groupKey}, values...)...); err != nil {
+				t.Fatalf("write group override: %v", err)
+			}
+		}
+
+		if err := enqueue(); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		backOff()
+		if err := enqueue(); err != nil || awake() {
+			t.Fatalf("unchanged inputs woke a backed-off row (err %v)", err)
+		}
+
+		override(`INSERT INTO media_group_overrides (media_folder_id, group_key_version, content_group_key, forced_title)
+			VALUES ($1, 1, $2, $3)`, "Example Title")
+		if err := enqueue(); err != nil || !awake() {
+			t.Fatalf("a saved override left the row backed off (err %v)", err)
+		}
+
+		backOff()
+		override(`UPDATE media_group_overrides SET note = $3, updated_at = NOW()
+			WHERE media_folder_id = $1 AND group_key_version = 1 AND content_group_key = $2`, "why this override exists")
+		if err := enqueue(); err != nil || awake() {
+			t.Fatalf("a note-only change woke a backed-off row (err %v)", err)
+		}
+
+		override(`UPDATE media_group_overrides SET forced_tvdb_id = $3
+			WHERE media_folder_id = $1 AND group_key_version = 1 AND content_group_key = $2`, "123456")
+		if err := enqueue(); err != nil || !awake() {
+			t.Fatalf("a changed override left the row backed off (err %v)", err)
+		}
+
+		backOff()
+		override(`DELETE FROM media_group_overrides
+			WHERE media_folder_id = $1 AND group_key_version = 1 AND content_group_key = $2`)
+		if err := wakeChanged(); err != nil || !awake() {
+			t.Fatalf("a removed override left the row backed off (err %v)", err)
+		}
+	}
+
+	t.Run("movie", func(t *testing.T) {
+		folderID := insertTestFolder(t, pool, "movie")
+		path := prefix + "/Example Movie 2049.mkv"
+		var fileID int
+		if err := pool.QueryRow(ctx, `
+			INSERT INTO media_files (media_folder_id, file_path, base_type, content_group_key, file_size)
+			VALUES ($1, $2, 'movie', 'movie-group', 0) RETURNING id
+		`, folderID, path).Scan(&fileID); err != nil {
+			t.Fatalf("seed movie file: %v", err)
+		}
+		// A file with no override must keep the identity it had before overrides
+		// were part of it, or every queued row would wake on upgrade.
+		var identity string
+		if err := pool.QueryRow(ctx, `SELECT `+movieMatchQueueFileIdentitySQL+` FROM media_files mf WHERE mf.id = $1`, fileID).Scan(&identity); err != nil {
+			t.Fatalf("load movie queue identity: %v", err)
+		}
+		if want := path + "|movie-group"; identity != want {
+			t.Fatalf("movie queue identity without an override = %q, want %q", identity, want)
+		}
+		movies := NewMovieMatchQueueRepository(pool, scannerrepo.NewFileRepository(pool))
+		check(t, "movie_match_queue", "media_file_id = $1", []any{fileID}, folderID, "movie-group",
+			func() error { return movies.EnqueueMovieFile(ctx, fileID) },
+			func() error { _, err := movies.WakeForChangedInputs(ctx); return err })
+	})
+
+	t.Run("series", func(t *testing.T) {
+		folderID := insertTestFolder(t, pool, "series")
+		root := prefix + "/Example Show"
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO media_files (media_folder_id, file_path, observed_root_path, base_type, content_group_key, file_size)
+			VALUES ($1, $2, $3, 'series', 'series-group', 0)
+		`, folderID, root+"/Example.Show.S01E01.mkv", root); err != nil {
+			t.Fatalf("seed series file: %v", err)
+		}
+		t.Cleanup(func() {
+			_, _ = pool.Exec(ctx, `DELETE FROM series_root_match_queue WHERE media_folder_id = $1`, folderID)
+		})
+		series := NewSeriesRootMatchQueueRepository(pool)
+		check(t, "series_root_match_queue", "media_folder_id = $1 AND observed_root_path = $2", []any{folderID, root}, folderID, "series-group",
+			func() error { return series.EnqueueSeriesRoot(ctx, folderID, root) },
+			func() error { _, err := series.WakeForChangedInputs(ctx); return err })
 	})
 }

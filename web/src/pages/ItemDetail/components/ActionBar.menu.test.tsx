@@ -1,49 +1,298 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import ActionBar from "./ActionBar";
 
 vi.mock("@/playback/watchPlaybackContext", () => ({
   useWatchPlaybackController: () => ({ startPlayback: vi.fn() }),
 }));
 
+const addToCollection = vi.hoisted(() => ({
+  props: null as null | { open: boolean; mediaItemId: string; itemTitle?: string },
+}));
 vi.mock("@/components/AddToCollectionDialog", () => ({
-  default: () => null,
+  default: (props: { open: boolean; mediaItemId: string; itemTitle?: string }) => {
+    addToCollection.props = props;
+    return null;
+  },
 }));
 
-describe("ActionBar detail menu", () => {
-  it("uses matching icons and longest-entry sizing", async () => {
+const markerMocks = vi.hoisted(() => ({
+  detectionKinds: undefined as { intro: boolean; credits: boolean } | undefined,
+}));
+vi.mock("@/hooks/queries/admin/markers", () => ({
+  useMarkerDetectionKinds: () => markerMocks.detectionKinds,
+}));
+
+describe("ActionBar Add to collection", () => {
+  it("names the title it adds", async () => {
+    render(
+      <MemoryRouter>
+        <ActionBar contentId="movie-1" itemTitle="Heat" />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(screen.getByTitle("More"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Add to Collection" }));
+    expect(addToCollection.props).toMatchObject({
+      open: true,
+      mediaItemId: "movie-1",
+      itemTitle: "Heat",
+    });
+  });
+});
+
+describe("ActionBar marker re-detection", () => {
+  afterEach(() => {
+    markerMocks.detectionKinds = undefined;
+  });
+
+  it.each([
+    [{ intro: true, credits: false }, ["Intro"], ["Credits", "Intro and credits"]],
+    [{ intro: false, credits: true }, ["Credits"], ["Intro", "Intro and credits"]],
+    [{ intro: false, credits: false }, [], ["Intro", "Credits", "Intro and credits"]],
+  ])("with detection %j offers only %j", async (kinds, enabledLabels, disabledLabels) => {
+    markerMocks.detectionKinds = kinds;
+    render(
+      <MemoryRouter>
+        <ActionBar contentId="episode-1" isAdmin onRedetectMarkers={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(screen.getByTitle("More"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Re-detect Markers" }));
+    const dialog = await screen.findByRole("dialog", { name: "Re-detect Markers" });
+    for (const name of enabledLabels) {
+      expect(within(dialog).getByRole("button", { name })).toBeEnabled();
+    }
+    for (const name of disabledLabels) {
+      const option = within(dialog).getByRole("button", { name });
+      expect(option).toBeDisabled();
+      expect(option).toHaveAccessibleDescription(/turned off in marker settings/);
+    }
+    expect(within(dialog).getByRole("link", { name: "Change marker settings" })).toHaveAttribute(
+      "href",
+      "/admin/settings/library",
+    );
+  });
+
+  it("links to marker settings only when a kind is off", async () => {
+    markerMocks.detectionKinds = { intro: true, credits: true };
+    render(
+      <MemoryRouter>
+        <ActionBar contentId="episode-1" isAdmin onRedetectMarkers={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(screen.getByTitle("More"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Re-detect Markers" }));
+    const dialog = await screen.findByRole("dialog", { name: "Re-detect Markers" });
+    for (const name of ["Intro", "Credits", "Intro and credits"]) {
+      expect(within(dialog).getByRole("button", { name })).toBeEnabled();
+    }
+    expect(within(dialog).queryByRole("link")).toBeNull();
+  });
+
+  it("asks admins which episode markers to re-detect", async () => {
+    const onRedetectMarkers = vi.fn();
+    render(
+      <MemoryRouter>
+        <ActionBar contentId="episode-1" isAdmin onRedetectMarkers={onRedetectMarkers} />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(screen.getByTitle("More"));
+    expect(screen.queryByRole("menuitem", { name: "Re-detect Intro Markers" })).toBeNull();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Re-detect Markers" }));
+    expect(onRedetectMarkers).not.toHaveBeenCalled();
+
+    const dialog = await screen.findByRole("dialog", { name: "Re-detect Markers" });
+    for (const name of ["Intro", "Credits", "Intro and credits"]) {
+      expect(within(dialog).getByRole("button", { name })).toBeTruthy();
+    }
+    await userEvent.click(within(dialog).getByRole("button", { name: "Credits" }));
+    expect(onRedetectMarkers).toHaveBeenCalledExactlyOnceWith("credits");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it.each([
+    ["Intro", "intro"],
+    ["Intro and credits", "all"],
+  ])("re-detects %s for an episode", async (label, kind) => {
+    const onRedetectMarkers = vi.fn();
+    render(
+      <MemoryRouter>
+        <ActionBar contentId="episode-1" isAdmin onRedetectMarkers={onRedetectMarkers} />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(screen.getByTitle("More"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Re-detect Markers" }));
+    const dialog = await screen.findByRole("dialog", { name: "Re-detect Markers" });
+    await userEvent.click(within(dialog).getByRole("button", { name: label }));
+    expect(onRedetectMarkers).toHaveBeenCalledExactlyOnceWith(kind);
+  });
+
+  it("re-detects a movie's credits directly", async () => {
+    const onRedetectMarkers = vi.fn();
     render(
       <MemoryRouter>
         <ActionBar
-          contentId="series-1"
+          contentId="movie-1"
           isAdmin
-          canCurateMetadata
-          onToggleWatchlist={() => {}}
-          onRefresh={() => {}}
-          onEditMetadata={() => {}}
-          onMatchItem={() => {}}
-          onSplitItem={() => {}}
+          redetectKind="credits"
+          onRedetectMarkers={onRedetectMarkers}
         />
       </MemoryRouter>,
     );
 
     await userEvent.click(screen.getByTitle("More"));
+    expect(screen.queryByRole("menuitem", { name: "Re-detect Markers" })).toBeNull();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Re-detect Credits" }));
+    expect(onRedetectMarkers).toHaveBeenCalledExactlyOnceWith("credits");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
 
-    const menu = screen.getByRole("menu");
-    expect(menu).toHaveClass("w-max", "max-w-[calc(100vw-2rem)]", "min-w-0");
-    expect(menu).not.toHaveClass("w-56");
-    for (const item of screen.getAllByRole("menuitem")) {
-      expect(item.querySelector("svg"), item.textContent ?? "menu item").toBeTruthy();
-    }
-    expect(
-      screen.getByRole("menuitem", { name: "View Play History" }).querySelector(".lucide-history"),
-    ).toBeTruthy();
-    expect(
-      screen
-        .getByRole("menuitem", { name: "Refresh Metadata" })
-        .querySelector(".lucide-refresh-cw"),
-    ).toBeTruthy();
+  it("re-detects an episode intro directly when only the intro operation exists", async () => {
+    const onRedetectMarkers = vi.fn();
+    render(
+      <MemoryRouter>
+        <ActionBar
+          contentId="episode-1"
+          isAdmin
+          redetectKind="intro"
+          onRedetectMarkers={onRedetectMarkers}
+        />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(screen.getByTitle("More"));
+    expect(screen.queryByRole("menuitem", { name: "Re-detect Markers" })).toBeNull();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Re-detect Intro Markers" }));
+    expect(onRedetectMarkers).toHaveBeenCalledExactlyOnceWith("intro");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("hides re-detection from non-admins", async () => {
+    render(
+      <MemoryRouter>
+        <ActionBar contentId="episode-1" onToggleWatchlist={() => {}} onRedetectMarkers={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(screen.getByTitle("More"));
+    expect(screen.queryByRole("menuitem", { name: /Re-detect/ })).toBeNull();
+  });
+});
+
+describe("ActionBar request and party actions", () => {
+  it("dispatches Watch Together and Request Seasons menu actions", async () => {
+    const onRequestSeasons = vi.fn();
+    const onStartParty = vi.fn();
+    const onSuggest = vi.fn();
+    const onPlay = vi.fn();
+    const view = render(
+      <MemoryRouter>
+        <ActionBar
+          contentId="movie-1"
+          watchTogether={{ onStartParty }}
+          onRequestSeasons={onRequestSeasons}
+        />
+      </MemoryRouter>,
+    );
+    await userEvent.click(screen.getByTitle("More"));
+    expect(screen.getByText("Watch Together")).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /Suggest to/ })).toBeNull();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Request Seasons" }));
+    expect(onRequestSeasons).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByTitle("More"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Start a party with this" }));
+    expect(onStartParty).toHaveBeenCalledTimes(1);
+    view.unmount();
+
+    render(
+      <MemoryRouter>
+        <ActionBar
+          contentId="movie-1"
+          watchTogether={{ onStartParty, liveRoom: { code: "KX7Q2M", onSuggest, onPlay } }}
+        />
+      </MemoryRouter>,
+    );
+    await userEvent.click(screen.getByTitle("More"));
+    expect(screen.getByText(/KX7Q2M is live/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("menuitem", { name: "Suggest to KX7Q2M" }));
+    expect(onSuggest).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByTitle("More"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "Play in KX7Q2M" }));
+    expect(onPlay).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ActionBar shuffle", () => {
+  it("offers Shuffle first in the menu and starts it", async () => {
+    const onShuffle = vi.fn();
+    render(
+      <MemoryRouter>
+        <ActionBar contentId="series-1" playHref="/watch/episode-1" onShuffle={onShuffle} />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(screen.getByTitle("More"));
+    const items = screen.getAllByRole("menuitem");
+    expect(items[0]).toHaveAccessibleName("Shuffle");
+    await userEvent.click(items[0]!);
+
+    expect(onShuffle).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("leaves Shuffle out when the page cannot shuffle", async () => {
+    render(
+      <MemoryRouter>
+        <ActionBar contentId="season-1" playHref="/watch/episode-1" />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(screen.getByTitle("More"));
+    expect(screen.queryByRole("menuitem", { name: "Shuffle" })).toBeNull();
+  });
+});
+
+describe("ActionBar collection eligibility", () => {
+  it.each(["movie", "series"])("keeps Add to Collection for %s", async (type) => {
+    render(
+      <MemoryRouter>
+        <ActionBar contentId={`${type}-1`} />
+      </MemoryRouter>,
+    );
+    await userEvent.click(screen.getByTitle("More"));
+    expect(screen.getByRole("menuitem", { name: "Add to Collection" })).toBeInTheDocument();
+  });
+
+  it.each(["season", "episode"])("hides Add to Collection for %s", async (type) => {
+    render(
+      <MemoryRouter>
+        <ActionBar
+          contentId={`${type}-1`}
+          canAddToCollection={false}
+          isAdmin
+          watchedLabel="Mark Watched"
+          onToggleWatched={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    await userEvent.click(screen.getByTitle("More"));
+    expect(screen.queryByRole("menuitem", { name: "Add to Collection" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Mark Watched" })).toBeInTheDocument();
+  });
+
+  it("omits an empty overflow menu when collection membership is unavailable", () => {
+    render(
+      <MemoryRouter>
+        <ActionBar contentId="season-1" canAddToCollection={false} />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByTitle("More")).toBeNull();
   });
 });

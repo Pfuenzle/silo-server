@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 20
+const schemaVersion = 31
 
 func runMigrations(db *sql.DB) error {
 	version, err := userVersion(db)
@@ -16,10 +16,16 @@ func runMigrations(db *sql.DB) error {
 		return fmt.Errorf("unsupported sqlite schema version %d", version)
 	}
 	if version == 0 {
+		if _, err := db.Exec(profilePINRevisionSchema); err != nil {
+			return fmt.Errorf("creating profile PIN revision trigger: %w", err)
+		}
 		return setUserVersion(db, schemaVersion)
 	}
 	if version == schemaVersion {
-		return nil
+		// Stores already at the current version may have been opened before
+		// the trigger existed.
+		_, err := db.Exec(profilePINRevisionSchema)
+		return err
 	}
 
 	tx, err := db.Begin()
@@ -196,7 +202,163 @@ func runMigrations(db *sql.DB) error {
 		}
 	}
 
+	if version < 21 {
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_watch_history_item_witness ON watch_history (profile_id, media_item_id, watched_at DESC, id DESC)`); err != nil {
+			return fmt.Errorf("migration v21 failed: %w", err)
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 21"); err != nil {
+			return err
+		}
+	}
+
+	if version < 22 {
+		// Normalize legacy NULLs once; all future direct writes are normalized by
+		// the schema triggers, preserving indexed tuple continuation.
+		if _, err := tx.Exec(`UPDATE personal_collection_items SET position = 0 WHERE position IS NULL`); err != nil {
+			return fmt.Errorf("migration v22 failed: %w", err)
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 22"); err != nil {
+			return err
+		}
+	}
+
+	if version < 23 {
+		if _, err := tx.Exec(playbackSinkSchema); err != nil {
+			return fmt.Errorf("migration v23 failed: %w", err)
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 23"); err != nil {
+			return err
+		}
+	}
+
+	if version < 24 {
+		if _, err := tx.Exec(playbackSourceSchema); err != nil {
+			return fmt.Errorf("migration v24 failed: %w", err)
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 24"); err != nil {
+			return err
+		}
+	}
+	if version < 25 {
+		// InitSchema runs before migrations and creates the current table when
+		// opening pre-v14 stores, which did not yet have onboarding state.
+		if !columnExists(tx, "profile_onboarding", "revision") {
+			if _, err := tx.Exec(`ALTER TABLE profile_onboarding ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0)`); err != nil {
+				return fmt.Errorf("migration v25 failed: %w", err)
+			}
+		}
+		if _, err := tx.Exec(onboardingRevisionSchema); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 25"); err != nil {
+			return err
+		}
+	}
+	if version < 26 {
+		if err := materializeRetiredSettingsFallbacks(tx); err != nil {
+			return fmt.Errorf("migration v26 failed: %w", err)
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 26"); err != nil {
+			return err
+		}
+	}
+	if version < 27 {
+		// InitSchema runs before migrations and already creates the column in
+		// a fresh profiles table, so only older stores need it added.
+		if !columnExists(tx, "profiles", "max_advisory_age") {
+			if _, err := tx.Exec(`ALTER TABLE profiles ADD COLUMN max_advisory_age INTEGER CHECK (max_advisory_age BETWEEN 1 AND 21)`); err != nil {
+				return fmt.Errorf("migration v27 failed: %w", err)
+			}
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 27"); err != nil {
+			return err
+		}
+	}
+	if version < 28 {
+		// Same reasoning as v27: a fresh profiles table already has the column.
+		if !columnExists(tx, "profiles", "require_advisory_age") {
+			if _, err := tx.Exec(`ALTER TABLE profiles ADD COLUMN require_advisory_age BOOLEAN NOT NULL DEFAULT false`); err != nil {
+				return fmt.Errorf("migration v28 failed: %w", err)
+			}
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 28"); err != nil {
+			return err
+		}
+	}
+	if version < 29 {
+		if err := retireProfileThemes(tx); err != nil {
+			return fmt.Errorf("migration v29 failed: %w", err)
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 29"); err != nil {
+			return err
+		}
+	}
+	// Builds of the collections revamp from before it merged main recorded
+	// login sharing as v30, without main's v30 pin_revision column. Such a
+	// store needs the column, and must not convert sharing a second time:
+	// collections shared since carry no allow list.
+	sharingApplied := version == 30 && !columnExists(tx, "profiles", "pin_revision")
+	if version < 30 || sharingApplied {
+		// Same reasoning as v27: a fresh profiles table already has the column.
+		// Profile tokens are bound to it; the Postgres store adds the same
+		// column in 20261006192309_profile_pin_revision.sql.
+		if !columnExists(tx, "profiles", "pin_revision") {
+			if _, err := tx.Exec(`ALTER TABLE profiles ADD COLUMN pin_revision INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("migration v30 failed: %w", err)
+			}
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 30"); err != nil {
+			return err
+		}
+	}
+	if version < 31 {
+		if !sharingApplied {
+			if err := applyCollectionLoginSharing(tx); err != nil {
+				return fmt.Errorf("migration v31 failed: %w", err)
+			}
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 31"); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(profilePINRevisionSchema); err != nil {
+		return fmt.Errorf("creating profile PIN revision trigger: %w", err)
+	}
 	return tx.Commit()
+}
+
+// applyCollectionLoginSharing applies the #1615 rule: a shared collection
+// is shown to every profile on the login, so it stays shared only when its
+// allow list already covers every profile (its creator implied). Shared with
+// some profiles, or with nobody but its creator, it becomes private. The allow-list table stays, no
+// longer read, because the bridge importer's source contract names it.
+func applyCollectionLoginSharing(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+		UPDATE personal_collections
+		   SET is_shared = 0
+		 WHERE is_shared
+		   AND EXISTS (
+		         SELECT 1 FROM profiles p
+		          WHERE p.id <> personal_collections.creator_profile_id
+		            AND NOT EXISTS (
+		                  SELECT 1 FROM personal_collection_profiles v
+		                   WHERE v.collection_id = personal_collections.id
+		                     AND v.profile_id = p.id
+		                ))`)
+	return err
+}
+
+// retireProfileThemes deletes every stored ui.theme, ui.custom_theme_vars and
+// ui.custom_css value at every scope. The web client has one theme and applies
+// only the admin's overrides, so these choices are dead; the keys stay in the
+// manifest, deprecated, so a stale client's write still succeeds. The Postgres
+// store deletes the same rows in 20260926233851_retire_profile_themes.sql.
+func retireProfileThemes(tx *sql.Tx) error {
+	_, err := tx.Exec(`DELETE FROM user_setting_values WHERE key IN ('ui.theme', 'ui.custom_theme_vars', 'ui.custom_css')`)
+	if err != nil {
+		return fmt.Errorf("deleting retired profile theme settings: %w", err)
+	}
+	return nil
 }
 
 // migrateToV20 widens collection sort preferences to include the two personal

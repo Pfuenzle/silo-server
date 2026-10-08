@@ -28,6 +28,10 @@ func NewEpisodeRepository(pool *pgxpool.Pool) *EpisodeRepository {
 	return &EpisodeRepository{pool: pool}
 }
 
+// MaxEpisodePageSize is the most episodes one BrowseEpisodes or
+// ListUpcoming page returns.
+const MaxEpisodePageSize = 1000
+
 // episodeColumns is the list of columns returned by all SELECT queries on episodes.
 const episodeColumns = `content_id, series_id, season_id, season_number, episode_number,
 	title, default_metadata_language, overview, air_date, runtime,
@@ -37,64 +41,103 @@ const episodeColumns = `content_id, series_id, season_id, season_number, episode
 	metadata_s3_path, metadata_etag, metadata_source,
 	created_at, updated_at`
 
-// updateSeriesLastAirDateSQL maintains the denormalized
-// media_items.last_air_date_at column for a single series after an Upsert.
-// Audit 2026-05-01 §2.1 hot path #1: replaces a per-row correlated
-// subquery with a column read.
+// refreshSeriesAirDatesSQL maintains the denormalized media_items columns
+// last_air_date_at (newest episode aired on or before today) and
+// next_air_date_at (earliest episode airing after today) for the series IDs
+// in $1. Audit 2026-05-01 §2.1 hot path #1: the last-air-date sort reads a
+// column instead of a per-row correlated subquery.
 //
-// MAINTENANCE INVARIANT: This column is currently kept fresh only on
-// Upsert/BulkUpsert. The repo has no episode-delete path, and
-// TestNoEpisodeDeletePath_ProtectsLastAirDateDenorm pins that absence.
-// If you add a delete path, also recompute last_air_date_at for the
-// parent series (or add a DB trigger).
-const updateSeriesLastAirDateSQL = `
-	UPDATE media_items mi
-	SET last_air_date_at = sub.last_aired
-	FROM (
-		SELECT MAX(e.air_date) AS last_aired
-		FROM episodes e
-		WHERE e.series_id = $1 AND e.air_date IS NOT NULL AND e.air_date <= CURRENT_DATE
-	) sub
-	WHERE mi.content_id = $1 AND mi.type = 'series'
-	  AND (mi.last_air_date_at IS DISTINCT FROM sub.last_aired)`
-
-// batchUpdateSeriesLastAirDateSQL is the multi-series form used by
-// BulkUpsert. Single round-trip regardless of episode count.
+// Both values depend on the current date, so an episode write is not the only
+// thing that can make them stale: a known future episode airing does too.
+// Upsert, BulkUpsert, and air-date edits through UpdateMetadata run this for
+// the written series, and RefreshDueSeriesAirDates runs it for series whose
+// next_air_date_at has passed.
 //
 // Drive the subquery from UNNEST($1) with a LEFT JOIN so every input
-// series_id produces exactly one row in `sub` — including series whose
-// entire episode set has air_date NULL or in the future, where MAX is
-// NULL. Without this, GROUP BY over a filtered `episodes` scan would
-// drop those series and leave a stale media_items.last_air_date_at
-// from an earlier sync (e.g., a series whose air dates were corrected
-// to NULL would never reset). The IS DISTINCT FROM guard handles NULL
-// vs non-NULL comparison correctly.
-const batchUpdateSeriesLastAirDateSQL = `
+// series_id produces exactly one row in `sub` — including series without a
+// dated episode, where both aggregates are NULL. Without this, GROUP BY over
+// a filtered `episodes` scan would drop those series and leave stale values
+// from an earlier sync (e.g., a series whose air dates were corrected to NULL
+// would never reset). The IS DISTINCT FROM guards handle NULL vs non-NULL
+// comparison correctly.
+//
+// MAINTENANCE INVARIANT: The repo has no episode-delete path, and
+// TestNoEpisodeDeletePath_ProtectsLastAirDateDenorm pins that absence.
+// If you add a delete path, also run this for the parent series (or add a
+// DB trigger).
+const refreshSeriesAirDatesSQL = `
 	UPDATE media_items mi
-	SET last_air_date_at = sub.last_aired
+	SET last_air_date_at = sub.last_aired,
+		next_air_date_at = sub.next_airing
 	FROM (
-		SELECT s.series_id, MAX(e.air_date) AS last_aired
+		SELECT s.series_id,
+			MAX(e.air_date) FILTER (WHERE e.air_date <= CURRENT_DATE) AS last_aired,
+			MIN(e.air_date) FILTER (WHERE e.air_date > CURRENT_DATE) AS next_airing
 		FROM unnest($1::text[]) AS s(series_id)
 		LEFT JOIN episodes e
 			ON e.series_id = s.series_id
 		   AND e.air_date IS NOT NULL
-		   AND e.air_date <= CURRENT_DATE
 		GROUP BY s.series_id
 	) sub
 	WHERE mi.content_id = sub.series_id
 	  AND mi.type = 'series'
-	  AND (mi.last_air_date_at IS DISTINCT FROM sub.last_aired)`
+	  AND (mi.last_air_date_at IS DISTINCT FROM sub.last_aired
+		   OR mi.next_air_date_at IS DISTINCT FROM sub.next_airing)`
 
-// buildUpdateSeriesLastAirDateSQL exposes the single-series maintenance
-// SQL for unit-test inspection.
-func (r *EpisodeRepository) buildUpdateSeriesLastAirDateSQL() string {
-	return updateSeriesLastAirDateSQL
-}
+// dueSeriesAirDatesSQL claims up to $1 series whose next known episode has
+// aired since their air-date columns were last computed. It reads the partial
+// index idx_media_items_next_air_date_at. SKIP LOCKED passes over series an
+// episode write is recomputing, and lets sweeps on several nodes split the
+// due set instead of waiting on each other.
+const dueSeriesAirDatesSQL = `
+	SELECT COALESCE(array_agg(content_id), '{}')
+	FROM (
+		SELECT content_id
+		FROM media_items
+		WHERE type = 'series'
+		  AND next_air_date_at IS NOT NULL
+		  AND next_air_date_at <= CURRENT_DATE
+		ORDER BY next_air_date_at, content_id
+		LIMIT $1
+		FOR UPDATE SKIP LOCKED
+	) due`
 
-// buildBatchUpdateLastAirDateSQL exposes the bulk maintenance SQL for
-// unit-test inspection.
-func (r *EpisodeRepository) buildBatchUpdateLastAirDateSQL() string {
-	return batchUpdateSeriesLastAirDateSQL
+// RefreshDueSeriesAirDates recomputes the air-date columns for up to limit
+// series whose next_air_date_at has passed. It returns how many series were
+// due in this batch and how many rows changed. Each refreshed series moves
+// its next_air_date_at past today (or to NULL), so repeated calls drain the
+// due set.
+//
+// The series rows are locked before the recompute runs as its own statement,
+// so its snapshot includes every episode write that committed for them. A
+// recompute that instead waited on a row an episode write held would apply
+// its older aggregate over the write's result.
+func (r *EpisodeRepository) RefreshDueSeriesAirDates(ctx context.Context, limit int) (due, updated int, err error) {
+	if limit <= 0 {
+		return 0, 0, nil
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin series air date refresh: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+	var seriesIDs []string
+	if err := tx.QueryRow(ctx, dueSeriesAirDatesSQL, limit).Scan(&seriesIDs); err != nil {
+		return 0, 0, fmt.Errorf("select series with aired next episode: %w", err)
+	}
+	if len(seriesIDs) == 0 {
+		return 0, 0, nil
+	}
+	tag, err := tx.Exec(ctx, refreshSeriesAirDatesSQL, seriesIDs)
+	if err != nil {
+		return len(seriesIDs), 0, fmt.Errorf("refresh series air dates: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return len(seriesIDs), 0, fmt.Errorf("commit series air date refresh: %w", err)
+	}
+	return len(seriesIDs), int(tag.RowsAffected()), nil
 }
 
 const episodeAvailabilityPredicate = `EXISTS (
@@ -367,10 +410,10 @@ func (r *EpisodeRepository) Upsert(ctx context.Context, ep *models.Episode) erro
 	}
 	ep.ContentID = storedContentID
 
-	// Maintain denormalized media_items.last_air_date_at for the parent
+	// Maintain the denormalized media_items air-date columns for the parent
 	// series (audit 2026-05-01 §2.1 hot path #1).
-	if _, err := r.pool.Exec(ctx, updateSeriesLastAirDateSQL, ep.SeriesID); err != nil {
-		return fmt.Errorf("update series last_air_date_at: %w", err)
+	if _, err := r.pool.Exec(ctx, refreshSeriesAirDatesSQL, []string{ep.SeriesID}); err != nil {
+		return fmt.Errorf("update series air dates: %w", err)
 	}
 
 	return nil
@@ -582,12 +625,10 @@ func (r *EpisodeRepository) BulkUpsert(ctx context.Context, seriesID string, epi
 		}
 	}
 
-	// Maintain denormalized media_items.last_air_date_at for the parent
-	// series (audit 2026-05-01 §2.1 hot path #1). BulkUpsert is called for
-	// a single series, but the SQL uses ANY($1::text[]) to be future-proof
-	// for multi-series scanner batches.
-	if _, err := tx.Exec(ctx, batchUpdateSeriesLastAirDateSQL, []string{seriesID}); err != nil {
-		return fmt.Errorf("batch update last_air_date_at: %w", err)
+	// Maintain the denormalized media_items air-date columns for the parent
+	// series (audit 2026-05-01 §2.1 hot path #1).
+	if _, err := tx.Exec(ctx, refreshSeriesAirDatesSQL, []string{seriesID}); err != nil {
+		return fmt.Errorf("batch update series air dates: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit bulk episode upsert: %w", err)
@@ -1065,16 +1106,34 @@ func (r *EpisodeRepository) UpdateMetadata(ctx context.Context, contentID string
 
 	setClauses = append(setClauses, "updated_at = NOW()")
 
-	query := fmt.Sprintf("UPDATE episodes SET %s WHERE content_id = $%d",
+	query := fmt.Sprintf("UPDATE episodes SET %s WHERE content_id = $%d RETURNING series_id",
 		strings.Join(setClauses, ", "), argIdx)
 	args = append(args, contentID)
 
-	tag, err := r.pool.Exec(ctx, query, args...)
+	// An air-date edit and its series recompute commit together, so a failed
+	// recompute cannot leave the edit persisted with stale series dates.
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("begin episode metadata update: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	var seriesID string
+	if err := tx.QueryRow(ctx, query, args...).Scan(&seriesID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrEpisodeNotFound
+		}
 		return fmt.Errorf("updating episode metadata: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrEpisodeNotFound
+	if upd.AirDate != nil {
+		if _, err := tx.Exec(ctx, refreshSeriesAirDatesSQL, []string{seriesID}); err != nil {
+			return fmt.Errorf("update series air dates: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit episode metadata update: %w", err)
 	}
 	return nil
 }
@@ -1093,4 +1152,145 @@ func (r *EpisodeRepository) UpdateStillIfSourceMatches(ctx context.Context, cont
 		return false, fmt.Errorf("updating episode cached still: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// ListUpcoming returns episodes premiered since the supplied UTC boundary,
+// including future metadata without a local file, within the viewer's scope.
+func (r *EpisodeRepository) ListUpcoming(ctx context.Context, since time.Time, seriesID, seasonID string, libraryID, limit, offset int, filter AccessFilter, includeTotal bool) ([]*models.Episode, int, error) {
+	conditions := []string{"mi.content_id = episodes.series_id", "mi.type = 'series'"}
+	args := []any{since}
+	index := 2
+	appendLibraryAccessConditions("mi.content_id", filter, &conditions, &args, &index)
+	applyAccessFilter("mi", filter, &conditions, &args, &index)
+	if libraryID > 0 {
+		conditions = append(conditions, fmt.Sprintf("EXISTS (SELECT 1 FROM media_item_libraries mil WHERE mil.content_id = mi.content_id AND mil.media_folder_id = $%d)", index))
+		args = append(args, libraryID)
+		index++
+	}
+	where := "air_date >= $1 AND EXISTS (SELECT 1 FROM media_items mi WHERE " + strings.Join(conditions, " AND ") + ")"
+	if seriesID != "" {
+		where += fmt.Sprintf(" AND series_id = $%d", index)
+		args = append(args, seriesID)
+		index++
+	}
+	if seasonID != "" {
+		where += fmt.Sprintf(" AND season_id = $%d", index)
+		args = append(args, seasonID)
+		index++
+	}
+	var total int
+	if includeTotal {
+		if err := r.pool.QueryRow(ctx, "SELECT COUNT(*) FROM episodes WHERE "+where, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+	}
+	args = append(args, min(max(limit, 0), MaxEpisodePageSize), max(offset, 0))
+	rows, err := r.pool.Query(ctx, "SELECT "+episodeColumns+" FROM episodes WHERE "+where+fmt.Sprintf(" ORDER BY air_date, LOWER(title), content_id LIMIT $%d OFFSET $%d", index, index+1), args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	episodes, err := scanEpisodes(rows)
+	return episodes, total, err
+}
+
+// BrowseEpisodes applies catalog and profile predicates before counting and
+// paging, so a long series only hydrates the selected page.
+func (r *EpisodeRepository) BrowseEpisodes(ctx context.Context, seriesID, seasonID string, seasonNumber *int, startItemID string, filters BrowseFilters, access AccessFilter, includeTotal bool) ([]*models.Episode, int, error) {
+	conditions := []string{"e.series_id = $1", "EXISTS (SELECT 1 FROM episode_libraries el WHERE el.episode_id=e.content_id)"}
+	args := []any{seriesID}
+	index := 2
+	appendLibraryAccessConditions("s.content_id", access, &conditions, &args, &index)
+	applyAccessFilter("s", access, &conditions, &args, &index)
+	if seasonID != "" {
+		conditions = append(conditions, fmt.Sprintf("e.season_id = $%d", index))
+		args = append(args, seasonID)
+		index++
+	} else if seasonNumber != nil {
+		conditions = append(conditions, fmt.Sprintf("e.season_number = $%d", index))
+		args = append(args, *seasonNumber)
+		index++
+	}
+	extra := []string{}
+	filters.Type = browseTypeEpisode
+	// Language predicates count only the episode files this viewer may play.
+	filters.LibraryIDs, filters.DisabledLibraryIDs, filters.MaxPlaybackQuality = access.AllowedLibraryIDs, access.DisabledLibraryIDs, access.MaxPlaybackQuality
+	appendCompatBrowsePredicates(filters, &extra, &args, &index)
+	rewrite := strings.NewReplacer("mi.content_id", "e.content_id", "mi.genres", "s.genres", "mi.year", "EXTRACT(YEAR FROM e.air_date)::int", "mi.title", "e.title")
+	for _, condition := range extra {
+		conditions = append(conditions, rewrite.Replace(condition))
+	}
+	if filters.Genre != "" {
+		conditions = append(conditions, fmt.Sprintf("s.genres @> ARRAY[$%d]::text[]", index))
+		args = append(args, filters.Genre)
+		index++
+	}
+	if filters.PersonID > 0 {
+		conditions = append(conditions, fmt.Sprintf("EXISTS (SELECT 1 FROM item_people ip WHERE ip.content_id=s.content_id AND ip.person_id=$%d)", index))
+		args = append(args, filters.PersonID)
+		index++
+	}
+	if filters.NamePrefix != "" {
+		conditions = append(conditions, fmt.Sprintf("LOWER(e.title) LIKE $%d ESCAPE '\\'", index))
+		args = append(args, likePrefixPattern(filters.NamePrefix))
+		index++
+	}
+	if filters.RequireBackdrop {
+		conditions = append(conditions, "COALESCE(s.backdrop_path,'') <> ''")
+	}
+	order := "e.season_number, e.episode_number, e.content_id"
+	switch filters.Sort {
+	case BrowseSortTitle:
+		order = "LOWER(e.title), e.content_id"
+	case BrowseSortReleaseDate:
+		order = "e.air_date, e.content_id"
+	case BrowseSortCreatedAt:
+		order = "e.created_at, e.content_id"
+	}
+	if filters.Order == BrowseOrderDescending {
+		order = strings.ReplaceAll(order, ",", " DESC,") + " DESC"
+	}
+	if startItemID != "" {
+		// StartItemId uses the natural episode queue. Other sorting still orders the
+		// surviving queue normally; absent IDs produce an empty page.
+		conditions = append(conditions, fmt.Sprintf("(e.season_number,e.episode_number) >= (SELECT start.season_number,start.episode_number FROM episodes start WHERE start.content_id=$%d AND start.series_id=e.series_id)", index))
+		args = append(args, startItemID)
+		index++
+	}
+	from := " FROM episodes e JOIN media_items s ON s.content_id=e.series_id WHERE " + strings.Join(conditions, " AND ")
+	var total int
+	if includeTotal {
+		if err := r.pool.QueryRow(ctx, "SELECT COUNT(*)"+from, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+	}
+	args = append(args, min(max(filters.Limit, 0), MaxEpisodePageSize), max(filters.Offset, 0))
+	pageOrder := strings.ReplaceAll(order, "e.", "episode_page.")
+	query := "SELECT " + episodeColumns + " FROM (SELECT e.*" + from + fmt.Sprintf(" ORDER BY %s LIMIT $%d OFFSET $%d", order, index, index+1) + ") episode_page" + " ORDER BY " + pageOrder
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	episodes, err := scanEpisodes(rows)
+	return episodes, total, err
+}
+
+// ListAvailableIDsBySeriesPage pages the same episode set used by completion
+// rollups without loading metadata or all episodes into memory.
+func (r *EpisodeRepository) ListAvailableIDsBySeriesPage(ctx context.Context, seriesID string, limit, offset int) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `SELECT content_id FROM episodes WHERE series_id=$1 AND `+episodeAvailabilityPredicate+` ORDER BY content_id LIMIT $2 OFFSET $3`, seriesID, min(max(limit, 1), 1000), max(offset, 0))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

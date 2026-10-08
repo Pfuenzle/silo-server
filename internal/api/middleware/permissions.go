@@ -25,8 +25,9 @@ type MetadataTargetLibraryResolver interface {
 type PermissionMiddleware struct {
 	users        PermissionUserLoader
 	libraries    MetadataTargetLibraryResolver
-	checkPrimary PrimaryProfileChecker      // nil disables the acting-admin profile policy
-	groups       access.GroupPolicyProvider // nil means "no access groups"
+	checkPrimary PrimaryProfileChecker       // nil disables the acting-admin profile policy
+	household    HouseholdProfileRequirement // nil disables the profile-less acting-admin check
+	groups       access.GroupPolicyProvider  // nil means "no access groups"
 }
 
 // NewPermissionMiddleware creates the legacy permission middleware. The
@@ -37,13 +38,14 @@ func NewPermissionMiddleware(
 	users PermissionUserLoader,
 	libraries MetadataTargetLibraryResolver,
 	checkPrimary PrimaryProfileChecker,
+	household HouseholdProfileRequirement,
 	groups ...access.GroupPolicyProvider,
 ) *PermissionMiddleware {
 	var groupProvider access.GroupPolicyProvider
 	if len(groups) > 0 {
 		groupProvider = groups[0]
 	}
-	return &PermissionMiddleware{users: users, libraries: libraries, checkPrimary: checkPrimary, groups: groupProvider}
+	return &PermissionMiddleware{users: users, libraries: libraries, checkPrimary: checkPrimary, household: household, groups: groupProvider}
 }
 
 // RequireMetadataCurationForItem allows acting admins or users with
@@ -56,15 +58,16 @@ func (m *PermissionMiddleware) RequireMetadataCurationForItem(next http.Handler)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims := GetClaims(r.Context())
 		if claims == nil {
-			writeUnauthorized(w, "Authentication required")
+			writeUnauthorized(w, "Authentication required", ReasonAuthenticationRequired)
 			return
 		}
 		if claims.Role == "admin" {
 			var checkPrimary PrimaryProfileChecker
+			var household HouseholdProfileRequirement
 			if m != nil {
-				checkPrimary = m.checkPrimary
+				checkPrimary, household = m.checkPrimary, m.household
 			}
-			actingAdmin, err := actingAdminAllowed(r, claims.UserID, checkPrimary)
+			actingAdmin, err := actingAdminAllowed(r, claims, checkPrimary, household)
 			if err != nil {
 				writePermissionError(w, http.StatusInternalServerError, "internal_error", "Failed to verify active profile")
 				return
@@ -81,7 +84,7 @@ func (m *PermissionMiddleware) RequireMetadataCurationForItem(next http.Handler)
 
 		contentID := chi.URLParam(r, "id")
 		if contentID == "" {
-			writePermissionError(w, http.StatusBadRequest, "bad_request", "Item ID is required")
+			writePermissionErrorReason(w, http.StatusBadRequest, "bad_request", itemIDRequiredMsg, ReasonItemIDRequired)
 			return
 		}
 
@@ -93,8 +96,9 @@ func (m *PermissionMiddleware) RequireMetadataCurationForItem(next http.Handler)
 		hasPermission := auth.HasEffectivePermission(user, auth.PermissionMetadataCuration)
 		if claims.Role == "admin" {
 			// Reached only when the admin bypass was refused (non-primary
-			// profile declared): the role-derived grant does not apply, only
-			// an explicitly assigned permission does.
+			// profile declared, or no profile on a household that requires
+			// one): the role-derived grant does not apply, only an explicitly
+			// assigned permission does.
 			hasPermission = auth.HasAssignedPermission(user, auth.PermissionMetadataCuration)
 		}
 		if !hasPermission {
@@ -135,7 +139,7 @@ func (m *PermissionMiddleware) RequireMarkerEdit(next http.Handler) http.Handler
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims := GetClaims(r.Context())
 		if claims == nil {
-			writeUnauthorized(w, "Authentication required")
+			writeUnauthorized(w, "Authentication required", ReasonAuthenticationRequired)
 			return
 		}
 		if claims.Role == "admin" {
@@ -224,4 +228,12 @@ func writePermissionError(w http.ResponseWriter, status int, code, message strin
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(errorResponse{Error: code, Message: message})
+}
+
+// writePermissionErrorReason is writePermissionError plus the machine-readable
+// reason that tells this denial apart from another with the same code. The
+// response body is identical either way.
+func writePermissionErrorReason(w http.ResponseWriter, status int, code, message, reason string) {
+	recordDenialReason(w, reason)
+	writePermissionError(w, status, code, message)
 }

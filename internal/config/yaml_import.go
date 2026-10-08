@@ -196,6 +196,11 @@ func YAMLToSettingsMap(path string) (map[string]string, error) {
 	}
 	setIfNonEmpty(m, "scanner.file_removal_grace", raw.Scanner.FileRemovalGrace)
 	m["scanner.empty_trash_after_scan"] = strconv.FormatBool(raw.Scanner.EmptyTrashAfterScan)
+	m["scanner.realtime_monitoring"] = strconv.FormatBool(raw.Scanner.RealtimeMonitoring)
+
+	// Artwork
+	setIfNonEmpty(m, "artwork.storage_backend", raw.Artwork.StorageBackend)
+	setIfNonEmpty(m, "artwork.local_path", raw.Artwork.LocalPath)
 
 	// Matcher
 	if raw.Matcher.Workers != 0 {
@@ -222,10 +227,6 @@ func YAMLToSettingsMap(path string) (map[string]string, error) {
 
 	// Redis
 	m["redis.url"] = raw.Redis.URL
-	// Redis Sentinel
-	setIfNonEmpty(m, "redis.sentinel_master", raw.Redis.SentinelMaster)
-	setIfNonEmpty(m, "redis.sentinel_password", raw.Redis.SentinelPassword)
-	// SentinelAddresses is []string — stored in YAML only, not in the flat map
 
 	// Rate Limiting
 	m["ratelimit.enabled"] = strconv.FormatBool(raw.RateLimit.Enabled)

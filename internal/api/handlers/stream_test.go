@@ -393,8 +393,7 @@ func TestHandleSubtitle_ListDownloadedSubtitlesErrorReturns500(t *testing.T) {
 
 	handler := NewStreamHandler(baseMgr, testPlaybackFileResolver{file: file})
 	handler.SubtitleRepo = &handlerMockSubtitleRepo{listErr: errors.New("db unavailable")}
-	handler.S3Client = newMockS3ClientForHandler()
-	handler.S3Bucket = "test-bucket"
+	handler.SubtitleBlobs = newMockBlobStoreForHandler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/"+session.ID+"/subtitles/0.vtt", nil)
 	req = req.WithContext(newAuthorizedPlaybackContext())
@@ -437,11 +436,10 @@ func TestHandleSubtitleUsesBoundDownloadedIdentityAfterInventoryReorder(t *testi
 	}
 	handler := NewStreamHandler(baseMgr, testPlaybackFileResolver{file: file})
 	handler.SubtitleRepo = repo
-	handler.S3Client = subtitleContentS3Client{objects: map[string][]byte{
+	handler.SubtitleBlobs = subtitleContentBlobStore{objects: map[string][]byte{
 		"selected-71.vtt": []byte("WEBVTT\n\n00:00.000 --> 00:01.000\nselected-71\n"),
 		"other-72.vtt":    []byte("WEBVTT\n\n00:00.000 --> 00:01.000\nother-72\n"),
 	}}
-	handler.S3Bucket = "test-bucket"
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/"+session.ID+"/subtitles/0.vtt?file_id=42&downloaded_subtitle_id=71", nil)
 	req = req.WithContext(newAuthorizedPlaybackContext())
@@ -457,15 +455,188 @@ func TestHandleSubtitleUsesBoundDownloadedIdentityAfterInventoryReorder(t *testi
 	}
 }
 
-type subtitleContentS3Client struct {
+// A downloaded SRT answers the published .srt?original=1 URL with its stored
+// bytes on both GET and HEAD, whether the URL pins the row or uses the ordinal.
+func TestHandleSubtitleServesDownloadedSRTOriginalOnRequest(t *testing.T) {
+	const stored = "1\n00:00:01,000 --> 00:00:02,000\n{\\an8}Top\n"
+	file := &models.MediaFile{ID: 42, ContentID: "movie-1", FilePath: "/tmp/movie.mkv", Duration: 3600}
+	baseMgr := playback.NewSessionManager(0, 0)
+	session, err := baseMgr.StartSession(1, "profile-1", 42, playback.PlayDirect, false)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	repo := newMockSubtitleRepoForHandler()
+	row := subtitles.DownloadedSubtitle{ID: 71, MediaFileID: 42, Format: subtitles.FormatSRT, S3Key: "ai-71.srt"}
+	repo.subtitles[71] = &row
+	repo.list = []subtitles.DownloadedSubtitle{row}
+	handler := NewStreamHandler(baseMgr, testPlaybackFileResolver{file: file})
+	handler.SubtitleRepo = repo
+	handler.SubtitleBlobs = subtitleContentBlobStore{objects: map[string][]byte{"ai-71.srt": []byte(stored)}}
+
+	for _, query := range []string{"file_id=42&original=1&downloaded_subtitle_id=71", "file_id=42&original=1"} {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			req := httptest.NewRequest(method, "/api/v2/stream/"+session.ID+"/subtitles/0.srt?"+query, nil)
+			req = req.WithContext(WithNativeAPIV2(newAuthorizedPlaybackContext()))
+			routeCtx := chi.NewRouteContext()
+			routeCtx.URLParams.Add("session_id", session.ID)
+			routeCtx.URLParams.Add("track", "0.srt")
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+			rr := httptest.NewRecorder()
+			handler.HandleSubtitle(rr, req)
+			if rr.Code != http.StatusOK || !strings.HasPrefix(rr.Header().Get("Content-Type"), "application/x-subrip") ||
+				(method == http.MethodGet && rr.Body.String() != stored) {
+				t.Fatalf("%s ?%s = %d %q %q", method, query, rr.Code, rr.Header().Get("Content-Type"), rr.Body.String())
+			}
+		}
+	}
+}
+
+// A downloaded SRT row with a stored timing correction is retimed before the
+// WebVTT conversion, on the ID-bound and ordinal URLs, and the original SRT
+// representation carries the same correction.
+func TestHandleSubtitleAppliesDownloadedSubtitleTiming(t *testing.T) {
+	const stored = "1\n00:00:01,000 --> 00:00:02,000\nHello\n"
+	file := &models.MediaFile{ID: 42, ContentID: "movie-1", FilePath: "/tmp/movie.mkv", Duration: 3600}
+	baseMgr := playback.NewSessionManager(0, 0)
+	session, err := baseMgr.StartSession(1, "profile-1", 42, playback.PlayDirect, false)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	repo := newMockSubtitleRepoForHandler()
+	row := subtitles.DownloadedSubtitle{ID: 71, MediaFileID: 42, Format: subtitles.FormatSRT, S3Key: "timed-71.srt",
+		Timing: subtitles.Timing{OffsetMS: 2500, Scale: 1}}
+	repo.subtitles[71] = &row
+	repo.list = []subtitles.DownloadedSubtitle{row}
+	handler := NewStreamHandler(baseMgr, testPlaybackFileResolver{file: file})
+	handler.SubtitleRepo = repo
+	handler.SubtitleBlobs = subtitleContentBlobStore{objects: map[string][]byte{"timed-71.srt": []byte(stored)}}
+	plays := &recordedPlays{}
+	handler.PlaySync = plays
+
+	serve := func(prefix, track, query string, native bool) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, prefix+session.ID+"/subtitles/"+track+"?"+query, nil)
+		ctx := newAuthorizedPlaybackContext()
+		if native {
+			ctx = WithNativeAPIV2(ctx)
+		}
+		routeCtx := chi.NewRouteContext()
+		routeCtx.URLParams.Add("session_id", session.ID)
+		routeCtx.URLParams.Add("track", track)
+		req = req.WithContext(context.WithValue(ctx, chi.RouteCtxKey, routeCtx))
+		rr := httptest.NewRecorder()
+		handler.HandleSubtitle(rr, req)
+		return rr
+	}
+	for _, query := range []string{"file_id=42&downloaded_subtitle_id=71", "file_id=42"} {
+		rr := serve("/api/v1/stream/", "0.vtt", query, false)
+		body := rr.Body.String()
+		if rr.Code != http.StatusOK || !strings.HasPrefix(body, "WEBVTT") || !strings.Contains(body, "00:00:03.500 --> 00:00:04.500") {
+			t.Fatalf("?%s = %d %q", query, rr.Code, body)
+		}
+		if got := rr.Header().Get("Cache-Control"); got != "private, no-cache" {
+			t.Fatalf("?%s Cache-Control = %q", query, got)
+		}
+	}
+	rr := serve("/api/v2/stream/", "0.srt", "file_id=42&original=1&downloaded_subtitle_id=71", true)
+	if want := "1\n00:00:03,500 --> 00:00:04,500\nHello\n"; rr.Code != http.StatusOK || rr.Body.String() != want {
+		t.Fatalf("original SRT = %d %q, want %q", rr.Code, rr.Body.String(), want)
+	}
+	// Both routes to the stored row, the pinned ID and the ordinal, are plays.
+	played := subtitles.SyncTarget{MediaFileID: 42, StoredID: 71}
+	if len(plays.targets) != 3 || plays.targets[0] != played || plays.targets[1] != played || plays.targets[2] != played {
+		t.Fatalf("played %+v", plays.targets)
+	}
+}
+
+type sidecarTimings map[string]*subtitles.ExternalTiming
+
+func (s sidecarTimings) ExternalTiming(_ context.Context, _ int, sha string) (*subtitles.ExternalTiming, error) {
+	return s[sha], nil
+}
+
+// A sidecar on disk is served with the correction stored for its bytes, on
+// every representation, and revalidated because the correction can change.
+// recordedPlays stands in for the sync service and records played subtitles.
+type recordedPlays struct{ targets []subtitles.SyncTarget }
+
+func (p *recordedPlays) SubtitlePlayed(_ context.Context, target subtitles.SyncTarget) {
+	p.targets = append(p.targets, target)
+}
+
+func TestHandleSubtitleAppliesSidecarTiming(t *testing.T) {
+	const onDisk = "1\n00:00:01,000 --> 00:00:02,000\nHello\n"
+	path := filepath.Join(t.TempDir(), "movie.en.srt")
+	if err := os.WriteFile(path, []byte(onDisk), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file := &models.MediaFile{ID: 42, ContentID: "movie-1", FilePath: "/tmp/movie.mkv", Duration: 3600,
+		ExternalSubtitles: []models.ExternalSubtitle{{Path: path, Language: "eng", Format: "srt"}}}
+	baseMgr := playback.NewSessionManager(0, 0)
+	session, err := baseMgr.StartSession(1, "profile-1", 42, playback.PlayDirect, false)
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	handler := NewStreamHandler(baseMgr, testPlaybackFileResolver{file: file})
+	handler.ExternalTimings = sidecarTimings{subtitles.ContentSHA256([]byte(onDisk)): {Timing: subtitles.Timing{OffsetMS: 2500, Scale: 1}, Revision: 2}}
+	plays := &recordedPlays{}
+	handler.PlaySync = plays
+	method := http.MethodGet
+
+	serve := func(prefix, track, query string, native bool) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, prefix+session.ID+"/subtitles/"+track+"?"+query, nil)
+		ctx := newAuthorizedPlaybackContext()
+		if native {
+			ctx = WithNativeAPIV2(ctx)
+		}
+		routeCtx := chi.NewRouteContext()
+		routeCtx.URLParams.Add("session_id", session.ID)
+		routeCtx.URLParams.Add("track", track)
+		req = req.WithContext(context.WithValue(ctx, chi.RouteCtxKey, routeCtx))
+		rr := httptest.NewRecorder()
+		handler.HandleSubtitle(rr, req)
+		return rr
+	}
+	rr := serve("/api/v1/stream/", "0.vtt", "file_id=42&external_subtitle_key="+playback.ExternalSubtitlePathKeyV3(path), false)
+	if body := rr.Body.String(); rr.Code != http.StatusOK || !strings.HasPrefix(body, "WEBVTT") || !strings.Contains(body, "00:00:03.500 --> 00:00:04.500") {
+		t.Fatalf("vtt = %d %q", rr.Code, body)
+	}
+	if got := rr.Header().Get("Cache-Control"); got != "private, no-cache" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	rr = serve("/api/v2/stream/", "0.srt", "file_id=42&original=1", true)
+	if want := "1\n00:00:03,500 --> 00:00:04,500\nHello\n"; rr.Code != http.StatusOK || rr.Body.String() != want {
+		t.Fatalf("original SRT = %d %q, want %q", rr.Code, rr.Body.String(), want)
+	}
+	// Each delivery tells the sync service the sidecar is being played; a
+	// HEAD request only asks about it.
+	method = http.MethodHead
+	serve("/api/v2/stream/", "0.srt", "file_id=42&original=1", true)
+	method = http.MethodGet
+	played := subtitles.SyncTarget{MediaFileID: 42, ExternalPath: path}
+	if len(plays.targets) != 2 || plays.targets[0] != played || plays.targets[1] != played {
+		t.Fatalf("played %+v", plays.targets)
+	}
+
+	// Edited on disk, the sidecar no longer matches its old correction.
+	if err := os.WriteFile(path, []byte("1\n00:00:01,000 --> 00:00:02,000\nHello there\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rr = serve("/api/v1/stream/", "0.vtt", "file_id=42", false); !strings.Contains(rr.Body.String(), "00:00:01.000 --> 00:00:02.000") {
+		t.Fatalf("edited sidecar = %d %q", rr.Code, rr.Body.String())
+	}
+}
+
+type subtitleContentBlobStore struct {
 	objects map[string][]byte
 }
 
-func (subtitleContentS3Client) PutObject(context.Context, string, string, []byte) error { return nil }
-func (c subtitleContentS3Client) GetObject(_ context.Context, _, key string) ([]byte, error) {
+func (subtitleContentBlobStore) Put(context.Context, string, []byte) error { return nil }
+func (c subtitleContentBlobStore) Get(_ context.Context, key string) ([]byte, error) {
 	return append([]byte(nil), c.objects[key]...), nil
 }
-func (subtitleContentS3Client) DeleteObject(context.Context, string, string) error { return nil }
+func (subtitleContentBlobStore) Delete(context.Context, string) error { return nil }
 
 func TestHandleSubtitle_NilMediaFileReturns404(t *testing.T) {
 	baseMgr := playback.NewSessionManager(0, 0)

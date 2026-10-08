@@ -30,6 +30,7 @@ type RequestService interface {
 	Cancel(ctx context.Context, viewer mediarequests.Viewer, id, reason string) (*mediarequests.Request, error)
 	Retry(ctx context.Context, viewer mediarequests.Viewer, id string) (*mediarequests.Request, error)
 	GetFeatureStatus(ctx context.Context, viewer mediarequests.Viewer) (mediarequests.FeatureStatus, error)
+	RequestCapabilityAllowed(ctx context.Context, viewer mediarequests.Viewer) (bool, error)
 	GetSettings(ctx context.Context, viewer mediarequests.Viewer) (mediarequests.Settings, error)
 	UpdateSettings(ctx context.Context, viewer mediarequests.Viewer, settings mediarequests.Settings) (mediarequests.Settings, error)
 	GetUserLimit(ctx context.Context, viewer mediarequests.Viewer, userID int) (*mediarequests.UserLimit, error)
@@ -55,46 +56,13 @@ type RequestsHandler struct {
 	service RequestService
 }
 
-type requestAPIResponse struct {
-	mediarequests.Request
-	ExternalStatus     *string `json:"external_status"`
-	ExternalDetail     *string `json:"external_detail"`
-	ExternalLibraryID  *string `json:"external_library_id"`
-	ExternalDownloadID *string `json:"external_download_id"`
-	SiloAudiobookLink  *string `json:"silo_audiobook_link"`
-}
-
-func requestResponseFrom(request *mediarequests.Request) requestAPIResponse {
-	return requestAPIResponse{
-		Request:            *request,
-		ExternalStatus:     nullableRequestString(request.ExternalStatus),
-		ExternalDetail:     nullableRequestString(request.ExternalDetail),
-		ExternalLibraryID:  nullableRequestString(request.ExternalLibraryID),
-		ExternalDownloadID: nullableRequestString(request.ExternalDownloadID),
-		SiloAudiobookLink:  nullableRequestString(request.SiloAudiobookLink),
-	}
-}
-
-func nullableRequestString(value string) *string {
-	if value == "" {
-		return nil
-	}
-	return &value
-}
-
-func requestResponsesFrom(requests []*mediarequests.Request) []requestAPIResponse {
-	responses := make([]requestAPIResponse, 0, len(requests))
-	for _, request := range requests {
-		if request != nil {
-			responses = append(responses, requestResponseFrom(request))
-		}
-	}
-	return responses
-}
-
 func NewRequestsHandler(service RequestService) *RequestsHandler {
 	return &RequestsHandler{service: service}
 }
+
+// Service is the request service this handler routes to; the v2 listener
+// calls the same value so both surfaces share one store and one policy.
+func (h *RequestsHandler) Service() RequestService { return h.service }
 
 func (h *RequestsHandler) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	viewer, ok := requestViewer(w, r, true)
@@ -302,7 +270,7 @@ func (h *RequestsHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		writeRequestServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, requestResponseFrom(req))
+	writeJSON(w, http.StatusCreated, req)
 }
 
 func (h *RequestsHandler) HandleListMine(w http.ResponseWriter, r *http.Request) {
@@ -316,8 +284,8 @@ func (h *RequestsHandler) HandleListMine(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
-		Requests []requestAPIResponse `json:"requests"`
-	}{Requests: requestResponsesFrom(requests)})
+		Requests []*mediarequests.Request `json:"requests"`
+	}{Requests: requests})
 }
 
 func (h *RequestsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
@@ -330,7 +298,7 @@ func (h *RequestsHandler) HandleGet(w http.ResponseWriter, r *http.Request) {
 		writeRequestServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, requestResponseFrom(req))
+	writeJSON(w, http.StatusOK, req)
 }
 
 func (h *RequestsHandler) HandleAdminList(w http.ResponseWriter, r *http.Request) {
@@ -344,8 +312,8 @@ func (h *RequestsHandler) HandleAdminList(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
-		Requests []requestAPIResponse `json:"requests"`
-	}{Requests: requestResponsesFrom(requests)})
+		Requests []*mediarequests.Request `json:"requests"`
+	}{Requests: requests})
 }
 
 func (h *RequestsHandler) HandleApprove(w http.ResponseWriter, r *http.Request) {
@@ -358,7 +326,7 @@ func (h *RequestsHandler) HandleApprove(w http.ResponseWriter, r *http.Request) 
 		writeRequestServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, requestResponseFrom(req))
+	writeJSON(w, http.StatusOK, req)
 }
 
 func (h *RequestsHandler) HandleDecline(w http.ResponseWriter, r *http.Request) {
@@ -380,7 +348,7 @@ func (h *RequestsHandler) HandleDecline(w http.ResponseWriter, r *http.Request) 
 		writeRequestServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, requestResponseFrom(req))
+	writeJSON(w, http.StatusOK, req)
 }
 
 func (h *RequestsHandler) HandleCancel(w http.ResponseWriter, r *http.Request) {
@@ -402,7 +370,7 @@ func (h *RequestsHandler) HandleCancel(w http.ResponseWriter, r *http.Request) {
 		writeRequestServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, requestResponseFrom(req))
+	writeJSON(w, http.StatusOK, req)
 }
 
 func (h *RequestsHandler) HandleRetry(w http.ResponseWriter, r *http.Request) {
@@ -415,7 +383,7 @@ func (h *RequestsHandler) HandleRetry(w http.ResponseWriter, r *http.Request) {
 		writeRequestServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, requestResponseFrom(req))
+	writeJSON(w, http.StatusOK, req)
 }
 
 func (h *RequestsHandler) HandleGetStatus(w http.ResponseWriter, r *http.Request) {

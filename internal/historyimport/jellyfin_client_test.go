@@ -17,10 +17,10 @@ func assertJellyfinAuthorization(t *testing.T, r *http.Request, token string) {
 		want += `, Token="` + token + `"`
 	}
 	if got := r.Header.Get("Authorization"); got != want {
-		t.Fatalf("Authorization = %q, want %q", got, want)
+		t.Errorf("Authorization = %q, want %q", got, want)
 	}
 	if got := r.Header.Get("X-Emby-Authorization"); got != "" {
-		t.Fatalf("X-Emby-Authorization = %q, want empty", got)
+		t.Errorf("X-Emby-Authorization = %q, want empty", got)
 	}
 }
 
@@ -38,12 +38,38 @@ func TestJellyfinAuthenticateServerUser_UsesStandardAuthorizationHeader(t *testi
 	defer server.Close()
 
 	client := NewJellyfinClient()
-	auth, err := client.AuthenticateServerUser(context.Background(), server.URL, "alice", "password")
+	auth, err := client.AuthenticateServerUser(trustLoopback(context.Background()), server.URL, "alice", "password")
 	if err != nil {
 		t.Fatalf("AuthenticateServerUser returned error: %v", err)
 	}
 	if auth.UserID != "user-1" || auth.AccessToken != "user-token" {
 		t.Fatalf("auth = %+v, want user-1 with user-token", auth)
+	}
+}
+
+// A rejected password must reach the caller as Jellyfin's 401 after exactly
+// one sign-in attempt: Jellyfin 12 answers the old "/emby" prefix with 404,
+// and older servers count a retried password as a second failed login.
+func TestJellyfinAuthenticateServerUser_RejectedPasswordIsNotRetried(t *testing.T) {
+	t.Parallel()
+
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path != "/Users/AuthenticateByName" {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "Error processing request.", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	_, err := NewJellyfinClient().AuthenticateServerUser(trustLoopback(context.Background()), server.URL+"/", "alice", "wrong")
+	if got := UpstreamHTTPStatus(err); got != http.StatusUnauthorized {
+		t.Fatalf("UpstreamHTTPStatus = %d (err %v), want 401", got, err)
+	}
+	if len(paths) != 1 || paths[0] != "/Users/AuthenticateByName" {
+		t.Fatalf("requested paths = %v, want one /Users/AuthenticateByName", paths)
 	}
 }
 
@@ -61,7 +87,7 @@ func TestJellyfinListUsers_UsesStandardAuthorizationHeader(t *testing.T) {
 	defer server.Close()
 
 	client := NewJellyfinClient()
-	users, err := client.ListUsers(context.Background(), server.URL, "admin-token")
+	users, err := client.ListUsers(trustLoopback(context.Background()), server.URL, "admin-token")
 	if err != nil {
 		t.Fatalf("ListUsers returned error: %v", err)
 	}
@@ -84,8 +110,13 @@ func TestJellyfinFetchResumableItems_IncludesExpectedQueryAndPaginates(t *testin
 		if got := r.URL.Query().Get("UserId"); got != "user-1" {
 			t.Fatalf("UserId = %q, want user-1", got)
 		}
-		if got := r.URL.Query().Get("IncludeItemTypes"); got != "Movie,Episode" {
-			t.Fatalf("IncludeItemTypes = %q, want Movie,Episode", got)
+		// IncludeItemTypes makes this query take over a minute on large
+		// Jellyfin 12.1 libraries; MediaTypes=Video is what Jellyfin Web sends.
+		if got := r.URL.Query().Get("MediaTypes"); got != "Video" {
+			t.Errorf("MediaTypes = %q, want Video", got)
+		}
+		if r.URL.Query().Has("IncludeItemTypes") {
+			t.Errorf("IncludeItemTypes = %q, want it omitted", r.URL.Query().Get("IncludeItemTypes"))
 		}
 		if got := r.URL.Query().Get("Fields"); got == "" {
 			t.Fatal("expected Fields query param")
@@ -95,12 +126,18 @@ func TestJellyfinFetchResumableItems_IncludesExpectedQueryAndPaginates(t *testin
 		}
 
 		startIndex := r.URL.Query().Get("StartIndex")
-		response := jellyfinItemsResponse{TotalRecordCount: jellyfinPageSize + 1}
+		response := jellyfinItemsResponse{TotalRecordCount: jellyfinPageSize + 2}
 		switch startIndex {
 		case "0":
+			// A full page that includes a type the import drops must still
+			// lead to the next page.
 			response.Items = make([]jellyfinItem, jellyfinPageSize)
+			for i := range response.Items {
+				response.Items[i] = jellyfinItem{ID: "episode-" + strconv.Itoa(i), Type: "Episode"}
+			}
+			response.Items[0] = jellyfinItem{ID: "music-video", Type: "MusicVideo"}
 		case strconv.Itoa(jellyfinPageSize):
-			response.Items = []jellyfinItem{{ID: "resume-last", Type: "Movie"}}
+			response.Items = []jellyfinItem{{ID: "resume-last", Type: "Movie"}, {ID: "home-video", Type: "Video"}}
 		default:
 			t.Fatalf("unexpected StartIndex %q", startIndex)
 		}
@@ -112,18 +149,27 @@ func TestJellyfinFetchResumableItems_IncludesExpectedQueryAndPaginates(t *testin
 	}))
 	defer server.Close()
 
-	client := NewJellyfinClient()
+	client := newUnthrottledJellyfinClient()
 	auth := jellyfinLocalAuth{BaseURL: server.URL, UserID: "user-1", AccessToken: "token-1"}
 
-	items, err := client.FetchResumableItems(context.Background(), auth)
+	items, err := client.FetchResumableItems(trustLoopback(context.Background()), auth)
 	if err != nil {
 		t.Fatalf("FetchResumableItems returned error: %v", err)
 	}
 	if requests != 2 {
 		t.Fatalf("requests = %d, want 2", requests)
 	}
-	if len(items) != jellyfinPageSize+1 {
-		t.Fatalf("len(items) = %d, want %d", len(items), jellyfinPageSize+1)
+	// The page-one music video and the page-two home video are dropped.
+	if len(items) != jellyfinPageSize {
+		t.Fatalf("len(items) = %d, want %d", len(items), jellyfinPageSize)
+	}
+	for _, item := range items {
+		if item.Type != "Episode" && item.Type != "Movie" {
+			t.Fatalf("item %q has type %q, want only movies and episodes", item.ID, item.Type)
+		}
+	}
+	if last := items[len(items)-1]; last.ID != "resume-last" {
+		t.Fatalf("last item = %q, want resume-last from the second page", last.ID)
 	}
 }
 
@@ -135,11 +181,20 @@ func TestJellyfinFetchItems_PaginatesPlayedItems(t *testing.T) {
 		requests++
 		assertJellyfinAuthorization(t, r, "token-1")
 
-		if got := r.URL.Path; got != "/Users/user-1/Items" {
-			t.Fatalf("path = %q, want /Users/user-1/Items", got)
+		if got := r.URL.Path; got != "/Items" {
+			t.Errorf("path = %q, want /Items", got)
+		}
+		if got := r.URL.Query().Get("UserId"); got != "user-1" {
+			t.Errorf("UserId = %q, want user-1", got)
 		}
 		if got := r.URL.Query().Get("Filters"); got != "IsPlayed" {
 			t.Fatalf("Filters = %q, want IsPlayed", got)
+		}
+		if got := r.URL.Query().Get("IncludeItemTypes"); got != "Movie,Episode" {
+			t.Errorf("IncludeItemTypes = %q, want Movie,Episode", got)
+		}
+		if got := r.URL.Query().Get("Fields"); got != "ProviderIds" {
+			t.Errorf("Fields = %q, want ProviderIds", got)
 		}
 		if got := r.URL.Query().Get("Recursive"); got != "true" {
 			t.Fatalf("Recursive = %q, want true", got)
@@ -166,10 +221,11 @@ func TestJellyfinFetchItems_PaginatesPlayedItems(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewJellyfinClient()
-	auth := jellyfinLocalAuth{BaseURL: server.URL, UserID: "user-1", AccessToken: "token-1"}
+	client := newUnthrottledJellyfinClient()
+	// A saved source address may end in "/"; Jellyfin 404s on "//Items".
+	auth := jellyfinLocalAuth{BaseURL: server.URL + "/", UserID: "user-1", AccessToken: "token-1"}
 
-	items, err := client.FetchItems(context.Background(), auth, "IsPlayed")
+	items, err := client.FetchItems(trustLoopback(context.Background()), auth, "IsPlayed", jellyfinPlayableItemTypes)
 	if err != nil {
 		t.Fatalf("FetchItems returned error: %v", err)
 	}
@@ -188,4 +244,12 @@ func TestJellyfinHTTPErrorUsesJellyfinBranding(t *testing.T) {
 	if err != "jellyfin http 401" {
 		t.Fatalf("error = %q, want jellyfin branding", err)
 	}
+}
+
+// Local HTTP fixtures exercise decoding and paging without the production rate limit.
+// Keep the guarded transport so address-policy checks still run.
+func newUnthrottledJellyfinClient() *JellyfinClient {
+	client := NewJellyfinClient()
+	client.limiter = nil
+	return client
 }

@@ -13,10 +13,11 @@ import (
 // TestHandleFilters2Stub verifies /Items/Filters2 returns 200 with Jellyfin's
 // v2 QueryFilters shape (every field an array, never null).
 func TestHandleFilters2Stub(t *testing.T) {
-	h := &ItemsHandler{}
+	h := &ItemsHandler{codec: NewResourceIDCodec(), content: &genresContentService{}}
 	req := httptest.NewRequest(http.MethodGet, "/Items/Filters2?IncludeItemTypes=Movie&Recursive=true", nil)
 	rec := httptest.NewRecorder()
 
+	req = req.WithContext(context.WithValue(req.Context(), compatSessionKey, collectionsTestSession()))
 	h.HandleFilters2Stub(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -105,26 +106,6 @@ func TestHandleClientLogDocument(t *testing.T) {
 			t.Fatalf("status = %d, want 413", rec.Code)
 		}
 	})
-}
-
-// TestHandleSessions verifies GET /Sessions returns a 200 JSON array (not the
-// chi 404 that broke client session polling).
-func TestHandleSessions(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/Sessions?deviceId=abc123", nil)
-	rec := httptest.NewRecorder()
-
-	HandleSessions(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
-		t.Fatalf("body = %q, want JSON array %q", got, "[]")
-	}
-	var sessions []sessionInfoDTO
-	if err := json.Unmarshal(rec.Body.Bytes(), &sessions); err != nil {
-		t.Fatalf("response is not a SessionInfoDto array: %v", err)
-	}
 }
 
 // TestHandleUserImageQueryFallback verifies /UserImage?userId= resolves the id

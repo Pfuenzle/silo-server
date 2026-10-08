@@ -1,8 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ItemDetail } from "@/api/types";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   api: vi.fn(),
+  v2: vi.fn(),
   cancelItemDetailQueries: vi.fn(),
   invalidateMediaSurfaceQueries: vi.fn(),
   scheduleMediaSurfaceInvalidation: vi.fn(),
@@ -26,9 +26,15 @@ vi.mock("@tanstack/react-query", async () => {
   };
 });
 
-vi.mock("@/api/client", () => ({
+vi.mock("@/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/api/client")>()),
   api: mocks.api,
 }));
+
+vi.mock("@/api/v2/request", async () => {
+  const actual = await vi.importActual<typeof import("@/api/v2/request")>("@/api/v2/request");
+  return { ...actual, v2: (...args: unknown[]) => mocks.v2(...args) };
+});
 
 vi.mock("@/components/realtimeEventsContext", () => ({
   useRealtimeEvents: () => ({ awaitAdminJob: vi.fn() }),
@@ -69,7 +75,7 @@ vi.mock("sonner", () => ({
 
 import {
   fetchWatchDetail,
-  redetectEpisodeIntro,
+  redetectItemMarkers,
   useRefreshItemMetadata,
   useWatchedStateMutation,
 } from "./items";
@@ -103,10 +109,20 @@ type RefreshMetadataMutationOptions = {
   ) => void;
 };
 
+afterEach(() => vi.unstubAllGlobals());
+
 describe("item query helpers", () => {
   beforeEach(() => {
     mocks.api.mockReset();
     mocks.api.mockResolvedValue({});
+    mocks.v2.mockReset();
+    mocks.v2.mockResolvedValue({
+      content_id: "ebook 1/isbn:978",
+      type: "ebook",
+      title: "Book",
+      versions: [],
+      subtitles: [],
+    });
     mocks.cancelItemDetailQueries.mockReset();
     mocks.cancelItemDetailQueries.mockResolvedValue(undefined);
     mocks.invalidateMediaSurfaceQueries.mockReset();
@@ -126,21 +142,41 @@ describe("item query helpers", () => {
     mocks.useQueryClient.mockReturnValue({});
   });
 
-  it("encodes item IDs in watch detail endpoints", async () => {
-    await fetchWatchDetail("ebook 1/isbn:978", 42, 12);
+  it("reads watch detail through the v2 operation with file and library ids", async () => {
+    const detail = await fetchWatchDetail("ebook 1/isbn:978", 42, 12);
 
-    expect(mocks.api).toHaveBeenCalledWith(
-      "/watch/ebook%201%2Fisbn%3A978?fileId=42&library_id=12",
-      undefined,
-    );
+    expect(mocks.v2).toHaveBeenCalledWith("GET /api/v2/watch/{id}", {
+      path: { id: "ebook 1/isbn:978" },
+      query: { file_id: "42", library_id: "12" },
+      signal: undefined,
+    });
+    expect(detail.content_id).toBe("ebook 1/isbn:978");
+    expect(detail.intro).toBeNull();
   });
 
-  it("encodes item IDs in admin item endpoints", async () => {
-    await redetectEpisodeIntro("episode 1/id:abc");
+  it("encodes item IDs in v2 admin item endpoints", async () => {
+    const { v2 } = await vi.importActual<typeof import("@/api/v2/request")>("@/api/v2/request");
+    mocks.v2.mockImplementationOnce(v2);
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ status: "started" }), {
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    await redetectItemMarkers("episode 1/id:abc", "credits");
 
-    expect(mocks.api).toHaveBeenCalledWith("/admin/items/episode%201%2Fid%3Aabc/redetect-intro", {
-      method: "POST",
+    expect(mocks.v2).toHaveBeenCalledWith("POST /api/v2/admin/items/{id}/redetect-markers", {
+      path: { id: "episode 1/id:abc" },
+      body: { kind: "credits" },
+      retryAuthentication: false,
     });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "/api/v2/admin/items/episode%201%2Fid%3Aabc/redetect-markers",
+    );
+    expect(fetch.mock.calls[0]?.[1]?.method).toBe("POST");
+    expect(fetch.mock.calls[0]?.[1]?.body).toBe(JSON.stringify({ kind: "credits" }));
+    expect(mocks.api).not.toHaveBeenCalled();
   });
 
   it("shows one spinning refresh notification and replaces it with success", async () => {
@@ -228,40 +264,37 @@ describe("item query helpers", () => {
     ]?.[0] as WatchedMutationOptions;
 
     await options.mutationFn(true);
-    expect(mocks.api).toHaveBeenCalledWith("/watched/ebook%201%2Fisbn%3A978", {
-      method: "POST",
+    expect(mocks.v2).toHaveBeenCalledWith("POST /api/v2/watched/{id}", {
+      path: { id: "ebook 1/isbn:978" },
       keepalive: true,
     });
 
     await options.mutationFn(false);
-    expect(mocks.api).toHaveBeenCalledWith("/watched/ebook%201%2Fisbn%3A978", {
-      method: "DELETE",
-      keepalive: true,
-    });
-  });
-
-  it("sends watched-state writes with keepalive so they survive tab close", async () => {
-    useWatchedStateMutation({ content_id: "series-1", type: "series" });
-    const options = mocks.useMutation.mock.calls[
-      mocks.useMutation.mock.calls.length - 1
-    ]?.[0] as WatchedMutationOptions;
-
-    // Marking a large series expands to every episode server-side; without
-    // keepalive the request dies with the document and nothing is marked.
-    await options.mutationFn(true);
-    expect(mocks.api).toHaveBeenCalledWith("/watched/series-1", {
-      method: "POST",
+    expect(mocks.v2).toHaveBeenCalledWith("DELETE /api/v2/watched/{id}", {
+      path: { id: "ebook 1/isbn:978" },
       keepalive: true,
     });
   });
 
   it("optimistically flips played state and reverts only that field on failure", async () => {
+    const queryClient = {};
+    mocks.useQueryClient.mockReturnValue(queryClient);
+    let finishCancellation!: () => void;
+    mocks.cancelItemDetailQueries.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        finishCancellation = resolve;
+      }),
+    );
     useWatchedStateMutation({ content_id: "series-1", type: "series" });
     const options = mocks.useMutation.mock.calls[
       mocks.useMutation.mock.calls.length - 1
     ]?.[0] as WatchedMutationOptions;
 
-    await options.onMutate?.(true);
+    const updating = options.onMutate?.(true);
+    expect(mocks.cancelItemDetailQueries).toHaveBeenCalledWith(queryClient, "series-1");
+    expect(mocks.updateCatalogItemDetail).not.toHaveBeenCalled();
+    finishCancellation();
+    await updating;
     expect(mocks.updateCatalogItemDetail).toHaveBeenCalledWith(
       expect.anything(),
       "series-1",
@@ -291,11 +324,11 @@ describe("item query helpers", () => {
     expect(
       revert({
         user_data: { played: true },
-        user_state: { played: true, is_favorite: true, in_watchlist: false },
+        user_state: { played: true, is_favorite: true, in_watchlist: true },
       }),
     ).toMatchObject({
       user_data: { played: false },
-      user_state: { played: false, is_favorite: true, in_watchlist: false },
+      user_state: { played: false, is_favorite: true, in_watchlist: true },
     });
     expect(mocks.toastError).toHaveBeenCalledWith("boom");
   });
@@ -319,48 +352,6 @@ describe("item query helpers", () => {
       itemId: "ebook-1",
       watchedKeys: [],
       skipSimilarItems: true,
-    });
-  });
-
-  it("updates watched state optimistically before refreshing derived surfaces", async () => {
-    const queryClient = { getQueriesData: vi.fn(() => []) };
-    mocks.useQueryClient.mockReturnValue(queryClient);
-
-    useWatchedStateMutation({ content_id: "movie-1", type: "movie" });
-    const options = mocks.useMutation.mock.calls[
-      mocks.useMutation.mock.calls.length - 1
-    ]?.[0] as WatchedMutationOptions;
-
-    await options.onMutate?.(true);
-
-    expect(mocks.cancelItemDetailQueries).toHaveBeenCalledWith(queryClient, "movie-1");
-    expect(mocks.updateCatalogItemDetail).toHaveBeenCalledWith(
-      queryClient,
-      "movie-1",
-      expect.any(Function),
-    );
-    const updater = mocks.updateCatalogItemDetail.mock.calls[0]?.[2] as (
-      detail: ItemDetail,
-    ) => ItemDetail;
-    expect(
-      updater({ user_data: { played: false }, user_state: { played: false } } as ItemDetail),
-    ).toMatchObject({
-      user_data: { played: true },
-      user_state: { played: true },
-    });
-
-    options.onError?.(new Error("failed"), true);
-    const rollback = mocks.updateCatalogItemDetail.mock.calls[1]?.[2] as (
-      detail: ItemDetail,
-    ) => ItemDetail;
-    expect(
-      rollback({
-        user_data: { played: true },
-        user_state: { played: true, is_favorite: true, in_watchlist: true },
-      } as ItemDetail),
-    ).toMatchObject({
-      user_data: { played: false },
-      user_state: { played: false, is_favorite: true, in_watchlist: true },
     });
   });
 });

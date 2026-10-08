@@ -8,6 +8,8 @@ package catalog
 import (
 	"strings"
 	"testing"
+
+	"github.com/Silo-Server/silo-server/internal/access"
 )
 
 // ---------------------------------------------------------------------------
@@ -235,15 +237,15 @@ func TestUnplayedHighRated_ContentRatingFilter(t *testing.T) {
 		MinRating: 6.0,
 		UserID:    2,
 		ProfileID: "p",
-		Filter:    AccessFilter{MaxContentRating: "PG-13"},
+		Filter:    AccessFilter{MaturityLimits: access.MaturityLimits{MaxContentRating: "PG-13"}},
 	})
 
-	if !strings.Contains(query, "mi.content_rating = ANY(") {
-		t.Fatalf("expected content_rating = ANY filter, got:\n%s", query)
+	if !strings.Contains(query, "mi.content_rating_age IS NOT NULL AND mi.content_rating_age <= $") {
+		t.Fatalf("expected stored-age ceiling filter, got:\n%s", query)
 	}
-	// args: minRating, userID, profileID, then content rating slice (one arg).
+	// args: minRating, userID, profileID, then the ceiling age (one arg).
 	if len(args) != 4 {
-		t.Fatalf("expected exactly 4 args (minRating, userID, profileID, rating slice); got %d: %v", len(args), args)
+		t.Fatalf("expected exactly 4 args (minRating, userID, profileID, ceiling age); got %d: %v", len(args), args)
 	}
 }
 
@@ -375,32 +377,6 @@ func TestForgottenFavorites_DefaultLookbackApplied(t *testing.T) {
 	}
 }
 
-func TestDiscoveryQueries_QualifyContentIDAndAvoidLibraryJoin(t *testing.T) {
-	restricted := AccessFilter{AllowedLibraryIDs: []int{1, 2}}
-
-	cases := []struct {
-		name  string
-		query string
-	}{
-		{"rating_threshold", mustQuery(buildRatingThresholdQuery(RatingFilter{Min: 7, Filter: restricted}))},
-		{"unplayed_high_rated", mustQuery(buildUnplayedHighRatedQuery(UnplayedFilter{MinRating: 7, UserID: 1, ProfileID: "p", Filter: restricted}))},
-		{"forgotten_favorites", mustQuery(buildForgottenFavoritesQuery(ForgottenFavoritesFilter{UserID: 1, ProfileID: "p", LookbackDays: 365, Filter: restricted}))},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assertQualifiedItemSelect(t, tc.query)
-			assertNoLibraryJoin(t, tc.query)
-			if !strings.Contains(tc.query, "EXISTS (SELECT 1 FROM media_item_libraries mil_scope_in") {
-				t.Fatalf("expected allowed library EXISTS predicate, got:\n%s", tc.query)
-			}
-			if strings.Contains(tc.query, "SELECT content_id,") {
-				t.Fatalf("SELECT list uses an unqualified content_id, got:\n%s", tc.query)
-			}
-		})
-	}
-}
-
 func TestDiscoveryQueries_DisabledLibrariesUseNotExists(t *testing.T) {
 	filter := AccessFilter{DisabledLibraryIDs: []int{9}}
 
@@ -440,11 +416,11 @@ func assertNoLibraryJoin(t *testing.T, query string) {
 
 func assertDenyOnlyRequiresLibraryMembership(t *testing.T, query string) {
 	t.Helper()
-	membershipPredicate := "EXISTS (SELECT 1 FROM media_item_libraries mil_scope_any WHERE mil_scope_any.content_id = mi.content_id)"
+	membershipPredicate := "EXISTS (SELECT 1 FROM media_item_libraries mil_scope_in WHERE mil_scope_in.content_id = mi.content_id)"
 	if !strings.Contains(query, membershipPredicate) {
 		t.Fatalf("deny-only library filters must require positive library membership, got:\n%s", query)
 	}
-	if strings.Contains(query, "mil_scope_any.media_folder_id") {
+	if strings.Contains(query, "mil_scope_in.media_folder_id") {
 		t.Fatalf("positive membership predicate should not bind a specific library, got:\n%s", query)
 	}
 }

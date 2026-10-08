@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
@@ -18,8 +16,6 @@ type WatchProviderService interface {
 	ListProviders() []watchsync.ProviderSummary
 	StartDeviceAuth(ctx context.Context, userID int, profileID string, providerKey string) (watchsync.DeviceAuthSession, error)
 	PollDeviceAuth(ctx context.Context, userID int, profileID string, providerKey string, sessionID string) (watchsync.Connection, error)
-	StartAuthorizationCodeAuth(ctx context.Context, userID int, profileID string, providerKey string, redirectURI string) (watchsync.AuthorizationCodeSession, error)
-	CompleteAuthorizationCodeAuth(ctx context.Context, providerKey string, state string, code string) (watchsync.Connection, error)
 	ConnectAPIKeyWithConfig(ctx context.Context, userID int, profileID string, providerKey string, apiKey string, connectionConfig watchsync.ConnectionConfigValues) (watchsync.Connection, error)
 	GetConnectionStatus(ctx context.Context, userID int, profileID string, provider string) (watchsync.ConnectionStatus, error)
 	UpdateConnection(ctx context.Context, userID int, profileID string, provider string, update watchsync.ConnectionUpdate) (watchsync.ConnectionStatus, error)
@@ -29,8 +25,7 @@ type WatchProviderService interface {
 }
 
 type WatchProviderHandler struct {
-	service   WatchProviderService
-	publicURL string
+	service WatchProviderService
 }
 
 type watchProviderDeviceAuthResponse struct {
@@ -44,10 +39,6 @@ type watchProviderDeviceAuthResponse struct {
 
 func NewWatchProviderHandler(service WatchProviderService) *WatchProviderHandler {
 	return &WatchProviderHandler{service: service}
-}
-
-func NewWatchProviderHandlerWithPublicURL(service WatchProviderService, publicURL string) *WatchProviderHandler {
-	return &WatchProviderHandler{service: service, publicURL: strings.TrimRight(publicURL, "/")}
 }
 
 func (h *WatchProviderHandler) HandleListProviders(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +77,11 @@ func (h *WatchProviderHandler) HandleUpdateConnection(w http.ResponseWriter, r *
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
 		return
 	}
+	// Rating and dropped-show sync settings exist only on /api/v2; the frozen
+	// v1 contract keeps its original settings.
+	update.ImportRatingsEnabled = nil
+	update.ExportRatingsEnabled = nil
+	update.SyncDroppedEnabled = nil
 	status, err := h.service.UpdateConnection(r.Context(), userID, profileID, provider, update)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "watch_provider_error", err.Error())
@@ -148,61 +144,6 @@ func (h *WatchProviderHandler) HandlePollDeviceAuth(w http.ResponseWriter, r *ht
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
-}
-
-func (h *WatchProviderHandler) HandleStartAuthorizationCodeAuth(w http.ResponseWriter, r *http.Request) {
-	if h == nil || h.service == nil || h.publicURL == "" {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "Watch provider OAuth is not configured")
-		return
-	}
-	userID, profileID, provider, ok := watchProviderRequestScope(w, r)
-	if !ok {
-		return
-	}
-	redirectURI := h.publicURL + "/api/v1/watch-providers/" + url.PathEscape(provider) + "/auth/callback"
-	session, err := h.service.StartAuthorizationCodeAuth(r.Context(), userID, profileID, provider, redirectURI)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "watch_provider_error", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, struct {
-		AuthorizationURL string `json:"authorization_url"`
-	}{AuthorizationURL: session.AuthorizeURL})
-}
-
-func (h *WatchProviderHandler) HandleAuthorizationCodeCallback(w http.ResponseWriter, r *http.Request) {
-	if h == nil || h.service == nil {
-		redirectWatchProviderAuth(w, r, "oauth_unavailable")
-		return
-	}
-	provider, err := decodedURLParam(r, "provider")
-	if err != nil || provider == "" {
-		redirectWatchProviderAuth(w, r, "oauth_failed")
-		return
-	}
-	state := r.URL.Query().Get("state")
-	code := r.URL.Query().Get("code")
-	if state == "" || code == "" {
-		redirectWatchProviderAuth(w, r, "oauth_failed")
-		return
-	}
-	if _, err := h.service.CompleteAuthorizationCodeAuth(r.Context(), provider, state, code); err != nil {
-		redirectWatchProviderAuth(w, r, "oauth_failed")
-		return
-	}
-	redirectWatchProviderAuth(w, r, "")
-}
-
-func redirectWatchProviderAuth(w http.ResponseWriter, r *http.Request, failure string) {
-	values := url.Values{}
-	if failure != "" {
-		values.Set("error", failure)
-	}
-	location := "/settings/watch-providers"
-	if encoded := values.Encode(); encoded != "" {
-		location += "?" + encoded
-	}
-	http.Redirect(w, r, location, http.StatusFound)
 }
 
 func (h *WatchProviderHandler) HandleConnectAPIKey(w http.ResponseWriter, r *http.Request) {

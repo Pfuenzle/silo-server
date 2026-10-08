@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/jackc/pgx/v5"
@@ -22,6 +23,9 @@ type ExternalIDs struct {
 	TvdbID        string
 	SeasonNumber  int
 	EpisodeNumber int
+	// Released is the episode air date or movie release date, when known.
+	// It sets cache freshness and is not part of the lookup identity.
+	Released time.Time `json:"-"`
 }
 
 // HasAnyID reports whether at least one usable external identifier is
@@ -78,26 +82,25 @@ func (r *DBExternalIDResolver) ResolveForFile(ctx context.Context, file *models.
 
 	if episodeID != "" {
 		// TheIntroDB indexes episode markers by show + season/episode, so we
-		// prefer the series-level external IDs and fall back to the episode
-		// row only if the series isn't matched yet. The episode row's
+		// use series-level external IDs only. Episode IDs identify a different
+		// provider object and cannot substitute for an unmatched show. The episode row's
 		// season/episode numbers are authoritative; the media_files copy
 		// can drift during multi-version moves.
-		var epTmdb, epImdb, epTvdb, showTmdb, showImdb, showTvdb string
+		var showTmdb, showImdb, showTvdb string
 		var season, episode int
+		var aired *time.Time
 		err := r.pool.QueryRow(ctx, `
-			SELECT COALESCE(NULLIF(e.tmdb_id, ''), ''),
-			       COALESCE(NULLIF(e.imdb_id, ''), ''),
-			       COALESCE(NULLIF(e.tvdb_id, ''), ''),
-			       COALESCE(e.season_number, 0),
+			SELECT COALESCE(e.season_number, 0),
 			       COALESCE(e.episode_number, 0),
 			       COALESCE(NULLIF(mi.tmdb_id, ''), ''),
 			       COALESCE(NULLIF(mi.imdb_id, ''), ''),
-			       COALESCE(NULLIF(mi.tvdb_id, ''), '')
+			       COALESCE(NULLIF(mi.tvdb_id, ''), ''),
+			       e.air_date
 			FROM episodes e
 			LEFT JOIN media_items mi ON mi.content_id = e.series_id
 			WHERE e.content_id = $1`, episodeID).Scan(
-			&epTmdb, &epImdb, &epTvdb, &season, &episode,
-			&showTmdb, &showImdb, &showTvdb,
+			&season, &episode,
+			&showTmdb, &showImdb, &showTvdb, &aired,
 		)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -105,19 +108,7 @@ func (r *DBExternalIDResolver) ResolveForFile(ctx context.Context, file *models.
 			}
 			return ExternalIDs{}, fmt.Errorf("resolve episode external ids: %w", err)
 		}
-		tmdb := showTmdb
-		if tmdb == "" {
-			tmdb = epTmdb
-		}
-		imdb := showImdb
-		if imdb == "" {
-			imdb = epImdb
-		}
-		tvdb := showTvdb
-		if tvdb == "" {
-			tvdb = epTvdb
-		}
-		if season <= 0 {
+		if season < 0 {
 			season = file.SeasonNumber
 		}
 		if episode <= 0 {
@@ -125,11 +116,12 @@ func (r *DBExternalIDResolver) ResolveForFile(ctx context.Context, file *models.
 		}
 		return ExternalIDs{
 			Kind:          ItemKindEpisode,
-			TmdbID:        tmdb,
-			ImdbID:        imdb,
-			TvdbID:        tvdb,
+			TmdbID:        showTmdb,
+			ImdbID:        showImdb,
+			TvdbID:        showTvdb,
 			SeasonNumber:  season,
 			EpisodeNumber: episode,
+			Released:      dateOrZero(aired),
 		}, nil
 	}
 
@@ -138,12 +130,14 @@ func (r *DBExternalIDResolver) ResolveForFile(ctx context.Context, file *models.
 	}
 
 	var tmdb, imdb, tvdb, itemType string
+	var released *time.Time
 	err := r.pool.QueryRow(ctx, `
 		SELECT COALESCE(NULLIF(tmdb_id, ''), ''),
 		       COALESCE(NULLIF(imdb_id, ''), ''),
 		       COALESCE(NULLIF(tvdb_id, ''), ''),
-		       COALESCE(type, '')
-		FROM media_items WHERE content_id = $1`, contentID).Scan(&tmdb, &imdb, &tvdb, &itemType)
+		       COALESCE(type, ''),
+		       release_date
+		FROM media_items WHERE content_id = $1`, contentID).Scan(&tmdb, &imdb, &tvdb, &itemType, &released)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ExternalIDs{}, nil
@@ -154,9 +148,17 @@ func (r *DBExternalIDResolver) ResolveForFile(ctx context.Context, file *models.
 		return ExternalIDs{}, nil
 	}
 	return ExternalIDs{
-		Kind:   ItemKindMovie,
-		TmdbID: tmdb,
-		ImdbID: imdb,
-		TvdbID: tvdb,
+		Kind:     ItemKindMovie,
+		TmdbID:   tmdb,
+		ImdbID:   imdb,
+		TvdbID:   tvdb,
+		Released: dateOrZero(released),
 	}, nil
+}
+
+func dateOrZero(date *time.Time) time.Time {
+	if date == nil {
+		return time.Time{}
+	}
+	return *date
 }

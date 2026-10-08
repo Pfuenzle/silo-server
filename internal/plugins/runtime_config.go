@@ -13,18 +13,12 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/secret"
 )
 
 var (
-	ErrAuthBindingNotFound                 = errors.New("plugin auth binding not found")
-	ErrAuthBindingTrustedLinkModeInvalid   = errors.New("plugin auth binding trusted link mode is invalid")
-	ErrAuthBindingDefaultLoginNotEnabled   = errors.New("plugin auth binding default login must be enabled")
-	ErrAuthBindingDefaultLoginConflict     = errors.New("plugin auth binding default login already assigned")
-	ErrAuthBindingDefaultLoginRevokePolicy = errors.New("plugin auth binding default login policy requires session revocation")
-	ErrAuthBindingNoActor                  = errors.New("policy audit requires an authenticated actor")
-	ErrTaskBindingNotFound                 = errors.New("plugin task binding not found")
+	ErrAuthBindingNotFound = errors.New("plugin auth binding not found")
+	ErrTaskBindingNotFound = errors.New("plugin task binding not found")
 )
 
 type RuntimeConfig struct {
@@ -36,62 +30,14 @@ type RuntimeConfig struct {
 }
 
 type AuthBinding struct {
-	InstallationID    int
-	CapabilityID      string
-	Enabled           bool
-	DisplayOrder      int
-	AutoProvision     bool
-	DefaultLogin      bool
-	AuthorizationMode AuthBindingAuthorizationMode
-	TrustedLinkMode   AuthBindingTrustedLinkMode
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-}
-
-type AuthBindingTrustedLinkMode string
-
-const (
-	AuthBindingTrustedLinkModeDisabled        AuthBindingTrustedLinkMode = "disabled"
-	AuthBindingTrustedLinkModeTrustedExisting AuthBindingTrustedLinkMode = "trusted_existing"
-)
-
-func (binding AuthBinding) EffectiveTrustedLinkMode() AuthBindingTrustedLinkMode {
-	if binding.TrustedLinkMode == "" {
-		return AuthBindingTrustedLinkModeDisabled
-	}
-	return binding.TrustedLinkMode
-}
-
-func (binding AuthBinding) HasSupportedTrustedLinkMode() bool {
-	switch binding.EffectiveTrustedLinkMode() {
-	case AuthBindingTrustedLinkModeDisabled, AuthBindingTrustedLinkModeTrustedExisting:
-		return true
-	default:
-		return false
-	}
-}
-
-type AuthBindingAuthorizationMode string
-
-const (
-	AuthBindingAuthorizationModeNone             AuthBindingAuthorizationMode = "none"
-	AuthBindingAuthorizationModeExternalGroupsV1 AuthBindingAuthorizationMode = "external_groups_v1"
-)
-
-func (binding AuthBinding) EffectiveAuthorizationMode() AuthBindingAuthorizationMode {
-	if binding.AuthorizationMode == "" {
-		return AuthBindingAuthorizationModeNone
-	}
-	return binding.AuthorizationMode
-}
-
-func (binding AuthBinding) HasSupportedAuthorizationMode() bool {
-	switch binding.EffectiveAuthorizationMode() {
-	case AuthBindingAuthorizationModeNone, AuthBindingAuthorizationModeExternalGroupsV1:
-		return true
-	default:
-		return false
-	}
+	InstallationID int
+	CapabilityID   string
+	Enabled        bool
+	DisplayOrder   int
+	AutoProvision  bool
+	DefaultLogin   bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type TaskBinding struct {
@@ -125,10 +71,6 @@ func NewRuntimeConfigStore(pool *pgxpool.Pool, ciphers ...*secret.Cipher) *Runti
 	return &RuntimeConfigStore{pool: pool, cipher: cipher}
 }
 
-func (s *RuntimeConfigStore) AuthGroupMappings() *AuthGroupMappingStore {
-	return NewAuthGroupMappingStore(s.pool)
-}
-
 func (s *RuntimeConfigStore) PutGlobalConfig(
 	ctx context.Context,
 	installationID int,
@@ -158,7 +100,9 @@ func (s *RuntimeConfigStore) PutGlobalConfig(
 
 // CompareAndSwapGlobalConfig persists value only when the row still matches
 // the version the caller merged. A nil expectedUpdatedAt creates the row only
-// when it does not already exist.
+// when it does not already exist. An admin save also advances the durable
+// runtime generation in the same transaction, so proxy polls recover a
+// missed lifecycle event. Plugin-originated writes use PutGlobalConfig.
 func (s *RuntimeConfigStore) CompareAndSwapGlobalConfig(
 	ctx context.Context,
 	installationID int,
@@ -174,15 +118,31 @@ func (s *RuntimeConfigStore) CompareAndSwapGlobalConfig(
 		return false, fmt.Errorf("marshaling plugin runtime config: %w", err)
 	}
 
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin plugin config update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Lock the parent installation before touching plugin_runtime_configs.
+	// InstallationStore.Update takes this lock first; acquiring it here keeps
+	// the FK key-share lock and generation update in one order and prevents a
+	// concurrent lifecycle update from deadlocking with a config save.
+	var parentID int
+	if err := tx.QueryRow(ctx, `SELECT id FROM plugin_installations WHERE id = $1 FOR NO KEY UPDATE`, installationID).Scan(&parentID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("lock plugin installation for config update: %w", err)
+	}
 	var tag pgconn.CommandTag
 	if expectedUpdatedAt == nil {
-		tag, err = s.pool.Exec(ctx, `
+		tag, err = tx.Exec(ctx, `
 			INSERT INTO plugin_runtime_configs (plugin_installation_id, config_key, config_value)
 			VALUES ($1, $2, $3)
 			ON CONFLICT (plugin_installation_id, config_key) DO NOTHING
 		`, installationID, key, valueJSON)
 	} else {
-		tag, err = s.pool.Exec(ctx, `
+		tag, err = tx.Exec(ctx, `
 			UPDATE plugin_runtime_configs
 			SET config_value = $3, updated_at = NOW()
 			WHERE plugin_installation_id = $1
@@ -193,7 +153,18 @@ func (s *RuntimeConfigStore) CompareAndSwapGlobalConfig(
 	if err != nil {
 		return false, fmt.Errorf("compare-and-swap plugin runtime config: %w", err)
 	}
-	return tag.RowsAffected() > 0, nil
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+	if _, err := tx.Exec(ctx, `UPDATE plugin_installations
+		SET runtime_generation = runtime_generation + 1, updated_at = NOW()
+		WHERE id = $1`, installationID); err != nil {
+		return false, fmt.Errorf("advance plugin runtime generation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit plugin config update: %w", err)
+	}
+	return true, nil
 }
 
 func (s *RuntimeConfigStore) ListGlobalConfigs(ctx context.Context, installationID int) ([]*RuntimeConfig, error) {
@@ -403,122 +374,73 @@ func backfillEncryptedConfigs(
 	return updated, nil
 }
 
-// UpsertAuthBinding persists the given auth binding. actorUserID is the
-// authenticated admin user performing the change; it is recorded in the
-// policy audit trail. Pass a positive user ID — zero or negative returns
-// ErrAuthBindingNoActor before any database mutation.
-func (s *RuntimeConfigStore) UpsertAuthBinding(ctx context.Context, actorUserID int, binding AuthBinding) error {
-	if actorUserID <= 0 {
-		return ErrAuthBindingNoActor
-	}
-	if !binding.HasSupportedTrustedLinkMode() {
-		return ErrAuthBindingTrustedLinkModeInvalid
-	}
-	if binding.DefaultLogin && !binding.Enabled {
-		return ErrAuthBindingDefaultLoginNotEnabled
-	}
-	if binding.DefaultLogin {
-		conflict, err := s.defaultLoginConflict(ctx, binding.InstallationID, binding.CapabilityID)
-		if err != nil {
-			return fmt.Errorf("checking default login conflict: %w", err)
-		}
-		if conflict {
-			return ErrAuthBindingDefaultLoginConflict
-		}
-	}
-	providerKey, err := models.NewPluginSessionProviderKey(binding.InstallationID, binding.CapabilityID)
-	if err != nil {
-		return fmt.Errorf("auth binding provider key: %w", err)
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("beginning auth binding update: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	if err := lockAuthGroupMappingInstallation(ctx, tx, binding.InstallationID); err != nil {
-		return err
-	}
-	var previousEnabled bool
-	var previousMode AuthBindingAuthorizationMode
-	var previousDefaultLogin bool
-	var previousTrustedLinkMode AuthBindingTrustedLinkMode
-	var previousExists bool
-	err = tx.QueryRow(ctx, `SELECT enabled, authorization_mode, default_login, trusted_link_mode FROM plugin_auth_bindings WHERE plugin_installation_id = $1 AND capability_id = $2 FOR UPDATE`, binding.InstallationID, binding.CapabilityID).Scan(&previousEnabled, &previousMode, &previousDefaultLogin, &previousTrustedLinkMode)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("locking plugin auth binding: %w", err)
-	}
-	previousExists = err == nil
-	_, err = tx.Exec(ctx, `
-		INSERT INTO plugin_auth_bindings (
-			plugin_installation_id, capability_id, enabled, display_order, auto_provision, default_login, authorization_mode, trusted_link_mode
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (plugin_installation_id, capability_id) DO UPDATE SET
-			enabled = EXCLUDED.enabled,
-			display_order = EXCLUDED.display_order,
-			auto_provision = EXCLUDED.auto_provision,
-			default_login = EXCLUDED.default_login,
-			authorization_mode = EXCLUDED.authorization_mode,
-			trusted_link_mode = EXCLUDED.trusted_link_mode,
-			updated_at = NOW()
-	`,
-		binding.InstallationID,
-		binding.CapabilityID,
-		binding.Enabled,
-		binding.DisplayOrder,
-		binding.AutoProvision,
-		binding.DefaultLogin,
-		binding.EffectiveAuthorizationMode(),
-		binding.EffectiveTrustedLinkMode(),
-	)
-	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" && binding.DefaultLogin {
-			return ErrAuthBindingDefaultLoginConflict
-		}
-		return fmt.Errorf("upserting plugin auth binding: %w", err)
-	}
-	removingExternalAuthorization := previousMode == AuthBindingAuthorizationModeExternalGroupsV1 && binding.EffectiveAuthorizationMode() != AuthBindingAuthorizationModeExternalGroupsV1
-	policyChanged := previousExists && (removingExternalAuthorization ||
-		(previousEnabled && !binding.Enabled) ||
-		(previousDefaultLogin && !binding.DefaultLogin) ||
-		(previousTrustedLinkMode != binding.EffectiveTrustedLinkMode()))
-	if previousEnabled && (!binding.Enabled || removingExternalAuthorization) {
-		if _, err := tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at = NOW() WHERE provider_key = $1 AND revoked_at IS NULL`, providerKey.String()); err != nil {
-			return fmt.Errorf("revoking auth provider sessions: %w", err)
-		}
-		reason := "provider_disabled"
-		if binding.Enabled {
-			reason = "authorization_mode_removed"
-		}
-		if err := demoteExternalAuthorization(ctx, tx, binding.InstallationID, &binding.CapabilityID, reason); err != nil {
-			return err
-		}
-	} else if policyChanged {
-		if _, err := tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at = NOW() WHERE provider_key = $1 AND revoked_at IS NULL`, providerKey.String()); err != nil {
-			return fmt.Errorf("revoking auth provider sessions on policy change: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO auth_provider_policy_audit (actor_user_id, plugin_installation_id, capability_id, old_trusted_link_mode, new_trusted_link_mode, old_default_login, new_default_login, reason_code, correlation_id) VALUES ($1, $2, $3, $4, $5, $6, $7, 'policy_change', gen_random_uuid())`, actorUserID, binding.InstallationID, binding.CapabilityID, string(previousTrustedLinkMode), string(binding.EffectiveTrustedLinkMode()), previousDefaultLogin, binding.DefaultLogin); err != nil {
-			return fmt.Errorf("recording policy audit: %w", err)
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing auth binding update: %w", err)
-	}
-	return nil
+// ErrAuthProviderAlreadyEnabled refuses enabling an auth binding while
+// another one of the same kind, or of the same installation, is enabled: a
+// server has at most one primary external sign-in provider (OIDC, LDAP) and
+// at most one network identity provider, plus the built-in local accounts.
+// Identities and account rechecks are keyed by installation, so the two must
+// come from different installations.
+var ErrAuthProviderAlreadyEnabled = errors.New("another external sign-in provider is already enabled")
+
+// authBindingsLock serializes auth binding writes so two concurrent enables
+// cannot both pass the one-provider check.
+const authBindingsLock = "silo:plugin_auth_bindings"
+
+// AuthBindingIsNetworkSQL is the SQL test that the auth binding named by the
+// installation and capability expressions declares the "network" auth mode.
+// It reads the capability's stored manifest metadata, so a binding's kind
+// never drifts from what the plugin declares.
+func AuthBindingIsNetworkSQL(installation, capability string) string {
+	return `COALESCE((SELECT c.metadata->'auth_modes' ? 'network' FROM plugin_capabilities c
+		WHERE c.plugin_installation_id = ` + installation + ` AND c.capability_type = 'auth_provider.v1'
+			AND c.capability_id = ` + capability + `), false)`
 }
 
-// defaultLoginConflict returns true when another binding already claims default_login.
-func (s *RuntimeConfigStore) defaultLoginConflict(ctx context.Context, excludeInstallationID int, excludeCapabilityID string) (bool, error) {
-	var count int
-	err := s.pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM plugin_auth_bindings
-		WHERE default_login = true
-		  AND (plugin_installation_id, capability_id) != ($1, $2)
-	`, excludeInstallationID, excludeCapabilityID).Scan(&count)
-	if err != nil {
-		return false, fmt.Errorf("count default login bindings: %w", err)
-	}
-	return count > 0, nil
+// UpsertAuthBinding writes one binding row. Enabling it is refused with
+// ErrAuthProviderAlreadyEnabled while a different binding of the same kind
+// (network identity or not), or of the same installation, is enabled.
+func (s *RuntimeConfigStore) UpsertAuthBinding(ctx context.Context, binding AuthBinding) error {
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, authBindingsLock); err != nil {
+			return fmt.Errorf("locking plugin auth bindings: %w", err)
+		}
+		if binding.Enabled {
+			var other bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (
+				SELECT 1 FROM plugin_auth_bindings b
+				WHERE b.enabled AND NOT (b.plugin_installation_id = $1 AND b.capability_id = $2)
+					AND (b.plugin_installation_id = $1
+						OR `+AuthBindingIsNetworkSQL("b.plugin_installation_id", "b.capability_id")+` =
+							`+AuthBindingIsNetworkSQL("$1::bigint", "$2::text")+`))`,
+				binding.InstallationID, binding.CapabilityID).Scan(&other); err != nil {
+				return fmt.Errorf("checking enabled plugin auth bindings: %w", err)
+			}
+			if other {
+				return ErrAuthProviderAlreadyEnabled
+			}
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO plugin_auth_bindings (
+				plugin_installation_id, capability_id, enabled, display_order, auto_provision, default_login
+			) VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (plugin_installation_id, capability_id) DO UPDATE SET
+				enabled = EXCLUDED.enabled,
+				display_order = EXCLUDED.display_order,
+				auto_provision = EXCLUDED.auto_provision,
+				default_login = EXCLUDED.default_login,
+				updated_at = NOW()
+		`,
+			binding.InstallationID,
+			binding.CapabilityID,
+			binding.Enabled,
+			binding.DisplayOrder,
+			binding.AutoProvision,
+			binding.DefaultLogin,
+		); err != nil {
+			return fmt.Errorf("upserting plugin auth binding: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *RuntimeConfigStore) GetAuthBinding(
@@ -528,7 +450,7 @@ func (s *RuntimeConfigStore) GetAuthBinding(
 ) (*AuthBinding, error) {
 	var binding AuthBinding
 	err := s.pool.QueryRow(ctx, `
-		SELECT plugin_installation_id, capability_id, enabled, display_order, auto_provision, default_login, authorization_mode, trusted_link_mode, created_at, updated_at
+		SELECT plugin_installation_id, capability_id, enabled, display_order, auto_provision, default_login, created_at, updated_at
 		FROM plugin_auth_bindings
 		WHERE plugin_installation_id = $1 AND capability_id = $2
 	`, installationID, capabilityID).Scan(
@@ -538,8 +460,6 @@ func (s *RuntimeConfigStore) GetAuthBinding(
 		&binding.DisplayOrder,
 		&binding.AutoProvision,
 		&binding.DefaultLogin,
-		&binding.AuthorizationMode,
-		&binding.TrustedLinkMode,
 		&binding.CreatedAt,
 		&binding.UpdatedAt,
 	)
@@ -554,7 +474,7 @@ func (s *RuntimeConfigStore) GetAuthBinding(
 
 func (s *RuntimeConfigStore) ListAuthBindings(ctx context.Context) ([]*AuthBinding, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT plugin_installation_id, capability_id, enabled, display_order, auto_provision, default_login, authorization_mode, trusted_link_mode, created_at, updated_at
+		SELECT plugin_installation_id, capability_id, enabled, display_order, auto_provision, default_login, created_at, updated_at
 		FROM plugin_auth_bindings
 		ORDER BY display_order ASC, plugin_installation_id ASC, capability_id ASC
 	`)
@@ -573,8 +493,6 @@ func (s *RuntimeConfigStore) ListAuthBindings(ctx context.Context) ([]*AuthBindi
 			&binding.DisplayOrder,
 			&binding.AutoProvision,
 			&binding.DefaultLogin,
-			&binding.AuthorizationMode,
-			&binding.TrustedLinkMode,
 			&binding.CreatedAt,
 			&binding.UpdatedAt,
 		); err != nil {

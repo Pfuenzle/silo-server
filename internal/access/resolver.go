@@ -10,13 +10,6 @@ import (
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
 
-// settingKeyDisabledLibraryIDs is the legacy account-wide user-settings key
-// that stored a JSON array of library IDs the user had chosen to hide. It is
-// read only as a fallback now: the setting moved to the profile-scoped
-// canonical key ui.disabled_library_ids, and the legacy write endpoint no
-// longer accepts this key.
-const settingKeyDisabledLibraryIDs = "disabled_library_ids"
-
 // UserRepository loads account-level access settings.
 type UserRepository interface {
 	GetByID(ctx context.Context, id int) (*models.User, error)
@@ -27,12 +20,31 @@ type ProfileTokenValidator interface {
 	Validate(tokenStr string) (*ProfileTokenClaims, error)
 }
 
+// UnratedContentPolicy reports the server-wide decision for titles whose
+// rating is empty or explicitly unrated (server setting access.unrated_content).
+// Implemented by *config.UnratedContentPolicy.
+type UnratedContentPolicy interface {
+	AllowUnratedContent(ctx context.Context) bool
+}
+
 // Resolver resolves a viewer request into an effective access scope.
 type Resolver struct {
 	users        UserRepository
 	storeFactory userstore.UserStoreProvider
 	tokens       ProfileTokenValidator
 	groups       GroupPolicyProvider
+	unrated      UnratedContentPolicy
+}
+
+// WithUnratedContentPolicy installs the reader for access.unrated_content and
+// returns the resolver, so wiring can add it without every caller passing one.
+// Without it a resolved scope hides unrated titles from ceilinged profiles,
+// which is the setting's default.
+func (r *Resolver) WithUnratedContentPolicy(policy UnratedContentPolicy) *Resolver {
+	if r != nil {
+		r.unrated = policy
+	}
+	return r
 }
 
 // NewResolver creates a new scope resolver.
@@ -61,13 +73,18 @@ func (r *Resolver) Resolve(ctx context.Context, input ResolveInput) (Scope, erro
 	}
 
 	scope := Scope{
-		UserID:              user.ID,
-		ProfileID:           input.ProfileID,
-		AllowedLibraryIDs:   cloneInts(effective.LibraryIDs),
-		LibrariesRestricted: effective.LibraryIDs != nil,
-		MaxPlaybackQuality:  NormalizePlaybackQuality(effective.MaxPlaybackQuality),
-		PolicyRevision:      user.AccessPolicyRevision,
-		ProfileVerified:     input.ProfileID == "",
+		UserID:                     user.ID,
+		ProfileID:                  input.ProfileID,
+		AllowedLibraryIDs:          cloneInts(effective.LibraryIDs),
+		LibrariesRestricted:        effective.LibraryIDs != nil,
+		MaxPlaybackQuality:         NormalizePlaybackQuality(effective.MaxPlaybackQuality),
+		MaxRemoteStreamBitrateKbps: effective.MaxRemoteStreamBitrateKbps,
+		MaxLocalStreamBitrateKbps:  effective.MaxLocalStreamBitrateKbps,
+		PolicyRevision:             user.AccessPolicyRevision,
+		ProfileVerified:            input.ProfileID == "",
+	}
+	if r.unrated != nil {
+		scope.AllowUnratedContent = r.unrated.AllowUnratedContent(ctx)
 	}
 
 	store, err := r.storeFactory.ForUser(ctx, input.UserID)
@@ -86,22 +103,32 @@ func (r *Resolver) Resolve(ctx context.Context, input ResolveInput) (Scope, erro
 		}
 
 		scope.MaxContentRating = profile.MaxContentRating
+		scope.MaxAdvisoryAge = profile.MaxAdvisoryAge
+		scope.RequireAdvisoryAge = profile.RequireAdvisoryAge && profile.MaxAdvisoryAge > 0
 		scope.MaxPlaybackQuality = MinQuality(scope.MaxPlaybackQuality, NormalizePlaybackQuality(profile.MaxPlaybackQuality))
 		scope.PreferredMetadataLanguage = preferences.PreferredMetadataLanguage
 		scope.MetadataLanguageOverrides = preferences.MetadataLanguageOverrides
+		scope.NextUpMode = preferences.NextUpMode
 		scope.AllowedLibraryIDs, scope.LibrariesRestricted = effectiveLibraries(effective.LibraryIDs, profile)
-		verified, err := VerifyProfileForRequest(profile, input, user.ID, user.AccessPolicyRevision, r.tokens)
+		verified, err := VerifyProfileForRequest(profile, input, user.ID, r.tokens)
 		if err != nil {
 			return Scope{}, err
 		}
 		scope.ProfileVerified = verified
+		scope.PINVerificationSkipped = verified && profile.PINHash != "" && input.SkipPINVerification
 	}
+
+	scope.PreferencesDegraded = preferences.Degraded
 
 	// Apply the profile's disabled library IDs setting.
 	disabled := preferences.DisabledLibraryIDs
-	if len(disabled) > 0 {
+	if len(disabled) > 0 && !input.ContentAccessOnly {
 		if scope.AllowedLibraryIDs != nil {
-			// Restricted user: subtract disabled IDs from the allowed set.
+			// Restricted user: subtract disabled IDs from the allowed set,
+			// remembering which allowed ones the profile hid.
+			if hidden := intersectInts(scope.AllowedLibraryIDs, disabled); len(hidden) > 0 {
+				scope.HiddenLibraryIDs = hidden
+			}
 			scope.AllowedLibraryIDs = subtractInts(scope.AllowedLibraryIDs, disabled)
 		} else {
 			// Unrestricted user: pass disabled IDs through so query layer
@@ -120,7 +147,6 @@ func VerifyProfileForRequest(
 	profile *userstore.Profile,
 	input ResolveInput,
 	userID int,
-	policyRevision int64,
 	tokens ProfileTokenValidator,
 ) (bool, error) {
 	if profile == nil {
@@ -129,33 +155,53 @@ func VerifyProfileForRequest(
 
 	profileVerified := profile.PINHash == "" || input.SkipPINVerification
 	if profile.PINHash != "" && !input.SkipPINVerification {
-		if tokens == nil {
-			return false, ErrProfileUnverified
-		}
-		claims, err := tokens.Validate(input.ProfileToken)
-		if err != nil {
+		if err := CheckProfileToken(tokens, input.ProfileToken, userID, input.SessionID, profile); err != nil {
 			return false, err
-		}
-		if claims.UserID != userID || claims.SessionID != input.SessionID || claims.ProfileID != profile.ID || claims.PolicyRevision != policyRevision {
-			return false, ErrProfileUnverified
 		}
 		profileVerified = true
 	}
 	return profileVerified, nil
 }
 
+// CheckProfileToken reports whether token proves the caller entered profile's
+// current PIN in this login session. The proof is bound to the account, the
+// login session, the profile and the profile's PIN revision: revoking the
+// session, deleting the profile or changing its PIN ends it. Edits to the
+// profile's limits, to other profiles and to the account's access policy do
+// not, because every request re-resolves those limits; the token proves only
+// knowledge of the PIN. A nil validator never verifies.
+func CheckProfileToken(
+	tokens ProfileTokenValidator,
+	token string,
+	userID int,
+	sessionID string,
+	profile *userstore.Profile,
+) error {
+	if tokens == nil || profile == nil {
+		return ErrProfileUnverified
+	}
+	claims, err := tokens.Validate(token)
+	if err != nil {
+		return err
+	}
+	if claims.UserID != userID ||
+		claims.SessionID != sessionID ||
+		claims.ProfileID != profile.ID ||
+		claims.PINRevision != profile.PINRevision {
+		return ErrProfileUnverified
+	}
+	return nil
+}
+
 // DisabledLibraryIDs resolves the libraries the acting profile has hidden from
-// its own browsing: the canonical profile-scoped ui.disabled_library_ids row,
-// else the legacy account-wide disabled_library_ids setting.
+// its own browsing: the canonical profile-scoped ui.disabled_library_ids row.
 //
-// The canonical row is what the web writes since the settings cutover — the
-// legacy endpoint rejects the unregistered key, so an account-key read alone
-// would silently ignore every edit made after the cutover. The legacy fallback
-// stays because the one-time backfill only ran on stores that existed when it
-// shipped: a store restored from a pre-backfill snapshot still carries its
-// hidden libraries only in the account key, and dropping the fallback would
-// unhide them. A stored canonical row always wins, so the fallback can never
-// override a post-cutover edit.
+// The legacy account-wide disabled_library_ids setting is no longer read. The
+// Postgres migration materialize_retired_settings_fallbacks and SQLite schema
+// v26 copied it onto every profile that had no canonical row, so each profile
+// keeps the value the fallback used to supply; a store restored from a
+// pre-cutover snapshot runs both the backfill and that migration before it
+// serves a request.
 func DisabledLibraryIDs(ctx context.Context, store userstore.UserStore, profileID string) []int {
 	return ResolveViewerPreferences(ctx, store, profileID).DisabledLibraryIDs
 }

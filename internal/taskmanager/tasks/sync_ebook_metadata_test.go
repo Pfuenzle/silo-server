@@ -82,9 +82,16 @@ func TestEbookMetadataTaskPropertiesAndScopes(t *testing.T) {
 		t.Fatalf("backfill description does not explain legacy work: %q", backfillTask.Description())
 	}
 	for _, task := range []taskmanager.Task{syncTask, backfillTask} {
-		if task.Category() != taskmanager.TaskCategoryMetadata || task.IsHidden() {
-			t.Fatalf("unexpected task properties for %q", task.Key())
+		if task.Category() != taskmanager.TaskCategoryMetadata {
+			t.Fatalf("unexpected category for %q", task.Key())
 		}
+		scoped, ok := task.(taskmanager.LibraryScopedTask)
+		if !ok || !scoped.ServesLibrary(" Ebooks ") || scoped.ServesLibrary("audiobooks") {
+			t.Fatalf("%q is not scoped to ebook libraries", task.Key())
+		}
+	}
+	if syncTask.IsHidden() || !backfillTask.IsHidden() {
+		t.Fatalf("hidden = sync %v, backfill %v; want sync visible and backfill hidden", syncTask.IsHidden(), backfillTask.IsHidden())
 	}
 	triggers := syncTask.DefaultTriggers()
 	if len(triggers) != 1 || triggers[0].Type != taskmanager.TriggerTypeInterval || triggers[0].IntervalMs != 5*60*1000 {
@@ -221,6 +228,11 @@ func TestEbookMetadataBackfillStopsAtClaimCap(t *testing.T) {
 	if len(enricher.scopes) != 2 {
 		t.Fatalf("Run calls = %d, want 2 at claim cap", len(enricher.scopes))
 	}
+	for i, scope := range enricher.scopes {
+		if scope != ebooks.EnrichmentScopeLegacy || enricher.limits[i] != 4-2*i {
+			t.Fatalf("batch %d: scope=%q limit=%d, want legacy scope and remaining claim allowance %d", i, scope, enricher.limits[i], 4-2*i)
+		}
+	}
 	var result ebooks.EnrichmentRunResult
 	if err := json.Unmarshal(progress.results[len(progress.results)-1], &result); err != nil {
 		t.Fatalf("result JSON error: %v", err)
@@ -235,21 +247,6 @@ func TestEbookMetadataBackfillStopsAtClaimCap(t *testing.T) {
 	message := strings.ToLower(progress.messages[len(progress.messages)-1])
 	if !strings.Contains(message, "claim cap") || !strings.Contains(message, "retry later") {
 		t.Fatalf("claim-cap progress message = %q", message)
-	}
-}
-
-func TestEbookMetadataBackfillPassesRemainingClaimAllowanceToEnricher(t *testing.T) {
-	t.Setenv("SILO_EBOOK_BACKFILL_MAX_CLAIMS", "3")
-	enricher := &fakeEbookMetadataEnricher{results: []ebooks.EnrichmentRunResult{
-		{Claimed: 2, Enriched: 2, Remaining: 8},
-		{Claimed: 1, Enriched: 1, Remaining: 7},
-	}}
-
-	if err := NewBackfillEbookMetadataTask(enricher).Execute(context.Background(), &ebookMetadataProgressReporter{}); err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if got := enricher.limits; len(got) != 2 || got[0] != 3 || got[1] != 1 {
-		t.Fatalf("claim limits = %v, want [3 1]", got)
 	}
 }
 
@@ -413,17 +410,6 @@ func assertNoProgressCircuitBreak(
 	if !strings.Contains(strings.ToLower(message), "no progress") ||
 		!strings.Contains(strings.ToLower(message), "retry later") {
 		t.Fatalf("circuit-break progress message = %q", message)
-	}
-}
-
-func TestEbookMetadataBackfillUsesLegacyScope(t *testing.T) {
-	enricher := &fakeEbookMetadataEnricher{results: []ebooks.EnrichmentRunResult{{Remaining: 0}}}
-	task := NewBackfillEbookMetadataTask(enricher)
-	if err := task.Execute(context.Background(), &ebookMetadataProgressReporter{}); err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if len(enricher.scopes) != 1 || enricher.scopes[0] != ebooks.EnrichmentScopeLegacy {
-		t.Fatalf("backfill scopes = %#v, want legacy", enricher.scopes)
 	}
 }
 

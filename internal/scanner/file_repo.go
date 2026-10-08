@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,7 +22,8 @@ import (
 
 // Sentinel errors for file repository operations.
 var (
-	ErrFileNotFound = errors.New("media file not found")
+	ErrFileNotFound      = errors.New("media file not found")
+	ErrStaleMarkerUpdate = errors.New("marker result superseded by a newer file identity")
 	// ErrStaleCopySafetyScan reports that a multi-PPS verdict was computed from
 	// a generation of the file the row no longer holds — it was rewritten (or
 	// removed) while the scan ran. The verdict is not wrong, it just describes
@@ -32,6 +35,10 @@ var (
 // FileRepository provides CRUD operations for the media_files table.
 type FileRepository struct {
 	pool *pgxpool.Pool
+}
+
+type fileQueryer interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 type RawMatchBacklogMode string
@@ -58,7 +65,7 @@ const fileColumns = `id, content_id, episode_id, extra_id, season_number, episod
 	codec_video, codec_audio, resolution, audio_channels, hdr, container,
 	duration, bitrate, video_tracks, audio_tracks, subtitle_tracks, external_subtitles, chapters,
 	chapter_thumbnail_retry_after, chapter_thumbnail_failure_count, chapter_thumbnail_last_error,
-	intro_start, intro_end, credits_start, credits_end, recap_start, recap_end, preview_start, preview_end, markers_source, markers_confidence,
+	intro_start, intro_end, credits_start, credits_end, recap_start, recap_end, preview_start, preview_end, marker_segments, markers_source, markers_confidence,
 	intro_markers_source, intro_markers_provider, intro_markers_confidence, intro_markers_algorithm, intro_markers_detected_at,
 	credits_markers_source, credits_markers_provider, credits_markers_confidence, credits_markers_algorithm, credits_markers_detected_at,
 	recap_markers_source, recap_markers_provider, recap_markers_confidence, recap_markers_algorithm, recap_markers_detected_at,
@@ -67,7 +74,7 @@ const fileColumns = `id, content_id, episode_id, extra_id, season_number, episod
 	presentation_kind, presentation_group_key, presentation_part_index, presentation_part_total,
 	multi_episode_start, multi_episode_end,
 	multiple_pps, multiple_pps_scan_size, multiple_pps_scan_mtime,
-	probe_source, probe_updated_at, match_attempted_at, missing_since,
+	probe_source, probe_updated_at, probe_failed_at, match_attempted_at, missing_since,
 	first_seen_scan_run_id, created_at, updated_at`
 
 const overlayFileColumns = `content_id, episode_id, media_folder_id, file_path,
@@ -83,7 +90,7 @@ const mfFileColumns = `mf.id, mf.content_id, mf.episode_id, mf.extra_id, mf.seas
 	mf.codec_video, mf.codec_audio, mf.resolution, mf.audio_channels, mf.hdr, mf.container,
 	mf.duration, mf.bitrate, mf.video_tracks, mf.audio_tracks, mf.subtitle_tracks, mf.external_subtitles, mf.chapters,
 	mf.chapter_thumbnail_retry_after, mf.chapter_thumbnail_failure_count, mf.chapter_thumbnail_last_error,
-	mf.intro_start, mf.intro_end, mf.credits_start, mf.credits_end, mf.recap_start, mf.recap_end, mf.preview_start, mf.preview_end, mf.markers_source, mf.markers_confidence,
+	mf.intro_start, mf.intro_end, mf.credits_start, mf.credits_end, mf.recap_start, mf.recap_end, mf.preview_start, mf.preview_end, mf.marker_segments, mf.markers_source, mf.markers_confidence,
 	mf.intro_markers_source, mf.intro_markers_provider, mf.intro_markers_confidence, mf.intro_markers_algorithm, mf.intro_markers_detected_at,
 	mf.credits_markers_source, mf.credits_markers_provider, mf.credits_markers_confidence, mf.credits_markers_algorithm, mf.credits_markers_detected_at,
 	mf.recap_markers_source, mf.recap_markers_provider, mf.recap_markers_confidence, mf.recap_markers_algorithm, mf.recap_markers_detected_at,
@@ -92,7 +99,7 @@ const mfFileColumns = `mf.id, mf.content_id, mf.episode_id, mf.extra_id, mf.seas
 	mf.presentation_kind, mf.presentation_group_key, mf.presentation_part_index, mf.presentation_part_total,
 	mf.multi_episode_start, mf.multi_episode_end,
 	mf.multiple_pps, mf.multiple_pps_scan_size, mf.multiple_pps_scan_mtime,
-	mf.probe_source, mf.probe_updated_at, mf.match_attempted_at, mf.missing_since,
+	mf.probe_source, mf.probe_updated_at, mf.probe_failed_at, mf.match_attempted_at, mf.missing_since,
 	mf.first_seen_scan_run_id, mf.created_at, mf.updated_at`
 
 // scanMediaFile scans a single row into a *models.MediaFile.
@@ -176,6 +183,7 @@ func scanMediaFile(row pgx.Row) (*models.MediaFile, error) {
 		&f.RecapEnd,
 		&f.PreviewStart,
 		&f.PreviewEnd,
+		&f.MarkerSegments,
 		&markersSource,
 		&markersConfidence,
 		&introMarkersSource,
@@ -213,6 +221,7 @@ func scanMediaFile(row pgx.Row) (*models.MediaFile, error) {
 		&f.MultiplePPSScanMtime,
 		&probeSource,
 		&f.ProbeUpdatedAt,
+		&f.ProbeFailedAt,
 		&f.MatchAttemptedAt,
 		&f.MissingSince,
 		&firstSeenScanRunID,
@@ -494,6 +503,7 @@ func scanMediaFiles(rows pgx.Rows) ([]*models.MediaFile, error) {
 			&f.RecapEnd,
 			&f.PreviewStart,
 			&f.PreviewEnd,
+			&f.MarkerSegments,
 			&markersSource,
 			&markersConfidence,
 			&introMarkersSource,
@@ -531,6 +541,7 @@ func scanMediaFiles(rows pgx.Rows) ([]*models.MediaFile, error) {
 			&f.MultiplePPSScanMtime,
 			&probeSource,
 			&f.ProbeUpdatedAt,
+			&f.ProbeFailedAt,
 			&f.MatchAttemptedAt,
 			&f.MissingSince,
 			&firstSeenScanRunID,
@@ -826,6 +837,70 @@ func serializeJSONB(v any) ([]byte, error) {
 // Upsert inserts or updates a media file by file_path (ON CONFLICT DO UPDATE).
 // Returns the resulting row.
 func (r *FileRepository) Upsert(ctx context.Context, mf models.MediaFile) (*models.MediaFile, error) {
+	return r.upsertWithQueryer(ctx, r.pool, mf)
+}
+
+// UpsertTx inserts or updates a media file inside the caller's transaction.
+// Audiobook folder scans use this to commit the item and all of its parts as
+// one unit instead of leaving half-indexed books when one file write fails.
+func (r *FileRepository) UpsertTx(ctx context.Context, tx pgx.Tx, mf models.MediaFile) (*models.MediaFile, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("media file upsert: nil transaction")
+	}
+	return r.upsertWithQueryer(ctx, tx, mf)
+}
+
+// UpsertBatchTx queues media-file upserts on one transaction and sends them as
+// a single PostgreSQL batch. This keeps multipart audiobook reconciliation
+// atomic while reducing one client/server round trip per part.
+func (r *FileRepository) UpsertBatchTx(ctx context.Context, tx pgx.Tx, files []models.MediaFile) error {
+	if tx == nil {
+		return fmt.Errorf("media file batch upsert: nil transaction")
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	batch := &pgx.Batch{}
+	for i := range files {
+		capture := &fileUpsertCapture{}
+		if _, err := r.upsertWithQueryer(ctx, capture, files[i]); err != nil {
+			return err
+		}
+		query := capture.query
+		if idx := strings.Index(query, "RETURNING "); idx >= 0 {
+			query = query[:idx]
+		}
+		batch.Queue(query, capture.args...)
+	}
+	results := tx.SendBatch(ctx, batch)
+	defer results.Close()
+	for range files {
+		if _, err := results.Exec(); err != nil {
+			return fmt.Errorf("media file batch upsert: %w", err)
+		}
+	}
+	return nil
+}
+
+// fileUpsertCapture lets UpsertBatchTx reuse the canonical upsert SQL and
+// argument normalization without duplicating its large column list.
+type fileUpsertCapture struct {
+	query string
+	args  []any
+}
+
+func (c *fileUpsertCapture) QueryRow(_ context.Context, query string, args ...any) pgx.Row {
+	c.query = query
+	c.args = append([]any(nil), args...)
+	return c
+}
+
+func (c *fileUpsertCapture) Scan(...any) error { return nil }
+
+func (r *FileRepository) upsertWithQueryer(ctx context.Context, queryer fileQueryer, mf models.MediaFile) (*models.MediaFile, error) {
+	if queryer == nil {
+		return nil, fmt.Errorf("media file upsert: nil queryer")
+	}
 	subtitleTracksJSON, err := serializeJSONB(mf.SubtitleTracks)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling subtitle_tracks: %w", err)
@@ -882,7 +957,7 @@ func (r *FileRepository) Upsert(ctx context.Context, mf models.MediaFile) (*mode
 		edition_raw, edition_key, edition_confidence, edition_source,
 		presentation_kind, presentation_group_key, presentation_part_index, presentation_part_total,
 		multi_episode_start, multi_episode_end,
-		probe_source, probe_updated_at, missing_since, first_seen_scan_run_id
+		probe_source, probe_updated_at, missing_since, first_seen_scan_run_id, probe_failed_at
 	) VALUES (
 		$1, $2, $3, $4, $5,
 		$6, $7, $8, $9, $10,
@@ -894,7 +969,7 @@ func (r *FileRepository) Upsert(ctx context.Context, mf models.MediaFile) (*mode
 		$39, $40, $41, $42,
 		$43, $44, $45, $46,
 		$47, $48,
-		$49, $50, $51, $52
+		$49, $50, $51, $52, $53
 	)
 	ON CONFLICT (file_path) DO UPDATE SET
 		content_id = CASE
@@ -952,12 +1027,26 @@ func (r *FileRepository) Upsert(ctx context.Context, mf models.MediaFile) (*mode
 		multi_episode_end = EXCLUDED.multi_episode_end,
 		probe_source = EXCLUDED.probe_source,
 		probe_updated_at = EXCLUDED.probe_updated_at,
+		-- A successful probe clears the rejection and a new rejection
+		-- replaces it. A write that carries neither (the probe was skipped,
+		-- timed out, or could not read the file) keeps the stored rejection
+		-- while the bytes it describes are unchanged; changed bytes drop it.
+		-- media_files.* here are the row's values before this update.
+		probe_failed_at = CASE
+			WHEN EXCLUDED.probe_updated_at IS NOT NULL THEN NULL
+			WHEN EXCLUDED.probe_failed_at IS NOT NULL THEN EXCLUDED.probe_failed_at
+			WHEN media_files.file_size IS NOT DISTINCT FROM EXCLUDED.file_size
+				AND date_trunc('microseconds', media_files.file_modified_at)
+					IS NOT DISTINCT FROM date_trunc('microseconds', EXCLUDED.file_modified_at)
+				THEN media_files.probe_failed_at
+			ELSE NULL
+		END,
 		match_suppressed_at = NULL,
 		missing_since = NULL,
 		updated_at = NOW()
 	RETURNING ` + fileColumns
 
-	row := r.pool.QueryRow(ctx, query,
+	row := queryer.QueryRow(ctx, query,
 		contentID,
 		episodeID,
 		extraID,
@@ -1010,7 +1099,11 @@ func (r *FileRepository) Upsert(ctx context.Context, mf models.MediaFile) (*mode
 		mf.ProbeUpdatedAt,
 		mf.MissingSince,
 		nilIfEmpty(scanbatch.RunID(ctx)),
+		mf.ProbeFailedAt,
 	)
+	if _, ok := queryer.(*fileUpsertCapture); ok {
+		return nil, nil
+	}
 
 	return scanMediaFile(row)
 }
@@ -1161,7 +1254,9 @@ func (r *FileRepository) UpdateChapterThumbnailState(
 		}
 	}
 
-	row := r.pool.QueryRow(ctx, `
+	// Commit through the session holding the chapter lock. If that session
+	// dies during extraction, its former owner cannot save after takeover.
+	row := r.chapterStateWriter(ctx, fileID).QueryRow(ctx, `
 		UPDATE media_files
 		SET chapters = $2,
 		    chapter_thumbnail_retry_after = CASE WHEN $3 THEN $4 ELSE chapter_thumbnail_retry_after END,
@@ -1195,7 +1290,7 @@ func (r *FileRepository) SetChapterThumbnailFailure(
 	if lastError != "" {
 		lastErrorPtr = &lastError
 	}
-	tag, err := r.pool.Exec(ctx, `
+	tag, err := r.chapterStateWriter(ctx, fileID).Exec(ctx, `
 		UPDATE media_files
 		SET chapter_thumbnail_retry_after = $2,
 		    chapter_thumbnail_failure_count = $3,
@@ -1212,6 +1307,41 @@ func (r *FileRepository) SetChapterThumbnailFailure(
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrFileNotFound
+	}
+	return nil
+}
+
+// MarkProbeFailed records that ffprobe rejected a file whose row is otherwise
+// left untouched. Only rows with no successful probe are marked, so a probe
+// that succeeded concurrently, or valid metadata from an earlier probe, is never
+// overridden, and a row already marked is not rewritten. The next successful
+// probe clears the mark through Upsert.
+//
+// probedSize and probedMtime describe the bytes ffprobe rejected, and the row
+// is marked only while it still carries them. A scan that replaced the file
+// and wrote the new revision without a probe result before this update landed
+// would otherwise have the old rejection blamed on the replacement. The mtime
+// comparison is normalized to microseconds, as in UpdateMultiplePPS.
+func (r *FileRepository) MarkProbeFailed(ctx context.Context, fileID int, probedSize int64, probedMtime *time.Time) error {
+	var normalizedMtime *time.Time
+	if probedMtime != nil {
+		normalized := models.NormalizeFileModifiedAt(*probedMtime)
+		normalizedMtime = &normalized
+	}
+	if _, err := r.pool.Exec(ctx, `
+		UPDATE media_files
+		SET probe_failed_at = NOW(),
+		    updated_at = NOW()
+		WHERE id = $1
+		  AND probe_updated_at IS NULL
+		  AND probe_failed_at IS NULL
+		  AND file_size = $2
+		  AND date_trunc('microseconds', file_modified_at) IS NOT DISTINCT FROM $3::timestamptz`,
+		fileID,
+		probedSize,
+		normalizedMtime,
+	); err != nil {
+		return fmt.Errorf("recording probe failure: %w", err)
 	}
 	return nil
 }
@@ -1275,6 +1405,7 @@ func (r *FileRepository) UpdateMultiplePPS(ctx context.Context, fileID int, mult
 // Each segment kind (intro, credits, recap, preview) has an independent state
 // that the apply step mutates if the priority check allows the write.
 type segmentState struct {
+	ranges     []models.MarkerSegment
 	start      *float64
 	end        *float64
 	source     *string
@@ -1284,73 +1415,64 @@ type segmentState struct {
 	detectedAt *time.Time
 }
 
-// applySegmentPatch merges the patched start/end into the segment state, then
-// gates the write on the shared priority check. Returns true if the state was
-// mutated. The legacy `markers_source` field is consulted as a fallback when
-// the segment-specific source is nil but the segment already has a range.
-func applySegmentPatch(
-	state *segmentState,
-	legacySharedSource *string,
-	source string,
-	provider *string,
-	confidence *float64,
-	algorithm string,
-	patchStart, patchEnd *float64,
-	duration float64,
-	segmentName string,
-	mutationAt time.Time,
+func applySegmentRanges(
+	state *segmentState, legacySharedSource *string, source string, provider *string,
+	confidence *float64, algorithm string, patchStart, patchEnd *float64,
+	ranges []models.MarkerSegment, duration float64, segmentName string, mutationAt time.Time,
 ) (bool, error) {
-	if patchStart == nil && patchEnd == nil {
-		return false, nil
+	if len(ranges) == 0 {
+		if patchStart == nil && patchEnd == nil {
+			return false, nil
+		}
+		start, end := state.start, state.end
+		if patchStart != nil {
+			start = patchStart
+		}
+		if patchEnd != nil {
+			end = patchEnd
+		}
+		if start == nil || end == nil {
+			return false, nil
+		}
+		ranges = []models.MarkerSegment{{Kind: segmentName, StartSeconds: *start, EndSeconds: *end}}
+	} else {
+		ranges = slices.Clone(ranges)
 	}
-
-	nextStart := state.start
-	nextEnd := state.end
-	if patchStart != nil {
-		nextStart = patchStart
+	for _, segment := range ranges {
+		if !segment.Valid() || segment.Kind != segmentName {
+			return false, fmt.Errorf("invalid %s marker range %.3f-%.3f", segmentName, segment.StartSeconds, segment.EndSeconds)
+		}
+		if duration > 0 && segment.EndSeconds > duration+1 {
+			return false, fmt.Errorf("%s marker end %.3f exceeds duration %.3f", segmentName, segment.EndSeconds, duration)
+		}
 	}
-	if patchEnd != nil {
-		nextEnd = patchEnd
-	}
-	if nextStart == nil || nextEnd == nil {
-		return false, nil
-	}
-	if *nextStart < 0 || *nextEnd <= *nextStart {
-		return false, fmt.Errorf("invalid %s marker range %.3f-%.3f", segmentName, *nextStart, *nextEnd)
-	}
-	if duration > 0 && *nextEnd > duration+1 {
-		return false, fmt.Errorf("%s marker end %.3f exceeds duration %.3f", segmentName, *nextEnd, duration)
-	}
-
+	sort.SliceStable(ranges, func(i, j int) bool { return ranges[i].StartSeconds < ranges[j].StartSeconds })
 	effectiveSource := state.source
 	if effectiveSource == nil && state.start != nil && state.end != nil {
 		effectiveSource = legacySharedSource
 	}
-	if !markers.CanWriteMarker(effectiveSource, state.confidence, source, confidence) {
+	existing := markers.SegmentPayload{Start: state.start, End: state.end, Ranges: state.ranges, Provider: state.provider, Confidence: state.confidence}
+	if effectiveSource != nil {
+		existing.Source = *effectiveSource
+	}
+	if state.algorithm != nil {
+		existing.Algorithm = *state.algorithm
+	}
+	incoming := markers.SegmentPayload{Start: &ranges[0].StartSeconds, End: &ranges[0].EndSeconds, Ranges: ranges,
+		Source: source, Provider: provider, Confidence: confidence, Algorithm: algorithm}
+	if !markers.CanWriteMarkerUpdate(existing, incoming) {
 		return false, nil
 	}
-
-	src := source
-	algo := algorithm
-	nextState := segmentState{
-		start:      nextStart,
-		end:        nextEnd,
-		source:     &src,
-		provider:   provider,
-		confidence: confidence,
-		algorithm:  &algo,
-		detectedAt: &mutationAt,
+	next := segmentState{start: incoming.Start, end: incoming.End, ranges: ranges, source: &source,
+		provider: provider, confidence: confidence, algorithm: &algorithm, detectedAt: &mutationAt}
+	current := *state
+	if len(current.ranges) == 0 && current.start != nil && current.end != nil {
+		current.ranges = []models.MarkerSegment{{Kind: segmentName, StartSeconds: *current.start, EndSeconds: *current.end}}
 	}
-	if segmentEqual(*state, nextState) {
+	if segmentEqual(current, next) {
 		return false, nil
 	}
-	state.start = nextStart
-	state.end = nextEnd
-	state.source = &src
-	state.provider = provider
-	state.confidence = confidence
-	state.algorithm = &algo
-	state.detectedAt = &mutationAt
+	*state = next
 	return true, nil
 }
 
@@ -1383,7 +1505,7 @@ func resolveSegmentProvenance(update MarkerUpdate, override *SegmentProvenance) 
 // detected_at is intentionally ignored so writing the same marker value does
 // not refresh provenance timestamps or create audit noise.
 func segmentEqual(a, b segmentState) bool {
-	return ptrFloatEqual(a.start, b.start) &&
+	return slices.Equal(a.ranges, b.ranges) && ptrFloatEqual(a.start, b.start) &&
 		ptrFloatEqual(a.end, b.end) &&
 		ptrStringEqual(a.source, b.source) &&
 		ptrStringEqual(a.provider, b.provider) &&
@@ -1393,7 +1515,7 @@ func segmentEqual(a, b segmentState) bool {
 
 // UpsertMarkers updates only marker fields while enforcing source priority.
 func (r *FileRepository) UpsertMarkers(ctx context.Context, fileID int, update MarkerUpdate) (bool, error) {
-	if update.MarkersSource == "" {
+	if update.MarkersSource == "" && len(update.RefreshedProviders) == 0 {
 		return false, fmt.Errorf("marker source is required")
 	}
 	return r.UpsertAndClearMarkers(ctx, fileID, update, nil)
@@ -1405,6 +1527,62 @@ func (r *FileRepository) UpsertMarkers(ctx context.Context, fileID int, update M
 // whether a row was updated.
 func (r *FileRepository) ClearMarkers(ctx context.Context, fileID int, segments []string) (bool, error) {
 	return r.upsertAndClearMarkers(ctx, fileID, nil, segments)
+}
+
+// WithdrawScannerMarker clears a file's intro or credits segment while it
+// still holds the scanner result algorithm wrote, and reports whether it
+// cleared it. Local analysis uses it to take back a result its current rules
+// no longer produce. A marker another source or detector has written since
+// stays. expected, when set, guards the file identity like
+// MarkerUpdate.ExpectedFile.
+func (r *FileRepository) WithdrawScannerMarker(ctx context.Context, fileID int, segment, algorithm string, expected *models.MediaFile) (bool, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin marker withdrawal transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	state, err := loadMarkerMutationState(ctx, tx, fileID)
+	if err != nil {
+		return false, err
+	}
+	if expected != nil && models.MarkerFileIdentity(expected) != models.MarkerFileIdentity(&state.file) {
+		return false, ErrStaleMarkerUpdate
+	}
+	flags, err := markerClearFlags([]string{segment})
+	if err != nil {
+		return false, err
+	}
+	var target *segmentState
+	switch {
+	case flags.intro:
+		target = &state.intro
+	case flags.credits:
+		target = &state.credits
+	default:
+		return false, fmt.Errorf("marker segment %q cannot be withdrawn", segment)
+	}
+	// A segment written before per-segment provenance carries only the
+	// file's shared source.
+	source := target.source
+	if source == nil || strings.TrimSpace(*source) == "" {
+		source = state.existingSource
+	}
+	if source == nil || strings.TrimSpace(*source) != models.MarkerSourceScanner ||
+		target.algorithm == nil || *target.algorithm != algorithm || !clearSegmentState(target) {
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit marker withdrawal transaction: %w", err)
+		}
+		return false, nil
+	}
+	wrote, err := writeMarkerMutationState(ctx, tx, fileID, state)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit marker withdrawal transaction: %w", err)
+	}
+	return wrote, nil
 }
 
 // UpsertAndClearMarkers applies manual marker sets and clears in one row-locking
@@ -1530,6 +1708,7 @@ func (f markerSegmentFlags) any() bool {
 }
 
 type markerMutationState struct {
+	file               models.MediaFile
 	duration           float64
 	existingSource     *string
 	existingConfidence *float64
@@ -1541,7 +1720,7 @@ type markerMutationState struct {
 
 func (r *FileRepository) upsertAndClearMarkers(ctx context.Context, fileID int, update *MarkerUpdate, clearSegments []string) (bool, error) {
 	hasUpdate := update != nil && update.HasAnySegment()
-	if hasUpdate && update.MarkersSource == "" {
+	if hasUpdate && update.MarkersSource == "" && len(update.RefreshedProviders) == 0 {
 		return false, fmt.Errorf("marker source is required")
 	}
 	clearFlags, err := markerClearFlags(clearSegments)
@@ -1562,8 +1741,14 @@ func (r *FileRepository) upsertAndClearMarkers(ctx context.Context, fileID int, 
 	if err != nil {
 		return false, err
 	}
+	if update != nil && update.ExpectedFile != nil && models.MarkerFileIdentity(update.ExpectedFile) != models.MarkerFileIdentity(&state.file) {
+		return false, ErrStaleMarkerUpdate
+	}
 	before := state
 	mutationAt := time.Now().UTC()
+	if update != nil && !update.DetectedAt.IsZero() {
+		mutationAt = update.DetectedAt.UTC()
+	}
 	changed := markerSegmentFlags{}
 
 	if hasUpdate {
@@ -1633,6 +1818,7 @@ func markerClearFlags(segments []string) (markerSegmentFlags, error) {
 
 func loadMarkerMutationState(ctx context.Context, tx pgx.Tx, fileID int) (markerMutationState, error) {
 	var state markerMutationState
+	var ranges []models.MarkerSegment
 	if err := tx.QueryRow(ctx,
 		`SELECT COALESCE(duration, 0),
 		        markers_source,
@@ -1664,8 +1850,11 @@ func loadMarkerMutationState(ctx context.Context, tx pgx.Tx, fileID int) (marker
 		        preview_markers_provider,
 		        preview_markers_confidence,
 		        preview_markers_algorithm,
-		        preview_markers_detected_at
-		 FROM media_files WHERE id = $1 FOR UPDATE`,
+		        preview_markers_detected_at,
+                marker_segments, id, COALESCE(file_hash, ''), COALESCE(file_size, 0), file_modified_at,
+                COALESCE(content_id, ''), COALESCE(episode_id, ''), COALESCE(extra_id, ''),
+                COALESCE(season_number, 0), COALESCE(episode_number, 0)
+         FROM media_files WHERE id = $1 FOR UPDATE`,
 		fileID,
 	).Scan(
 		&state.duration,
@@ -1675,37 +1864,72 @@ func loadMarkerMutationState(ctx context.Context, tx pgx.Tx, fileID int) (marker
 		&state.credits.start, &state.credits.end, &state.credits.source, &state.credits.provider, &state.credits.confidence, &state.credits.algorithm, &state.credits.detectedAt,
 		&state.recap.start, &state.recap.end, &state.recap.source, &state.recap.provider, &state.recap.confidence, &state.recap.algorithm, &state.recap.detectedAt,
 		&state.preview.start, &state.preview.end, &state.preview.source, &state.preview.provider, &state.preview.confidence, &state.preview.algorithm, &state.preview.detectedAt,
+		&ranges, &state.file.ID, &state.file.FileHash, &state.file.FileSize, &state.file.FileModifiedAt,
+		&state.file.ContentID, &state.file.EpisodeID, &state.file.ExtraID, &state.file.SeasonNumber, &state.file.EpisodeNumber,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return markerMutationState{}, ErrFileNotFound
 		}
 		return markerMutationState{}, fmt.Errorf("load existing marker source: %w", err)
 	}
+	state.file.Duration = int(state.duration)
+	for _, segment := range models.EffectiveMarkerSegments(&models.MediaFile{
+		MarkerSegments: ranges, IntroStart: state.intro.start, IntroEnd: state.intro.end,
+		CreditsStart: state.credits.start, CreditsEnd: state.credits.end,
+		RecapStart: state.recap.start, RecapEnd: state.recap.end,
+		PreviewStart: state.preview.start, PreviewEnd: state.preview.end,
+	}) {
+		switch segment.Kind {
+		case "intro":
+			state.intro.ranges = append(state.intro.ranges, segment)
+		case "credits":
+			state.credits.ranges = append(state.credits.ranges, segment)
+		case "recap":
+			state.recap.ranges = append(state.recap.ranges, segment)
+		case "preview":
+			state.preview.ranges = append(state.preview.ranges, segment)
+		}
+	}
 	return state, nil
 }
 
 func applyMarkerUpdateToMutationState(update *MarkerUpdate, state *markerMutationState, mutationAt time.Time) (markerSegmentFlags, error) {
 	var applied markerSegmentFlags
-	introSrc, introProv, introConf, introAlgo := resolveSegmentProvenance(*update, update.IntroProvenance)
-	var err error
-	applied.intro, err = applySegmentPatch(&state.intro, state.existingSource, introSrc, introProv, introConf, introAlgo, update.IntroStart, update.IntroEnd, state.duration, "intro", mutationAt)
-	if err != nil {
-		return markerSegmentFlags{}, err
+	ranges := make(map[string][]models.MarkerSegment, 4)
+	for _, segment := range update.Segments {
+		if !segment.Valid() {
+			return applied, fmt.Errorf("invalid marker segment %q", segment.Kind)
+		}
+		ranges[segment.Kind] = append(ranges[segment.Kind], segment)
 	}
-	creditsSrc, creditsProv, creditsConf, creditsAlgo := resolveSegmentProvenance(*update, update.CreditsProvenance)
-	applied.credits, err = applySegmentPatch(&state.credits, state.existingSource, creditsSrc, creditsProv, creditsConf, creditsAlgo, update.CreditsStart, update.CreditsEnd, state.duration, "credits", mutationAt)
-	if err != nil {
-		return markerSegmentFlags{}, err
-	}
-	recapSrc, recapProv, recapConf, recapAlgo := resolveSegmentProvenance(*update, update.RecapProvenance)
-	applied.recap, err = applySegmentPatch(&state.recap, state.existingSource, recapSrc, recapProv, recapConf, recapAlgo, update.RecapStart, update.RecapEnd, state.duration, "recap", mutationAt)
-	if err != nil {
-		return markerSegmentFlags{}, err
-	}
-	previewSrc, previewProv, previewConf, previewAlgo := resolveSegmentProvenance(*update, update.PreviewProvenance)
-	applied.preview, err = applySegmentPatch(&state.preview, state.existingSource, previewSrc, previewProv, previewConf, previewAlgo, update.PreviewStart, update.PreviewEnd, state.duration, "preview", mutationAt)
-	if err != nil {
-		return markerSegmentFlags{}, err
+	for _, patch := range []struct {
+		kind       string
+		state      *segmentState
+		start, end *float64
+		provenance *SegmentProvenance
+		changed    *bool
+	}{
+		{"intro", &state.intro, update.IntroStart, update.IntroEnd, update.IntroProvenance, &applied.intro},
+		{"credits", &state.credits, update.CreditsStart, update.CreditsEnd, update.CreditsProvenance, &applied.credits},
+		{"recap", &state.recap, update.RecapStart, update.RecapEnd, update.RecapProvenance, &applied.recap},
+		{"preview", &state.preview, update.PreviewStart, update.PreviewEnd, update.PreviewProvenance, &applied.preview},
+	} {
+		source, provider, confidence, algorithm := resolveSegmentProvenance(*update, patch.provenance)
+		changed, err := applySegmentRanges(patch.state, state.existingSource, source, provider, confidence, algorithm,
+			patch.start, patch.end, ranges[patch.kind], state.duration, patch.kind, mutationAt)
+		if err != nil {
+			return markerSegmentFlags{}, err
+		}
+		*patch.changed = changed
+		existingSource := patch.state.source
+		if existingSource == nil {
+			existingSource = state.existingSource
+		}
+		if patch.start == nil && patch.end == nil && len(ranges[patch.kind]) == 0 && patch.state.provider != nil &&
+			(existingSource == nil || *existingSource != models.MarkerSourceManual) &&
+			slices.Contains(update.RefreshedProviders, *patch.state.provider) {
+			*patch.changed = clearSegmentState(patch.state)
+		}
 	}
 	return applied, nil
 }
@@ -1756,6 +1980,7 @@ func writeMarkerMutationState(
 			preview_markers_confidence = $29::double precision,
 			preview_markers_algorithm = $30::text,
 			preview_markers_detected_at = $31::timestamptz,
+			marker_segments = $32::jsonb,
 			updated_at = NOW()
 		WHERE id = $1
 	`,
@@ -1769,6 +1994,7 @@ func writeMarkerMutationState(
 		state.credits.source, state.credits.provider, state.credits.confidence, state.credits.algorithm, state.credits.detectedAt,
 		state.recap.source, state.recap.provider, state.recap.confidence, state.recap.algorithm, state.recap.detectedAt,
 		state.preview.source, state.preview.provider, state.preview.confidence, state.preview.algorithm, state.preview.detectedAt,
+		mutationMarkerSegments(state),
 	)
 	if err != nil {
 		return false, fmt.Errorf("updating media markers: %w", err)
@@ -1779,10 +2005,20 @@ func writeMarkerMutationState(
 	return true, nil
 }
 
+func mutationMarkerSegments(state markerMutationState) []models.MarkerSegment {
+	segments := make([]models.MarkerSegment, 0)
+	for _, segment := range []segmentState{state.intro, state.credits, state.recap, state.preview} {
+		segments = append(segments, segment.ranges...)
+	}
+	sort.SliceStable(segments, func(i, j int) bool { return segments[i].StartSeconds < segments[j].StartSeconds })
+	return segments
+}
+
 func clearSegmentState(state *segmentState) bool {
 	if segmentEqual(*state, segmentState{}) {
 		return false
 	}
+	state.ranges = nil
 	state.start = nil
 	state.end = nil
 	state.source = nil
@@ -2017,6 +2253,25 @@ func (r *FileRepository) GetByID(ctx context.Context, id int) (*models.MediaFile
 	return scanMediaFile(r.pool.QueryRow(ctx, query, id))
 }
 
+// PlayableContentID returns the catalog item a media file plays as: its
+// episode, otherwise its content item, otherwise its local extra. It returns
+// ErrFileNotFound when no file has the id, and "" for an unlinked file.
+func (r *FileRepository) PlayableContentID(ctx context.Context, id int) (string, error) {
+	var contentID string
+	err := r.pool.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(episode_id, ''), NULLIF(content_id, ''), NULLIF(extra_id, ''), '')
+		FROM media_files
+		WHERE id = $1
+	`, id).Scan(&contentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrFileNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("querying playable content id for media file %d: %w", id, err)
+	}
+	return contentID, nil
+}
+
 // GetByIDs retrieves media files by primary key.
 func (r *FileRepository) GetByIDs(ctx context.Context, ids []int) ([]*models.MediaFile, error) {
 	if len(ids) == 0 {
@@ -2026,7 +2281,7 @@ func (r *FileRepository) GetByIDs(ctx context.Context, ids []int) ([]*models.Med
 	rows, err := r.pool.Query(ctx, `
 		SELECT `+fileColumns+`
 		FROM media_files
-		WHERE id = ANY($1::int[])
+		WHERE id = ANY($1::bigint[])
 	`, ids)
 	if err != nil {
 		return nil, fmt.Errorf("querying media files by ids: %w", err)
@@ -2780,6 +3035,11 @@ func (r *FileRepository) MarkMissing(ctx context.Context, id int, since time.Tim
 // reappears within the window restores without re-probing or re-matching.
 // A zero grace deletes all missing-marked rows immediately.
 //
+// Rows of an item that still exists without any library membership are kept
+// whatever their age: membership reconciliation runs first and deletes every
+// orphan it may, so such an item is held (catalog WithRemovalGrace) or
+// protected, and its orphan check on a later pass needs these rows to find it.
+//
 // Rows whose file_path lies at or under one of protectedRoots are never
 // deleted, no matter how long they have been missing: an unreachable library
 // root (dead drive, lost mount) is temporarily offline, not removed, so its
@@ -2788,7 +3048,15 @@ func (r *FileRepository) MarkMissing(ctx context.Context, id int, since time.Tim
 // Returns the number of rows deleted.
 func (r *FileRepository) DeleteMissingByFolder(ctx context.Context, folderID int, gracePeriod time.Duration, protectedRoots []string) (int, error) {
 	cutoff := time.Now().UTC().Add(-gracePeriod)
-	query := "DELETE FROM media_files WHERE media_folder_id = $1 AND missing_since IS NOT NULL AND missing_since < $2"
+	query := `DELETE FROM media_files mf
+		WHERE mf.media_folder_id = $1
+		  AND mf.missing_since IS NOT NULL
+		  AND mf.missing_since < $2
+		  AND NOT EXISTS (
+			SELECT 1 FROM media_items mi
+			WHERE mi.content_id = mf.content_id
+			  AND NOT EXISTS (SELECT 1 FROM media_item_libraries mil WHERE mil.content_id = mi.content_id)
+		  )`
 	args := []any{folderID, cutoff}
 	if clauses, clauseArgs := rootCoverageClauses(protectedRoots, len(args)+1); len(clauses) > 0 {
 		query += " AND NOT (" + strings.Join(clauses, " OR ") + ")"
@@ -3031,7 +3299,8 @@ func (r *FileRepository) ListByObservedRootPath(ctx context.Context, folderID in
 }
 
 // GetByContentID returns all media files linked to the given content ID,
-// ordered by resolution (highest first), excluding files that are missing.
+// excluding files that are missing. This preserves the long-standing id order
+// used by the general catalog and playback paths.
 func (r *FileRepository) GetByContentID(ctx context.Context, contentID string) ([]*models.MediaFile, error) {
 	query := `SELECT ` + fileColumns + ` FROM media_files
 		WHERE content_id = $1 AND missing_since IS NULL
@@ -3043,6 +3312,54 @@ func (r *FileRepository) GetByContentID(ctx context.Context, contentID string) (
 	defer rows.Close()
 
 	return scanMediaFiles(rows)
+}
+
+// GetByContentIDPresentation is the audiobook presentation ordering variant.
+// Multipart books use the scanner-assigned part index. Rows that predate the
+// column have no index and SQL cannot apply naturalPathLess to them, so those
+// legacy rows are re-sorted in Go after the query; part10.m4b must follow
+// part2.m4b for them too. Keeping this separate avoids changing ordering
+// assumptions in movie and series playback.
+func (r *FileRepository) GetByContentIDPresentation(ctx context.Context, contentID string) ([]*models.MediaFile, error) {
+	query := `SELECT ` + fileColumns + ` FROM media_files
+		WHERE content_id = $1 AND missing_since IS NULL
+		ORDER BY COALESCE(presentation_part_index, 2147483647), file_path ASC, id ASC`
+	rows, err := r.pool.Query(ctx, query, contentID)
+	if err != nil {
+		return nil, fmt.Errorf("querying presentation files by content_id: %w", err)
+	}
+	defer rows.Close()
+	files, err := scanMediaFiles(rows)
+	if err != nil {
+		return nil, err
+	}
+	sortPresentationFiles(files)
+	return files, nil
+}
+
+// sortPresentationFiles orders multipart rows for one content ID: indexed rows
+// by part index, then legacy rows without one by natural file path. The SQL
+// ordering already places the null-index group last, so this only fixes the
+// intra-group lexical order (part10 before part2) that SQL cannot express.
+func sortPresentationFiles(files []*models.MediaFile) {
+	sort.SliceStable(files, func(i, j int) bool {
+		a, b := files[i], files[j]
+		if a == nil || b == nil {
+			return b == nil && a != nil
+		}
+		aIndexed := a.PresentationPartIndex > 0
+		bIndexed := b.PresentationPartIndex > 0
+		switch {
+		case aIndexed && bIndexed:
+			return a.PresentationPartIndex < b.PresentationPartIndex
+		case aIndexed != bIndexed:
+			return aIndexed
+		}
+		if a.FilePath != b.FilePath {
+			return naturalPathLess(a.FilePath, b.FilePath)
+		}
+		return a.ID < b.ID
+	})
 }
 
 // FirstDurationsByContentIDs returns the probed duration (seconds) of the
@@ -3130,17 +3447,25 @@ func (r *FileRepository) FindParentContentIDForStem(ctx context.Context, folderI
 
 // FindUnambiguousParentContentIDForDir returns the single content id owning
 // the primary files under dir, or "" when the directory holds no matched
-// content or more than one distinct item (ambiguous — caller defers).
-func (r *FileRepository) FindUnambiguousParentContentIDForDir(ctx context.Context, folderID int, dir string) (string, error) {
+// content or more than one distinct item (ambiguous — caller defers). Rows
+// marked missing still count: dropping them could leave a sibling as the sole
+// owner and bind the extra to the wrong item. Rows at excludePaths are
+// ignored: they are extras still carrying a primary link from before they
+// were classified.
+func (r *FileRepository) FindUnambiguousParentContentIDForDir(ctx context.Context, folderID int, dir string, excludePaths []string) (string, error) {
+	if excludePaths == nil {
+		excludePaths = []string{}
+	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT DISTINCT COALESCE(e.series_id, mf.content_id) AS parent_id
 		FROM media_files mf
 		LEFT JOIN episodes e ON e.content_id = mf.episode_id
 		WHERE mf.media_folder_id = $1
 		  AND mf.file_path LIKE $2 ESCAPE '\'
+		  AND mf.file_path <> ALL($3::text[])
 		  AND mf.extra_id IS NULL
 		  AND (mf.content_id IS NOT NULL OR mf.episode_id IS NOT NULL)
-		LIMIT 2`, folderID, pathPrefixLike(dir))
+		LIMIT 2`, folderID, pathPrefixLike(dir), excludePaths)
 	if err != nil {
 		return "", fmt.Errorf("finding parent by dir: %w", err)
 	}
@@ -3327,21 +3652,41 @@ func (r *FileRepository) UpdateContentIDByPathPrefix(ctx context.Context, folder
 }
 
 // UpdateContentIDByObservedRootPath assigns one content item to all present
-// files under the same observed root path in a media folder.
-func (r *FileRepository) UpdateContentIDByObservedRootPath(ctx context.Context, folderID int, observedRootPath, contentID string) (int, error) {
-	tag, err := r.pool.Exec(ctx, `
-		UPDATE media_files
-		SET content_id = $1, updated_at = NOW()
-		WHERE media_folder_id = $2
-		  AND observed_root_path = $3
-		  AND missing_since IS NULL
-		  AND extra_id IS NULL
-		  AND (content_id IS NULL OR content_id <> $1)
-	`, contentID, folderID, observedRootPath)
-	if err != nil {
-		return 0, fmt.Errorf("updating content_id by observed root path: %w", err)
+// files under the same observed root path in a media folder. Files an admin
+// split pinned with a file-scope identity override keep their item. It returns
+// the number of files relinked and the distinct content IDs they were linked
+// to before, so the caller can reconcile memberships those items may have lost.
+func (r *FileRepository) UpdateContentIDByObservedRootPath(ctx context.Context, folderID int, observedRootPath, contentID string) (int, []string, error) {
+	// The self-join reads each row as it was before the update.
+	var updated int
+	var replaced []string
+	if err := r.pool.QueryRow(ctx, `
+		WITH relinked AS (
+			UPDATE media_files mf
+			SET content_id = $1, updated_at = NOW()
+			FROM media_files previous
+			WHERE previous.id = mf.id
+			  AND mf.media_folder_id = $2
+			  AND mf.observed_root_path = $3
+			  AND mf.missing_since IS NULL
+			  AND mf.extra_id IS NULL
+			  AND (mf.content_id IS NULL OR mf.content_id <> $1)
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM media_identity_overrides o
+				WHERE o.media_folder_id = mf.media_folder_id
+				  AND o.scope = 'file'
+				  AND o.file_path = mf.file_path
+			  )
+			RETURNING previous.content_id
+		)
+		SELECT COUNT(*)::int,
+		       COALESCE(array_agg(DISTINCT content_id) FILTER (WHERE content_id IS NOT NULL AND content_id <> ''), ARRAY[]::text[])
+		FROM relinked
+	`, contentID, folderID, observedRootPath).Scan(&updated, &replaced); err != nil {
+		return 0, nil, fmt.Errorf("updating content_id by observed root path: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	return updated, replaced, nil
 }
 
 // ClearContentID removes any matched media item linkage from a file row.
@@ -3742,8 +4087,9 @@ func (r *FileRepository) FirstDurationsByEpisodeIDs(ctx context.Context, episode
 
 // ListMissingChapterThumbnails returns present media files in enabled,
 // opted-in libraries that either have no chapter probe data yet or still have
-// chapters missing thumbnail assets.
-func (r *FileRepository) ListMissingChapterThumbnails(ctx context.Context, limit int) ([]*models.MediaFile, error) {
+// chapters missing thumbnail assets. A thumbnail whose path does not end in
+// currentSuffix was made at another width and counts as missing.
+func (r *FileRepository) ListMissingChapterThumbnails(ctx context.Context, limit int, currentSuffix string) ([]*models.MediaFile, error) {
 	query := `SELECT ` + mfFileColumns + ` FROM media_files mf
 		JOIN media_folders folders ON folders.id = mf.media_folder_id
 		WHERE mf.missing_since IS NULL
@@ -3761,7 +4107,10 @@ func (r *FileRepository) ListMissingChapterThumbnails(ctx context.Context, limit
 				AND EXISTS (
 					SELECT 1
 					FROM jsonb_array_elements(mf.chapters) AS chapter
-					WHERE COALESCE(chapter->>'thumbnail_path', '') = ''
+					WHERE (
+						COALESCE(chapter->>'thumbnail_path', '') = ''
+						OR right(chapter->>'thumbnail_path', length($2)) <> $2
+					  )
 					  AND (
 						COALESCE(chapter->>'thumbnail_retry_after', '') = ''
 						OR (chapter->>'thumbnail_retry_after')::timestamptz <= NOW()
@@ -3771,13 +4120,100 @@ func (r *FileRepository) ListMissingChapterThumbnails(ctx context.Context, limit
 		  )
 		ORDER BY mf.probe_updated_at ASC NULLS FIRST, mf.id ASC
 		LIMIT $1`
-	rows, err := r.pool.Query(ctx, query, limit)
+	rows, err := r.pool.Query(ctx, query, limit, currentSuffix)
 	if err != nil {
 		return nil, fmt.Errorf("querying files missing chapter thumbnails: %w", err)
 	}
 	defer rows.Close()
 
 	return scanMediaFiles(rows)
+}
+
+// chapterHDRFileSQL matches files whose chapter frames need HDR tone
+// mapping, as tonemap.NeedsToneMap decides: flagged HDR or a Dolby Vision
+// video track.
+const chapterHDRFileSQL = `(mf.hdr OR EXISTS (
+	SELECT 1 FROM jsonb_array_elements(
+		CASE WHEN jsonb_typeof(mf.video_tracks) = 'array' THEN mf.video_tracks ELSE '[]'::jsonb END
+	) AS track
+	WHERE btrim(COALESCE(track->>'dolby_vision', '')) <> ''))`
+
+// ListChapterThumbnailsAtOtherWidths pages chapters without the current image
+// width by file ID. A zero retry time means complete; otherwise the final page
+// returns the earliest time any stale image can become retryable. Missing
+// images stay pending until an in-flight first extraction reaches this width.
+// skipHDR leaves out files that need tone mapping, which chapter extraction
+// skips while the HDR policy is disabled.
+func (r *FileRepository) ListChapterThumbnailsAtOtherWidths(ctx context.Context, limit int, currentSuffix string, afterID int, skipHDR bool) ([]*models.MediaFile, time.Time, error) {
+	rows, err := r.pool.Query(ctx, `SELECT `+mfFileColumns+` FROM media_files mf
+		JOIN media_folders folders ON folders.id = mf.media_folder_id
+		WHERE mf.id > $3
+		  AND mf.missing_since IS NULL
+		  AND folders.enabled = true
+		  AND folders.chapter_thumbnails_enabled = true
+		  AND (mf.chapter_thumbnail_retry_after IS NULL OR mf.chapter_thumbnail_retry_after <= NOW())
+		  AND NOT ($4::boolean AND `+chapterHDRFileSQL+`)
+		  AND EXISTS (
+			SELECT 1 FROM jsonb_array_elements(
+				CASE WHEN jsonb_typeof(mf.chapters) = 'array' THEN mf.chapters ELSE '[]'::jsonb END
+			) AS chapter
+			WHERE right(COALESCE(chapter->>'thumbnail_path', ''), length($2)) <> $2
+			  AND (COALESCE(chapter->>'thumbnail_retry_after', '') = ''
+			       OR (chapter->>'thumbnail_retry_after')::timestamptz <= NOW())
+		  )
+		ORDER BY mf.id
+		LIMIT $1`, limit, currentSuffix, afterID, skipHDR)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("querying chapter thumbnails at other widths: %w", err)
+	}
+	files, err := scanMediaFiles(rows)
+	rows.Close()
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	if len(files) > 0 {
+		// The page already proves work is eligible now. Do not expand the
+		// catalog again to compute cooldowns while these requests are pending.
+		return files, time.Now(), nil
+	}
+	// File and chapter cooldowns both apply, so each stale image becomes
+	// eligible at their later deadline. The earliest such deadline schedules
+	// the next scan without repeatedly expanding JSON during the cooldown.
+	var nextRetry *time.Time
+	err = r.pool.QueryRow(ctx, `SELECT min(GREATEST(
+		COALESCE(mf.chapter_thumbnail_retry_after, NOW()),
+		COALESCE(NULLIF(chapter->>'thumbnail_retry_after', '')::timestamptz, NOW())
+	))
+		FROM media_files mf
+		JOIN media_folders folders ON folders.id = mf.media_folder_id
+		CROSS JOIN LATERAL jsonb_array_elements(
+			CASE WHEN jsonb_typeof(mf.chapters) = 'array' THEN mf.chapters ELSE '[]'::jsonb END
+		) AS chapter
+		WHERE mf.missing_since IS NULL
+		  AND folders.enabled = true
+		  AND folders.chapter_thumbnails_enabled = true
+		  AND NOT ($2::boolean AND `+chapterHDRFileSQL+`)
+		  AND right(COALESCE(chapter->>'thumbnail_path', ''), length($1)) <> $1`, currentSuffix, skipHDR).Scan(&nextRetry)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("checking remaining chapter thumbnail widths: %w", err)
+	}
+	if nextRetry == nil {
+		return files, time.Time{}, nil
+	}
+	return files, *nextRetry, nil
+}
+
+// ChapterThumbnailLibraryKey fingerprints only the eligible library IDs. Once
+// a width backfill completes, polling this small table avoids expanding every
+// media file's chapter JSON while still noticing library enable and opt-in edits.
+func (r *FileRepository) ChapterThumbnailLibraryKey(ctx context.Context) (string, error) {
+	var key string
+	err := r.pool.QueryRow(ctx, `SELECT md5(COALESCE(string_agg(id::text, ',' ORDER BY id), ''))
+		FROM media_folders WHERE enabled AND chapter_thumbnails_enabled`).Scan(&key)
+	if err != nil {
+		return "", fmt.Errorf("checking chapter thumbnail library eligibility: %w", err)
+	}
+	return key, nil
 }
 
 // nilIfEmpty returns nil if the string is empty, otherwise a pointer to it.

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/subtitles"
 )
 
 // Subtitle source classes in the combined-ordinal space.
@@ -22,10 +23,15 @@ const (
 const (
 	SubtitleExtASSV3 = ".ass"
 	SubtitleExtPGSV3 = ".sup"
+	SubtitleExtSRTV3 = ".srt"
 	SubtitleExtVTTV3 = ".vtt"
 	// DownloadedSubtitleIDParamV3 pins a generated/downloaded sidecar URL to
 	// its stable database row instead of resolving a mutable inventory ordinal.
 	DownloadedSubtitleIDParamV3 = "downloaded_subtitle_id"
+	// SubtitleOriginalParamV3=1 marks a .srt URL that asks for the original
+	// SRT bytes. The frozen v1 route answers a bare .srt with WebVTT, so the
+	// extension alone cannot opt in.
+	SubtitleOriginalParamV3 = "original"
 )
 
 // WebVTT is the format every convert-mode subtitle lands in, so its format
@@ -71,6 +77,10 @@ type SubtitleInventoryItemV3 struct {
 	// FontBundleURL is the attachment bundle needed to render an embedded
 	// ASS/SSA track with its authored typesetting.
 	FontBundleURL string `json:"font_bundle_url,omitempty"`
+	// SyncKey names the track to the subtitle sync operations. Present on
+	// external and downloaded tracks whose timing can be corrected (SRT,
+	// WebVTT, ASS, SSA); stable across sessions and inventory reordering.
+	SyncKey string `json:"sync_key,omitempty"`
 	// downloadedSubtitleID is deliberately not serialized: clients address the
 	// opaque session URL, while the server uses the row ID to make that URL
 	// stable across inventory reordering and seek reanchors.
@@ -109,9 +119,13 @@ func BuildSubtitleInventoryV3(file *models.MediaFile, additional []SubtitleInven
 	}
 	items := make([]SubtitleInventoryItemV3, 0, len(file.ExternalSubtitles)+len(file.SubtitleTracks)+len(additional))
 	for _, sub := range file.ExternalSubtitles {
-		items = append(items, subtitleInventoryItemV3(file.ID, len(items), SubtitleSourceExternalV3, sub.Format,
+		item := subtitleInventoryItemV3(file.ID, len(items), SubtitleSourceExternalV3, sub.Format,
 			sub.Language, firstNonEmptySubtitleLabelV3(sub.Title, sub.EmbeddedTitle, filepath.Base(sub.Path), sub.Language),
-			sub.Forced, sub.Default, sub.HearingImpaired))
+			sub.Forced, sub.Default, sub.HearingImpaired)
+		if subtitles.SupportsRetime(subtitles.SubtitleFormat(sub.Format)) {
+			item.SyncKey = subtitles.ExternalSyncKey(sub.Path)
+		}
+		items = append(items, item)
 	}
 	for _, track := range file.SubtitleTracks {
 		items = append(items, subtitleInventoryItemV3(file.ID, len(items), SubtitleSourceEmbeddedV3, track.Codec,
@@ -127,22 +141,27 @@ func BuildSubtitleInventoryV3(file *models.MediaFile, additional []SubtitleInven
 			entry.Language, firstNonEmptySubtitleLabelV3(entry.Label, entry.Language),
 			entry.Forced, false, entry.HearingImpaired)
 		item.downloadedSubtitleID = entry.DownloadedSubtitleID
+		if source == SubtitleSourceDownloadedV3 && entry.DownloadedSubtitleID > 0 && subtitles.SupportsRetime(subtitles.SubtitleFormat(entry.Codec)) {
+			item.SyncKey = subtitles.StoredSyncKey(entry.DownloadedSubtitleID)
+		}
 		items = append(items, item)
 	}
 	return items
 }
 
 // SubtitleInventoryV3 returns the combined-ordinal inventory with
-// session-scoped stream URLs attached to every sidecar-deliverable track.
+// session-scoped stream URLs attached to every sidecar-deliverable track. It
+// knows no client features, so every URL takes its default representation.
 func SubtitleInventoryV3(sessionID string, file *models.MediaFile, additional []SubtitleInventoryEntryV3) []SubtitleInventoryItemV3 {
-	return ScopeSubtitleInventoryV3(sessionID, file, BuildSubtitleInventoryV3(file, additional))
+	return ScopeSubtitleInventoryV3(sessionID, file, BuildSubtitleInventoryV3(file, additional), nil)
 }
 
 // ScopeSubtitleInventoryV3 attaches session URLs to an already planned
 // inventory without resolving it again against mutable subtitle repositories.
 // This keeps the advertised menu and the planner's selected ordinal on the
-// same snapshot.
-func ScopeSubtitleInventoryV3(sessionID string, file *models.MediaFile, inventory []SubtitleInventoryItemV3) []SubtitleInventoryItemV3 {
+// same snapshot. clientFeatures selects feature-gated representations (see
+// SubtitleSidecarExtV3).
+func ScopeSubtitleInventoryV3(sessionID string, file *models.MediaFile, inventory []SubtitleInventoryItemV3, clientFeatures []string) []SubtitleInventoryItemV3 {
 	// Inventory is required by the v3 wire contract and must always encode as
 	// an array. Copy into a non-nil slice so an empty inventory remains []
 	// instead of becoming JSON null while session URLs are attached.
@@ -155,12 +174,13 @@ func ScopeSubtitleInventoryV3(sessionID string, file *models.MediaFile, inventor
 			continue
 		}
 		previousURL := items[i].URL
-		items[i].URL = SubtitleStreamURLV3(sessionID, items[i].CombinedIndex, items[i].Codec, file.ID)
+		ext := SubtitleSidecarExtV3(items[i].Codec, items[i].Source, clientFeatures)
+		items[i].URL = SubtitleStreamURLV3(sessionID, items[i].CombinedIndex, ext, file.ID)
 		if items[i].Source == SubtitleSourceDownloadedV3 && items[i].downloadedSubtitleID > 0 {
 			items[i].URL = DownloadedSubtitleStreamURLV3(
 				sessionID,
 				items[i].CombinedIndex,
-				items[i].Codec,
+				ext,
 				file.ID,
 				items[i].downloadedSubtitleID,
 			)
@@ -227,18 +247,69 @@ func SubtitleURLExtV3(codec string) string {
 	return SubtitleExtVTTV3
 }
 
+// SubtitleSidecarExtV3 returns the extension a sidecar URL publishes for a
+// track of the given codec and source. It is SubtitleURLExtV3, except that a
+// client which negotiated subrip_sidecar_v1 receives external and downloaded
+// SRT as the original file. Only those two sources hold original SRT bytes;
+// an embedded track would need an extraction path of its own.
+func SubtitleSidecarExtV3(codec, source string, clientFeatures []string) string {
+	if IsSubRip(codec) && source != SubtitleSourceEmbeddedV3 && HasFeatureV3(clientFeatures, FeatureSubripSidecarV3) {
+		return SubtitleExtSRTV3
+	}
+	return SubtitleURLExtV3(codec)
+}
+
+// SubtitleFeaturesForPlanV3 returns clientFeatures with subrip_sidecar_v1 set to
+// match the SRT representation an already published inventory used, or
+// unchanged when the inventory published no external or downloaded SRT URL.
+// Re-scoping a plan with the result reproduces the URLs its client already
+// holds, even when the attempt's features were negotiated by a server that
+// did not know the feature.
+func SubtitleFeaturesForPlanV3(inventory []SubtitleInventoryItemV3, clientFeatures []string) []string {
+	published, original := PublishedSubRipRepresentationV3(inventory)
+	if !published {
+		return clientFeatures
+	}
+	features := WithoutFeatureV3(clientFeatures, FeatureSubripSidecarV3)
+	if original {
+		features = append(features, FeatureSubripSidecarV3)
+	}
+	return features
+}
+
+// PublishedSubRipRepresentationV3 reports how an inventory published its
+// external and downloaded SRT tracks: published is false when it has none with
+// a URL, and original tells .srt?original=1 apart from the WebVTT conversion.
+// This, not the stored subrip_sidecar_v1 token, is what an attempt negotiated:
+// a server that predates the feature stored unknown client features verbatim
+// but still published WebVTT.
+func PublishedSubRipRepresentationV3(inventory []SubtitleInventoryItemV3) (published, original bool) {
+	for _, item := range inventory {
+		if item.URL == "" || item.Source == SubtitleSourceEmbeddedV3 || !IsSubRip(item.Codec) {
+			continue
+		}
+		path, _, _ := strings.Cut(item.URL, "?")
+		return true, strings.HasSuffix(path, SubtitleExtSRTV3)
+	}
+	return false, false
+}
+
 // SubtitleStreamURLV3 builds the session-scoped sidecar URL for a combined
 // ordinal. The ordinal in the path is the combined one, not the container's
 // stream index: the stream handler resolves it back through the same ranges
-// BuildSubtitleInventoryV3 assigns.
-func SubtitleStreamURLV3(sessionID string, combinedIndex int, codec string, fileID int) string {
-	return fmt.Sprintf("/stream/%s/subtitles/%d%s?file_id=%d", sessionID, combinedIndex, SubtitleURLExtV3(codec), fileID)
+// BuildSubtitleInventoryV3 assigns. ext comes from SubtitleSidecarExtV3.
+func SubtitleStreamURLV3(sessionID string, combinedIndex int, ext string, fileID int) string {
+	url := fmt.Sprintf("/stream/%s/subtitles/%d%s?file_id=%d", sessionID, combinedIndex, ext, fileID)
+	if ext == SubtitleExtSRTV3 {
+		url += "&" + SubtitleOriginalParamV3 + "=1"
+	}
+	return url
 }
 
 // DownloadedSubtitleStreamURLV3 binds the public combined ordinal to the
 // stable downloaded-subtitle row selected when the plan was accepted.
-func DownloadedSubtitleStreamURLV3(sessionID string, combinedIndex int, codec string, fileID, downloadedSubtitleID int) string {
-	return SubtitleStreamURLV3(sessionID, combinedIndex, codec, fileID) +
+func DownloadedSubtitleStreamURLV3(sessionID string, combinedIndex int, ext string, fileID, downloadedSubtitleID int) string {
+	return SubtitleStreamURLV3(sessionID, combinedIndex, ext, fileID) +
 		"&" + DownloadedSubtitleIDParamV3 + "=" + strconv.Itoa(downloadedSubtitleID)
 }
 

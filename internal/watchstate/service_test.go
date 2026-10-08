@@ -274,58 +274,6 @@ func TestStableIdentityResolverWithoutItemRepoDoesNotAssumeMovie(t *testing.T) {
 	}
 }
 
-func TestStableIdentityResolverResolvesEpisodeContentID(t *testing.T) {
-	episode := &models.Episode{
-		ContentID:     "episode-1",
-		SeriesID:      "series-1",
-		SeasonNumber:  2,
-		EpisodeNumber: 7,
-	}
-	resolver := NewStableIdentityResolver(
-		testItemRepo{},
-		testEpisodeRepo{byKey: map[string]*models.Episode{"series-1": episode}},
-		testProviderIDRepo{ids: map[string][]*models.MediaItemProviderID{
-			"series-1": {
-				{ContentID: "series-1", ItemType: "series", Provider: "tmdb", ProviderID: "123"},
-			},
-		}},
-	)
-
-	contentID, err := resolver.ResolveEpisodeContentID(context.Background(), map[string]string{"tmdb": "123"}, 2, 7)
-	if err != nil {
-		t.Fatalf("ResolveEpisodeContentID: %v", err)
-	}
-	if contentID != "episode-1" {
-		t.Fatalf("contentID = %q, want episode-1", contentID)
-	}
-}
-
-func TestStableIdentityResolverResolvesSeasonZeroSpecial(t *testing.T) {
-	episode := &models.Episode{
-		ContentID:     "special-1",
-		SeriesID:      "series-1",
-		SeasonNumber:  0,
-		EpisodeNumber: 1,
-	}
-	resolver := NewStableIdentityResolver(
-		testItemRepo{},
-		testEpisodeRepo{byKey: map[string]*models.Episode{"series-1": episode}},
-		testProviderIDRepo{ids: map[string][]*models.MediaItemProviderID{
-			"series-1": {
-				{ContentID: "series-1", ItemType: "series", Provider: "tmdb", ProviderID: "123"},
-			},
-		}},
-	)
-
-	contentID, err := resolver.ResolveEpisodeContentID(context.Background(), map[string]string{"tmdb": "123"}, 0, 1)
-	if err != nil {
-		t.Fatalf("ResolveEpisodeContentID: %v", err)
-	}
-	if contentID != "special-1" {
-		t.Fatalf("contentID = %q, want special-1", contentID)
-	}
-}
-
 func TestManualMarkUnwatchedSuppressesImportedHistoryButReturnsManualHistory(t *testing.T) {
 	store, db := newTestUserStore(t)
 	defer db.Close()
@@ -831,5 +779,36 @@ func TestManualMarkWatchedSeriesIsAtomicOnCancel(t *testing.T) {
 		if progress != nil && progress.Completed {
 			t.Fatalf("%s is completed after a canceled mark; the write must be all-or-nothing", target.MediaItemID)
 		}
+	}
+}
+
+func TestManualMarkWatchedSkipsAlreadyCompletedTargets(t *testing.T) {
+	store, db := newTestUserStore(t)
+	t.Cleanup(func() { _ = db.Close() })
+	createWatchstateProfile(t, store)
+	service := NewService(testStoreProvider{store: store})
+	targets := []LeafWatchTarget{{MediaItemID: "movie-1", DurationSeconds: 7200}, {MediaItemID: "movie-2", DurationSeconds: 5400}}
+
+	first, err := service.RecordManualMarkWatchedWithResult(context.Background(), 1, "profile-1", targets[:1], time.Date(2026, 4, 25, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("first mark: %v", err)
+	}
+	if len(first.Entries) != 1 {
+		t.Fatalf("first mark entries = %+v, want one", first.Entries)
+	}
+	// A series-style retry over both: only the unwatched leaf records.
+	second, err := service.RecordManualMarkWatchedWithResult(context.Background(), 1, "profile-1", targets, time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("second mark: %v", err)
+	}
+	if len(second.Entries) != 1 || second.Entries[0].MediaItemID != "movie-2" {
+		t.Fatalf("second mark entries = %+v, want only movie-2", second.Entries)
+	}
+	history, err := store.ListHistory(context.Background(), "profile-1", 10, 0)
+	if err != nil {
+		t.Fatalf("ListHistory: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("history = %+v, want one row per leaf", history)
 	}
 }

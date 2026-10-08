@@ -3,7 +3,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SidebarPin, SidebarPins } from "@/api/types";
 import { captureProfileRequestContext, isProfileRequestContextCurrent } from "@/api/client";
 import { storage } from "@/utils/storage";
-import { randomUUID } from "@/lib/uuid";
 import { SETTING_KEYS } from "@/lib/settingsContract";
 import {
   effectiveSettingsQueryKey,
@@ -161,22 +160,6 @@ function shortcutDocumentFromSidebarValue(value: unknown): ShortcutDocument {
   return sidebarPinsToShortcuts(parseSidebarPins(parsed));
 }
 
-export function toggleNavigationShortcut(
-  value: unknown,
-  libraryId: number,
-  pin: SidebarPin,
-): ShortcutDocument {
-  const document = shortcutDocumentFromSidebarValue(value);
-  const target = shortcutFromSidebarPin(libraryId, pin);
-  const targetKey = menuItemKey(target);
-  const exists = document.items.some((item) => menuItemKey(item) === targetKey);
-  return {
-    items: exists
-      ? document.items.filter((item) => menuItemKey(item) !== targetKey)
-      : [...document.items, target],
-  };
-}
-
 export function setNavigationShortcutPresence(
   value: unknown,
   target: ShortcutTarget,
@@ -196,38 +179,12 @@ export function setNavigationShortcutPresence(
   return { items };
 }
 
-export function toggleSidebarPins(
-  pins: SidebarPins,
-  libraryId: number,
-  pin: SidebarPin,
-): SidebarPins {
-  const key = String(libraryId);
-  const existing = pins[key] ?? [];
-  const idx = existing.findIndex((p) => p.type === pin.type && p.id === pin.id);
-
-  const nextPins = { ...pins };
-  if (idx >= 0) {
-    const next = existing.filter((_, i) => i !== idx);
-    if (next.length === 0) {
-      delete nextPins[key];
-    } else {
-      nextPins[key] = next;
-    }
-    return nextPins;
-  }
-
-  nextPins[key] = [...existing, pin];
-  return nextPins;
-}
-
 interface SidebarPinsOptimisticMutation {
   previousValue: unknown;
   previousRevision: number | null;
-  optimisticValue: SidebarPins;
   optimisticDocument: ShortcutDocument;
   item: ShortcutTarget;
   present: boolean;
-  mutationId: string;
   revision: number;
 }
 
@@ -253,11 +210,9 @@ export function createSidebarPinsOptimisticMutation({
   return {
     previousValue: currentValue ?? null,
     previousRevision: currentRevision ?? null,
-    optimisticValue: parseSidebarPins(optimisticDocument),
     optimisticDocument,
     item,
     present,
-    mutationId: randomUUID(),
     revision,
   };
 }
@@ -386,7 +341,6 @@ export function useToggleSidebarPin() {
           return setShortcutPresence.mutateAsync({
             item: mutation.item,
             present: mutation.present,
-            mutationId: mutation.mutationId,
             profileAuth,
             invalidateOnSettled: false,
           });

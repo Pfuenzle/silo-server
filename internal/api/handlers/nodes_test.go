@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/cache"
+	"github.com/Silo-Server/silo-server/internal/netaccess"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/go-chi/chi/v5"
 )
@@ -54,7 +55,7 @@ func (s *stubNodeRepository) Update(_ context.Context, _ int, input nodepool.Upd
 
 func (s *stubNodeRepository) Delete(context.Context, int) error { return nil }
 
-func (s *stubNodeRepository) UpdateHealth(context.Context, int, string, bool, int, int, []byte) error {
+func (s *stubNodeRepository) UpdateHealth(context.Context, int, string, bool, int, int, []byte, netaccess.NodeNetworkAccess) error {
 	return nil
 }
 
@@ -245,6 +246,8 @@ func TestHandleUpdateNodeReloadsTheNodeAfterAnOverrideChange(t *testing.T) {
 	after := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL, HWAccelOverride: &nvenc}
 	repo := &stubNodeRepository{updateResult: after, node: before}
 	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
+	invalidated := make(chan string, 4)
+	handler.SetCapabilityInvalidator(func(url string) { invalidated <- url })
 
 	recorder := httptest.NewRecorder()
 	awaitNodeUpdate(t, handler, recorder, `{"hw_accel_override":"nvenc"}`)
@@ -268,6 +271,15 @@ func TestHandleUpdateNodeReloadsTheNodeAfterAnOverrideChange(t *testing.T) {
 	if logged := recorder.Body.String(); strings.Contains(logged, "refused") {
 		t.Fatalf("body mentions a refusal: %s", logged)
 	}
+	select {
+	case url := <-invalidated:
+		if url != node.URL {
+			t.Fatalf("invalidated %q, want %q", url, node.URL)
+		}
+	default:
+		t.Fatal("capability cache was not invalidated after the override change")
+	}
+
 }
 
 // The node reload route answers 204. Treating anything outside 2xx as a refusal
@@ -284,7 +296,9 @@ func TestReloadNodeConfigAcceptsNoContent(t *testing.T) {
 			t.Cleanup(node.Close)
 
 			handler := NewNodeHandler(&stubNodeRepository{}, nil, nil, nil, nil, nil, "secret")
-			handler.reloadNodeConfig(context.Background(), &nodepool.Node{ID: 1, Name: "gpu-1", URL: node.URL})
+			if !handler.reloadNodeConfig(context.Background(), &nodepool.Node{ID: 1, Name: "gpu-1", URL: node.URL}) {
+				t.Fatalf("HTTP %d was not accepted as a confirmed reload", status)
+			}
 
 			select {
 			case <-called:
@@ -292,38 +306,6 @@ func TestReloadNodeConfigAcceptsNoContent(t *testing.T) {
 				t.Fatal("the node was never called")
 			}
 		})
-	}
-}
-
-// This server's cached view of what a node can do — the v3 planning inventory —
-// is keyed by node URL and holds the tone-map executors and transformations the
-// *previous* backend advertised. Changing the policy without dropping it plans
-// the next minute's sessions against filters the worker has already moved off,
-// and the worker then rejects the start.
-func TestHandleUpdateNodeInvalidatesCapabilityCacheAfterAnOverrideChange(t *testing.T) {
-	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	t.Cleanup(node.Close)
-
-	qsv, nvenc := "qsv", "nvenc"
-	before := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL, HWAccelOverride: &qsv}
-	after := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL, HWAccelOverride: &nvenc}
-	repo := &stubNodeRepository{updateResult: after, node: before}
-	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
-
-	invalidated := make(chan string, 4)
-	handler.SetCapabilityInvalidator(func(url string) { invalidated <- url })
-
-	awaitNodeUpdate(t, handler, httptest.NewRecorder(), `{"hw_accel_override":"nvenc"}`)
-
-	select {
-	case url := <-invalidated:
-		if url != node.URL {
-			t.Fatalf("invalidated %q, want the node's URL %q", url, node.URL)
-		}
-	default:
-		t.Fatal("the capability cache was not dropped after the policy changed")
 	}
 }
 
@@ -380,30 +362,6 @@ func TestHandleUpdateNodePublishesPolicyEvenWhenTheNodeDoesNotConfirm(t *testing
 	}
 }
 
-// An edit that moves neither override leaves the cache alone: re-probing every
-// node on every rename would put ffmpeg execs behind an unrelated form save.
-func TestHandleUpdateNodeKeepsCapabilityCacheWithoutAnOverrideChange(t *testing.T) {
-	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	t.Cleanup(node.Close)
-
-	stored := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL}
-	repo := &stubNodeRepository{updateResult: stored, node: stored}
-	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
-
-	invalidated := make(chan string, 4)
-	handler.SetCapabilityInvalidator(func(url string) { invalidated <- url })
-
-	awaitNodeUpdate(t, handler, httptest.NewRecorder(), `{"name":"gpu-one"}`)
-
-	select {
-	case url := <-invalidated:
-		t.Fatalf("a rename dropped the capability cache for %q", url)
-	default:
-	}
-}
-
 // The admin form posts both override fields on every transcode-node save, so
 // their presence says nothing about them moving. Nudging on presence alone made
 // an unrelated edit — a rename, a capacity change, or a plain resubmit — ask the
@@ -428,9 +386,10 @@ func TestHandleUpdateNodeDoesNotReloadWhenOverridesAreUnchanged(t *testing.T) {
 		}
 	}
 	repo := &stubNodeRepository{updateResult: unchanged(), node: unchanged()}
+	repo.node.URL += "/"
 	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
 
-	body := `{"name":"gpu-1","hw_accel_override":"qsv","hw_device_override":"/dev/dri/renderD128"}`
+	body := `{"name":"gpu-1","url":"` + node.URL + `","hw_accel_override":"qsv","hw_device_override":"/dev/dri/renderD128"}`
 	awaitNodeUpdate(t, handler, httptest.NewRecorder(), body)
 
 	select {
@@ -455,6 +414,8 @@ func TestHandleUpdateNodeDoesNotReloadWithoutAnOverrideChange(t *testing.T) {
 	stored := &nodepool.Node{ID: 1, Name: "gpu-1", Type: nodepool.NodeTypeTranscode, URL: node.URL}
 	repo := &stubNodeRepository{updateResult: stored, node: stored}
 	handler := NewNodeHandler(repo, nil, nil, nil, nil, nil, "secret")
+	invalidated := make(chan string, 4)
+	handler.SetCapabilityInvalidator(func(url string) { invalidated <- url })
 
 	awaitNodeUpdate(t, handler, httptest.NewRecorder(), `{"name":"gpu-one"}`)
 
@@ -463,6 +424,12 @@ func TestHandleUpdateNodeDoesNotReloadWithoutAnOverrideChange(t *testing.T) {
 		t.Fatal("a rename asked the node to reload its configuration")
 	default:
 	}
+	select {
+	case url := <-invalidated:
+		t.Fatalf("rename invalidated capability cache for %q", url)
+	default:
+	}
+
 }
 
 // recordingEventBus captures publications so a test can assert the pool change
@@ -567,19 +534,6 @@ func TestHandleUpdateNodeReloadsTheReplacementWhenAURLMoves(t *testing.T) {
 	}
 }
 
-// A trailing slash is not a repoint: the pools normalize URLs and the database
-// column does not, so treating it as one would nudge on every unrelated save.
-func TestNodePolicyTargetChangeIgnoresATrailingSlash(t *testing.T) {
-	qsv := "qsv"
-	before := &nodepool.Node{ID: 1, URL: "http://node/", HWAccelOverride: &qsv}
-	sameAccel := qsv
-	after := &nodepool.Node{ID: 1, URL: "http://node", HWAccelOverride: &sameAccel}
-
-	if nodePolicyTargetChanged(before, after) {
-		t.Fatal("a trailing-slash difference read as repointing the row")
-	}
-}
-
 // A partial PUT that carries only a new url still repoints the row's existing
 // overrides at a different worker. Loading the previous row only when an
 // override field is present left nodePolicyTargetChanged with nothing to compare
@@ -663,8 +617,8 @@ func TestHandleListNodesCarriesTheAdvertisedHashFromThePools(t *testing.T) {
 	proxies := nodepool.NewProxyPool()
 	proxies.SetNodes([]*nodepool.Node{{ID: 2, URL: "http://proxy-1", Enabled: true}})
 	// The sweep learns each node's advertised hash on its health check.
-	transcodes.ApplyHealth(1, "http://gpu-1", true, 0, 0, "sha256:newer", nil, time.Now())
-	proxies.ApplyHealth(2, "http://proxy-1", true, 0, 0, "sha256:proxy", nil, time.Now())
+	transcodes.ApplyHealth(1, "http://gpu-1", true, 0, 0, "sha256:newer", nil, nil, time.Now())
+	proxies.ApplyHealth(2, "http://proxy-1", true, 0, 0, "sha256:proxy", nil, nil, time.Now())
 
 	handler := NewNodeHandler(repo, proxies, transcodes, nil, nil, nil, "secret")
 	recorder := httptest.NewRecorder()
@@ -791,5 +745,17 @@ func TestHandleListNodesDistinguishesUncheckedFromUnreportedHashes(t *testing.T)
 	// Absent: nothing has asked, so the field must not claim the node said so.
 	if _, ok := items[1]["advertised_capabilities_hash"]; ok {
 		t.Errorf("unchecked node carried an advertised hash: %v", items[1])
+	}
+}
+
+func TestReadAdminNodesDoesNotMutateRepositoryRows(t *testing.T) {
+	stored := &nodepool.Node{ID: 1, URL: "http://worker.example.test", Type: nodepool.NodeTypeProxy, Enabled: true}
+	repo := &stubNodeRepository{nodes: []*nodepool.Node{stored}}
+	pool := nodepool.NewProxyPool()
+	pool.SetNodes([]*nodepool.Node{stored})
+	pool.ApplyHealth(1, stored.URL, true, 0, 0, "advertised", nil, nil, time.Now())
+	rows, err := NewNodeHandler(repo, pool, nil, nil, nil, nil, "").ReadAdminNodes(t.Context())
+	if err != nil || len(rows) != 1 || rows[0] == stored || stored.AdvertisedCapabilitiesHash != nil || rows[0].AdvertisedCapabilitiesHash == nil || *rows[0].AdvertisedCapabilitiesHash != "advertised" {
+		t.Fatal(rows, stored, err)
 	}
 }

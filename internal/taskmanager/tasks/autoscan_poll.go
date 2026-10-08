@@ -7,8 +7,11 @@ import (
 	"github.com/Silo-Server/silo-server/internal/taskmanager"
 )
 
+// AutoscanPoller runs autoscan cycles. PollOnce honors per-source intervals;
+// PollNow polls every enabled polling source immediately.
 type AutoscanPoller interface {
 	PollOnce(ctx context.Context) error
+	PollNow(ctx context.Context) error
 }
 
 // defaultAutoscanPollIntervalMs is the fallback poll cadence (10 minutes) used
@@ -40,7 +43,7 @@ func (t *AutoscanPollTask) Description() string {
 func (t *AutoscanPollTask) Category() taskmanager.TaskCategory {
 	return taskmanager.TaskCategoryLibrary
 }
-func (t *AutoscanPollTask) IsHidden() bool { return false }
+func (t *AutoscanPollTask) IsHidden() bool { return true }
 
 func (t *AutoscanPollTask) DefaultTriggers() []taskmanager.TriggerConfig {
 	return []taskmanager.TriggerConfig{
@@ -54,7 +57,13 @@ func (t *AutoscanPollTask) Execute(ctx context.Context, progress taskmanager.Pro
 		progress.Report(100, "Autoscan unavailable")
 		return nil
 	}
-	if err := t.poller.PollOnce(ctx); err != nil {
+	// A manual start (Run now) polls every source immediately; scheduled runs
+	// leave sources polled within their interval alone.
+	poll := t.poller.PollOnce
+	if taskmanager.StartedManually(ctx) {
+		poll = t.poller.PollNow
+	}
+	if err := poll(ctx); err != nil {
 		return fmt.Errorf("autoscan poll: %w", err)
 	}
 	progress.Report(100, "Autoscan poll complete")

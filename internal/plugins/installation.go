@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -32,17 +34,18 @@ const (
 )
 
 type Installation struct {
-	ID               int
-	RepositoryID     *int
-	PluginID         string
-	Version          string
-	InstallPath      string
-	Enabled          bool
-	Kind             string  `json:"kind"`
-	UpdatePolicy     string  `json:"update_policy"`
-	AvailableVersion *string `json:"available_version,omitempty"`
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	ID                int
+	RepositoryID      *int
+	PluginID          string
+	Version           string
+	InstallPath       string
+	Enabled           bool
+	Kind              string  `json:"kind"`
+	UpdatePolicy      string  `json:"update_policy"`
+	AvailableVersion  *string `json:"available_version,omitempty"`
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	RuntimeGeneration int64 `json:"-"`
 }
 
 // IsBuiltin reports whether this is the reserved builtin-host installation.
@@ -85,6 +88,12 @@ type UpdateInstallationInput struct {
 	UpdatePolicy     *string
 	AvailableVersion *string
 	Capabilities     []Capability
+	// Restart durably requests a new process on every resident host.
+	Restart bool
+	// SetRepository records RepositoryID as where the installed package now
+	// comes from. A nil RepositoryID clears it, as for an uploaded package.
+	SetRepository bool
+	RepositoryID  *int
 }
 
 type InstallationStore struct {
@@ -95,7 +104,7 @@ func NewInstallationStore(pool *pgxpool.Pool) *InstallationStore {
 	return &InstallationStore{pool: pool}
 }
 
-const installationColumns = `id, repository_id, plugin_id, version, install_path, enabled, kind, update_policy, available_version, created_at, updated_at`
+const installationColumns = `id, repository_id, plugin_id, version, install_path, enabled, kind, update_policy, available_version, created_at, updated_at, runtime_generation`
 const capabilityColumns = `plugin_installation_id, capability_type, capability_id, metadata, created_at, updated_at`
 const archiveColumns = `plugin_installation_id, manifest_json, checksum, archive_bytes, created_at, updated_at`
 
@@ -114,6 +123,7 @@ func scanInstallation(row pgx.Row) (*Installation, error) {
 		&installation.AvailableVersion,
 		&installation.CreatedAt,
 		&installation.UpdatedAt,
+		&installation.RuntimeGeneration,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrInstallationNotFound
@@ -282,12 +292,6 @@ func (s *InstallationStore) ListByPluginID(ctx context.Context, pluginID string)
 }
 
 func (s *InstallationStore) Update(ctx context.Context, id int, input UpdateInstallationInput) error {
-	if input.Enabled != nil && !*input.Enabled {
-		if err := s.Disable(ctx, id); err != nil {
-			return err
-		}
-		input.Enabled = nil
-	}
 	// Guard at the store, not only the HTTP handler: the reserved builtin row
 	// carries no archive/binary and must never have its version, path, enabled
 	// flag, or capabilities rewritten, or its chain participation breaks.
@@ -334,6 +338,14 @@ func (s *InstallationStore) Update(ctx context.Context, id int, input UpdateInst
 		args = append(args, *input.AvailableVersion)
 		argIndex++
 	}
+	if input.Restart {
+		setClauses = append(setClauses, "runtime_generation = runtime_generation + 1")
+	}
+	if input.SetRepository {
+		setClauses = append(setClauses, fmt.Sprintf("repository_id = $%d", argIndex))
+		args = append(args, input.RepositoryID)
+		argIndex++
+	}
 
 	if len(setClauses) > 0 {
 		setClauses = append(setClauses, "updated_at = NOW()")
@@ -362,6 +374,42 @@ func (s *InstallationStore) Update(ctx context.Context, id int, input UpdateInst
 		return fmt.Errorf("commit update installation transaction: %w", err)
 	}
 	return nil
+}
+
+// ListEnabledWithCapabilityTypes returns the enabled installations that
+// declare at least one capability of the given types, in id order. One
+// query replaces a ListEnabled + per-installation ListCapabilities fan-out
+// for callers that only need membership, such as the resident supervisor.
+func (s *InstallationStore) ListEnabledWithCapabilityTypes(ctx context.Context, capabilityTypes []string) ([]*Installation, error) {
+	if len(capabilityTypes) == 0 {
+		return nil, nil
+	}
+	query := `SELECT ` + installationColumns + ` FROM plugin_installations
+		WHERE enabled = true
+		  AND EXISTS (
+			SELECT 1 FROM plugin_capabilities
+			WHERE plugin_capabilities.plugin_installation_id = plugin_installations.id
+			  AND plugin_capabilities.capability_type = ANY($1)
+		  )
+		ORDER BY id ASC`
+	rows, err := s.pool.Query(ctx, query, capabilityTypes)
+	if err != nil {
+		return nil, fmt.Errorf("listing enabled plugin installations by capability type: %w", err)
+	}
+	defer rows.Close()
+
+	var installations []*Installation
+	for rows.Next() {
+		installation, err := scanInstallation(rows)
+		if err != nil {
+			return nil, err
+		}
+		installations = append(installations, installation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating enabled plugin installations by capability type: %w", err)
+	}
+	return installations, nil
 }
 
 func (s *InstallationStore) ListCapabilities(ctx context.Context, installationID int) ([]*Capability, error) {
@@ -416,6 +464,34 @@ func (s *InstallationStore) SaveArchive(
 func (s *InstallationStore) GetArchive(ctx context.Context, installationID int) (*InstallationArchive, error) {
 	query := `SELECT ` + archiveColumns + ` FROM plugin_archives WHERE plugin_installation_id = $1`
 	return scanArchive(s.pool.QueryRow(ctx, query, installationID))
+}
+
+func (s *InstallationStore) Delete(ctx context.Context, id int) error {
+	installation, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	// Guard at the store, not only the HTTP handler: deleting the reserved
+	// builtin row would cascade through every builtin chain row and RemoveAll
+	// the (sentinel) install dir.
+	if installation.IsBuiltin() {
+		return ErrBuiltinInstallationImmutable
+	}
+
+	tag, err := s.pool.Exec(ctx, `DELETE FROM plugin_installations WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("deleting plugin installation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrInstallationNotFound
+	}
+
+	installDir := filepath.Dir(installation.InstallPath)
+	if err := os.RemoveAll(installDir); err != nil {
+		return fmt.Errorf("removing plugin installation files: %w", err)
+	}
+
+	return nil
 }
 
 func (s *InstallationStore) replaceCapabilities(

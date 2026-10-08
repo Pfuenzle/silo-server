@@ -107,6 +107,7 @@ func (p *UserDBPool) Get(ctx context.Context, userID int) (*UserDB, error) {
 		return nil, fmt.Errorf("userdb pool: creating db for user %d: %w", userID, err)
 	}
 
+	poolOpen.Inc()
 	p.dbs[userID] = &poolEntry{
 		db:         udb,
 		lastAccess: time.Now(),
@@ -141,6 +142,7 @@ func (p *UserDBPool) Close() error {
 			firstErr = fmt.Errorf("closing db for user %d: %w", uid, err)
 		}
 		delete(p.dbs, uid)
+		poolOpen.Dec()
 	}
 	// Clear pinned set.
 	for uid := range p.pinned {
@@ -274,6 +276,8 @@ func (p *UserDBPool) evict() {
 		entry := p.dbs[c.userID]
 		entry.db.Close()
 		delete(p.dbs, c.userID)
+		poolOpen.Dec()
+		poolEvictions.Inc()
 		evicted++
 	}
 }

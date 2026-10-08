@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -23,8 +24,6 @@ import (
 )
 
 type WatchSyncPluginClient interface {
-	InitAuthorize(context.Context, *pluginv1.WatchSyncInitAuthorizeRequest) (*pluginv1.WatchSyncInitAuthorizeResponse, error)
-	ExchangeCode(context.Context, *pluginv1.WatchSyncExchangeCodeRequest) (*pluginv1.WatchSyncCredentialResponse, error)
 	ExchangeAPIKey(context.Context, *pluginv1.WatchSyncExchangeAPIKeyRequest) (*pluginv1.WatchSyncCredentialResponse, error)
 	StartDeviceAuthorization(context.Context, *pluginv1.WatchSyncDeviceAuthorizationServiceStartRequest) (*pluginv1.WatchSyncDeviceAuthorizationServiceStartResponse, error)
 	PollDeviceAuthorization(context.Context, *pluginv1.WatchSyncDeviceAuthorizationServicePollRequest) (*pluginv1.WatchSyncDeviceAuthorizationServicePollResponse, error)
@@ -36,6 +35,10 @@ type WatchSyncPluginClient interface {
 
 type WatchSyncPluginClientResolver func(context.Context, int, string) (WatchSyncPluginClient, error)
 type WatchSyncPluginConfigResolver func(context.Context, int) (*pluginv1.WatchSyncProviderConfig, error)
+
+// WatchSyncPluginConfigReady reports whether an installation has the global
+// config its manifest requires.
+type WatchSyncPluginConfigReady func(context.Context, int) (bool, error)
 
 type PluginCredentialRepository interface {
 	UpsertConnection(context.Context, Connection) (Connection, error)
@@ -50,7 +53,9 @@ type PluginProviderOptions struct {
 	ConnectionConfigSchema []*pluginv1.ConfigSchema
 	ResolveClient          WatchSyncPluginClientResolver
 	ResolveConfig          WatchSyncPluginConfigResolver
-	Repository             PluginCredentialRepository
+	// ConfigReady is optional; without it the plugin counts as configured.
+	ConfigReady WatchSyncPluginConfigReady
+	Repository  PluginCredentialRepository
 }
 
 type PluginProvider struct {
@@ -64,12 +69,15 @@ type PluginProvider struct {
 	supportedMedia         map[pluginv1.WatchSyncMediaType]struct{}
 	resolveClient          WatchSyncPluginClientResolver
 	resolveConfig          WatchSyncPluginConfigResolver
+	configReady            WatchSyncPluginConfigReady
 	repository             PluginCredentialRepository
+	now                    func() time.Time
 }
 
 const (
 	watchSyncUnsupportedMovieMediaMessage   = "watch sync plugin does not support movie media"
 	watchSyncUnsupportedEpisodeMediaMessage = "watch sync plugin does not support episode media"
+	watchSyncUnsupportedSeriesMediaMessage  = "watch sync plugin does not support series media"
 	watchSyncUnsupportedMediaMessage        = "watch sync plugin does not support this media type"
 	watchSyncJSONSchemaNumberType           = "number"
 	watchSyncJSONSchemaBooleanType          = "boolean"
@@ -113,7 +121,9 @@ func NewPluginProvider(options PluginProviderOptions) (*PluginProvider, error) {
 		supportedMedia:         supportedMedia,
 		resolveClient:          options.ResolveClient,
 		resolveConfig:          options.ResolveConfig,
+		configReady:            options.ConfigReady,
 		repository:             options.Repository,
+		now:                    time.Now,
 	}, nil
 }
 
@@ -152,6 +162,16 @@ func (p *PluginProvider) ConnectionConfigSchema() []hostplugins.ConfigSchemaView
 
 func (p *PluginProvider) usesHostPluginConfig() {}
 
+// CredentialsConfigured reports whether the plugin has the global config its
+// manifest requires, such as a provider app's client ID, so a profile can
+// connect.
+func (p *PluginProvider) CredentialsConfigured(ctx context.Context) (bool, error) {
+	if p.configReady == nil {
+		return true, nil
+	}
+	return p.configReady(ctx, p.installationID)
+}
+
 func (p *PluginProvider) authoritativeRefreshProvider() {}
 
 func (p *PluginProvider) ExportBatchSize() int {
@@ -175,96 +195,14 @@ func (p *PluginProvider) Capabilities() Capabilities {
 		RemoveWatchlist:        p.descriptor.GetRemoveWatchlist(),
 		ProvidesWatchlistOrder: p.descriptor.GetProvidesWatchlistOrder(),
 		ScrobblePlayback:       p.descriptor.GetScrobblePlayback(),
+		ImportRatings:          p.descriptor.GetImportRatings(),
+		ExportRatings:          p.descriptor.GetExportRatings(),
+		SyncDropped:            p.descriptor.GetSyncDropped(),
 	}
 }
 
 func (p *PluginProvider) ConnectWithAPIKey(ctx context.Context, apiKey string) (TokenSet, ProviderAccount, error) {
 	return p.ConnectWithAPIKeyConfig(ctx, apiKey, nil)
-}
-
-func (p *PluginProvider) StartAuthorizationCodeAuth(ctx context.Context, redirectURI string, state string) (AuthorizationCodeSession, error) {
-	if p.authMethod != AuthMethodAuthorizationCode {
-		return AuthorizationCodeSession{}, errors.New("watch sync plugin does not support authorization-code authentication")
-	}
-	redirectURI = strings.TrimSpace(redirectURI)
-	state = strings.TrimSpace(state)
-	if redirectURI == "" || state == "" {
-		return AuthorizationCodeSession{}, errors.New("watch sync authorization redirect URI and state are required")
-	}
-	config, err := p.providerConfig(ctx)
-	if err != nil {
-		return AuthorizationCodeSession{}, err
-	}
-	client, err := p.resolveClient(ctx, p.installationID, p.capabilityID)
-	if err != nil {
-		return AuthorizationCodeSession{}, watchSyncUnavailableError()
-	}
-	response, err := client.InitAuthorize(ctx, &pluginv1.WatchSyncInitAuthorizeRequest{
-		CapabilityId:   p.capabilityID,
-		ProviderConfig: config,
-		RedirectUri:    redirectURI,
-		State:          state,
-	})
-	if err != nil {
-		return AuthorizationCodeSession{}, watchSyncRPCError()
-	}
-	if err := watchSyncFaultError(p.Key(), response.GetFault(), state); err != nil {
-		return AuthorizationCodeSession{}, err
-	}
-	authorizeURL, err := validAuthorizationURL(response.GetAuthorizationUrl())
-	if err != nil {
-		return AuthorizationCodeSession{}, err
-	}
-	return AuthorizationCodeSession{
-		RedirectURI:   redirectURI,
-		State:         state,
-		ProviderState: base64.RawURLEncoding.EncodeToString(response.GetProviderState()),
-		AuthorizeURL:  authorizeURL,
-	}, nil
-}
-
-func (p *PluginProvider) CompleteAuthorizationCodeAuth(ctx context.Context, code string, session AuthorizationCodeSession) (TokenSet, ProviderAccount, error) {
-	if p.authMethod != AuthMethodAuthorizationCode {
-		return TokenSet{}, ProviderAccount{}, errors.New("watch sync plugin does not support authorization-code authentication")
-	}
-	code = strings.TrimSpace(code)
-	if code == "" {
-		return TokenSet{}, ProviderAccount{}, errors.New("authorization code is required")
-	}
-	providerState, err := base64.RawURLEncoding.DecodeString(session.ProviderState)
-	if err != nil {
-		return TokenSet{}, ProviderAccount{}, errors.New("watch sync plugin authorization state is invalid")
-	}
-	config, err := p.providerConfig(ctx)
-	if err != nil {
-		return TokenSet{}, ProviderAccount{}, err
-	}
-	client, err := p.resolveClient(ctx, p.installationID, p.capabilityID)
-	if err != nil {
-		return TokenSet{}, ProviderAccount{}, watchSyncUnavailableError()
-	}
-	response, err := client.ExchangeCode(ctx, &pluginv1.WatchSyncExchangeCodeRequest{
-		CapabilityId:      p.capabilityID,
-		ProviderConfig:    config,
-		RedirectUri:       session.RedirectURI,
-		AuthorizationCode: code,
-		ProviderState:     providerState,
-	})
-	if err != nil {
-		return TokenSet{}, ProviderAccount{}, watchSyncRPCError()
-	}
-	if err := watchSyncFaultError(p.Key(), response.GetFault(), code, session.ProviderState); err != nil {
-		return TokenSet{}, ProviderAccount{}, err
-	}
-	tokens, err := tokenSetFromProto(response.GetCredentials())
-	if err != nil {
-		return TokenSet{}, ProviderAccount{}, err
-	}
-	account, err := accountFromProto(response.GetAccount())
-	if err != nil {
-		return TokenSet{}, ProviderAccount{}, err
-	}
-	return tokens, account, nil
 }
 
 func (p *PluginProvider) ConnectWithAPIKeyConfig(
@@ -408,15 +346,11 @@ func (p *PluginProvider) PollDeviceAuth(ctx context.Context, _ ServerConfig, ses
 }
 
 func validDeviceVerificationURL(value string) (string, error) {
-	return validAuthorizationURL(value)
-}
-
-func validAuthorizationURL(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	parsed, err := url.Parse(value)
 	if err != nil || parsed == nil || !parsed.IsAbs() || parsed.Host == "" || parsed.User != nil ||
 		(parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return "", errors.New("watch sync plugin returned an invalid authorization URL")
+		return "", errors.New("watch sync plugin returned an invalid device authorization verification URL")
 	}
 	return parsed.String(), nil
 }
@@ -652,6 +586,22 @@ func (p *PluginProvider) authenticatedContext(ctx context.Context, conn Connecti
 		ProviderConfig: config,
 		Credentials:    credentialsFromConnection(conn),
 	}, nil
+}
+
+// authenticatedContextSecrets lists every secret an RPC carried to the
+// plugin: its tokens, secret credential attributes, and secret config values,
+// such as a provider app's client secret. Text the plugin returns is scrubbed
+// of all of them.
+func authenticatedContextSecrets(authContext *pluginv1.WatchSyncAuthenticatedContext) []string {
+	credentials := authContext.GetCredentials()
+	secrets := []string{credentials.GetAccessToken(), credentials.GetRefreshToken()}
+	for _, value := range credentials.GetSecretAttributes() {
+		secrets = append(secrets, value)
+	}
+	for _, value := range authContext.GetProviderConfig().GetSecretValues() {
+		secrets = append(secrets, value)
+	}
+	return secrets
 }
 
 func (p *PluginProvider) providerConfig(ctx context.Context) (*pluginv1.WatchSyncProviderConfig, error) {
@@ -1243,12 +1193,41 @@ func mediaFromIdentity(mediaItemID, kind, title string, year int, imdbID, tmdbID
 	}
 }
 
+// SyncsRatingKind reports whether the plugin rates items of kind, from the
+// media types it supports. Without it, the host would send a movie-only plugin
+// every series rating on each sync and log the rejection.
+func (p *PluginProvider) SyncsRatingKind(kind string) bool {
+	return p.supportsMedia(watchSyncMediaType(kind))
+}
+
+// RatingExportRequiresWatched reports whether the plugin lists the media type
+// of kind in rating_export_requires_watched, meaning its SET_RATING also marks
+// the title watched upstream. Only movie and series ratings are synced.
+func (p *PluginProvider) RatingExportRequiresWatched(kind string) bool {
+	mediaType := watchSyncMediaType(kind)
+	if mediaType != pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE &&
+		mediaType != pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_SERIES {
+		return false
+	}
+	return slices.Contains(p.descriptor.GetRatingExportRequiresWatched(), mediaType)
+}
+
+// mediaFromLocalFavorite builds list and rating media. A series item carries
+// its own ids, so its SERIES media has them in external_ids and no series_*.
+func mediaFromLocalFavorite(item LocalFavorite) *pluginv1.WatchSyncMedia {
+	return mediaFromIdentity(item.MediaItemID, item.Kind, item.Title, item.Year,
+		item.IMDbID, item.TMDBID, item.TVDBID, "", 0,
+		item.SeriesIMDbID, item.SeriesTMDBID, item.SeriesTVDBID, 0, 0)
+}
+
 func watchSyncMediaType(kind string) pluginv1.WatchSyncMediaType {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case historyimport.KindMovie:
 		return pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE
 	case historyimport.KindEpisode:
 		return pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_EPISODE
+	case historyimport.KindSeries:
+		return pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_SERIES
 	default:
 		return pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_UNSPECIFIED
 	}
@@ -1321,11 +1300,9 @@ func resultForEvent(results []*pluginv1.WatchSyncApplyResult, eventID string) *p
 }
 
 func supportedWatchSyncAuthMethod(descriptor *pluginv1.WatchSyncProviderDescriptor) (string, error) {
-	supported := make(map[string]struct{}, 3)
+	supported := make(map[string]struct{}, 2)
 	for _, method := range descriptor.GetAuthMethods() {
 		switch method {
-		case pluginv1.WatchSyncAuthMethod_WATCH_SYNC_AUTH_METHOD_AUTHORIZATION_CODE:
-			supported[AuthMethodAuthorizationCode] = struct{}{}
 		case pluginv1.WatchSyncAuthMethod_WATCH_SYNC_AUTH_METHOD_API_KEY:
 			supported[AuthMethodAPIKey] = struct{}{}
 		case pluginv1.WatchSyncAuthMethod_WATCH_SYNC_AUTH_METHOD_DEVICE_CODE:
@@ -1340,9 +1317,6 @@ func supportedWatchSyncAuthMethod(descriptor *pluginv1.WatchSyncProviderDescript
 	}
 	if _, ok := supported[AuthMethodDeviceCode]; ok {
 		return AuthMethodDeviceCode, nil
-	}
-	if _, ok := supported[AuthMethodAuthorizationCode]; ok {
-		return AuthMethodAuthorizationCode, nil
 	}
 	return "", errors.New("does not advertise an authentication method supported by the host")
 }
@@ -1359,11 +1333,19 @@ func supportedWatchSyncMediaTypes(descriptor *pluginv1.WatchSyncProviderDescript
 	for _, mediaType := range media {
 		switch mediaType {
 		case pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE,
-			pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_EPISODE:
+			pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_EPISODE,
+			pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_SERIES:
 			supported[mediaType] = struct{}{}
-		default:
+		case pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_UNSPECIFIED:
 			return nil, fmt.Errorf("advertises unsupported media type %q", mediaType.String())
+		default:
+			// A media type added by a newer SDK is ignored rather than
+			// rejecting the plugin, so a plugin release that opts into a new
+			// type keeps its existing sync on servers that predate the type.
 		}
+	}
+	if len(supported) == 0 {
+		return nil, errors.New("advertises no media type this server supports")
 	}
 	return supported, nil
 }
@@ -1382,6 +1364,8 @@ func unsupportedWatchSyncMediaMessage(mediaType pluginv1.WatchSyncMediaType) str
 		return watchSyncUnsupportedMovieMediaMessage
 	case pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_EPISODE:
 		return watchSyncUnsupportedEpisodeMediaMessage
+	case pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_SERIES:
+		return watchSyncUnsupportedSeriesMediaMessage
 	default:
 		return watchSyncUnsupportedMediaMessage
 	}
@@ -1396,10 +1380,17 @@ func safeApplyMessage(result *pluginv1.WatchSyncApplyResult, secrets ...string) 
 
 func sanitizeWatchSyncMessage(message string, fallback string, secrets ...string) string {
 	message = normalizeWatchSyncText(message)
+	// Longest first, so a secret that contains a shorter one is still
+	// redacted whole.
+	ordered := make([]string, 0, len(secrets))
 	for _, secret := range secrets {
 		if secret = normalizeWatchSyncText(secret); secret != "" {
-			message = strings.ReplaceAll(message, secret, "[REDACTED]")
+			ordered = append(ordered, secret)
 		}
+	}
+	slices.SortFunc(ordered, func(a, b string) int { return len(b) - len(a) })
+	for _, secret := range ordered {
+		message = strings.ReplaceAll(message, secret, "[REDACTED]")
 	}
 	if message == "" {
 		return fallback
@@ -1438,6 +1429,9 @@ type watchSyncProviderFaultError struct {
 func (e watchSyncProviderFaultError) Error() string { return e.message }
 
 func isWatchSyncInvalidCredentialError(err error) bool {
+	if errors.Is(err, ErrInvalidCredential) {
+		return true
+	}
 	var fault watchSyncProviderFaultError
 	return errors.As(err, &fault) && fault.code == pluginv1.WatchSyncFaultCode_WATCH_SYNC_FAULT_CODE_INVALID_CREDENTIAL
 }

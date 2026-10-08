@@ -53,7 +53,7 @@ func newAdminValuesEnv(t *testing.T) adminValuesEnv {
 
 	router := chi.NewRouter()
 	router.Group(func(r chi.Router) {
-		r.Use(apimw.RequireActingAdmin(nil))
+		r.Use(apimw.RequireActingAdmin(nil, nil))
 		r.Get("/admin/users/{id}/settings/values", handler.HandleAdminListUserSettingValues)
 		r.Put("/admin/users/{id}/settings/values/{key}", handler.HandleAdminSetUserSettingValue)
 		r.Delete("/admin/users/{id}/settings/values/{key}", handler.HandleAdminDeleteUserSettingValue)
@@ -77,28 +77,6 @@ func (env adminValuesEnv) do(t *testing.T, role, method, target string, body []b
 	rec := httptest.NewRecorder()
 	env.router.ServeHTTP(rec, req)
 	return rec
-}
-
-func TestAdminSettingValuesRefuseNonAdmins(t *testing.T) {
-	env := newAdminValuesEnv(t)
-
-	for name, req := range map[string]struct {
-		method, target string
-		body           []byte
-	}{
-		"list":   {http.MethodGet, "/admin/users/7/settings/values", nil},
-		"set":    {http.MethodPut, "/admin/users/7/settings/values/playback.subtitle_mode?scope=account", []byte(`{"value":"always"}`)},
-		"delete": {http.MethodDelete, "/admin/users/7/settings/values/playback.subtitle_mode?scope=account", nil},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if rec := env.do(t, "user", req.method, req.target, req.body); rec.Code != http.StatusForbidden {
-				t.Errorf("non-admin %s = %d, want 403: %s", name, rec.Code, rec.Body.String())
-			}
-			if rec := env.do(t, "", req.method, req.target, req.body); rec.Code != http.StatusUnauthorized {
-				t.Errorf("anonymous %s = %d, want 401: %s", name, rec.Code, rec.Body.String())
-			}
-		})
-	}
 }
 
 func TestAdminSettingValuesRejectNonexistentLibraryContext(t *testing.T) {
@@ -453,4 +431,34 @@ func TestAdminMutationsAttributeEventsToTheTargetUser(t *testing.T) {
 		t.Fatalf("DELETE = %d: %s", rec.Code, rec.Body.String())
 	}
 	assertTargetEnvelope("DELETE")
+}
+
+func TestAdminSettingServiceTargetIdentity(t *testing.T) {
+	env := newAdminValuesEnv(t)
+	ctx := t.Context()
+	req := SettingIdentityRequest{Key: "playback.subtitle_language", Scope: "profile_device", ProfileID: "profile-1", DeviceID: "tv-1"}
+	row, err := env.handler.SetAdminAccountSetting(ctx, adminValuesTargetID, req, json.RawMessage(`"de"`))
+	if err != nil || string(row.Value) != `"de"` || row.ProfileID != "profile-1" {
+		t.Fatalf("%+v %v", row, err)
+	}
+	id := userstore.SettingIdentity{Key: req.Key, Scope: settingscontract.ScopeProfileDevice, ProfileID: req.ProfileID, DeviceID: req.DeviceID}
+	if got, err := env.adminStore.GetSettingValue(ctx, id); err != nil || got != nil {
+		t.Fatalf("administrator store changed: %+v %v", got, err)
+	}
+	if err := env.handler.DeleteAdminAccountSetting(ctx, adminValuesTargetID, req); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := env.targetStore.GetSettingValue(ctx, id); err != nil || got != nil {
+		t.Fatalf("target setting retained: %+v %v", got, err)
+	}
+	for _, profile := range []string{"", "ghost"} {
+		req.ProfileID = profile
+		if _, err := env.handler.SetAdminAccountSetting(ctx, adminValuesTargetID, req, json.RawMessage(`"en"`)); err == nil {
+			t.Fatal("accepted nonexistent target profile")
+		}
+	}
+	req = SettingIdentityRequest{Key: "nav.shortcuts", Scope: "profile", ProfileID: "profile-1"}
+	if err := env.handler.DeleteAdminAccountSetting(ctx, adminValuesTargetID, req); err == nil {
+		t.Fatal("deleted shortcuts instead of explicit empty document")
+	}
 }

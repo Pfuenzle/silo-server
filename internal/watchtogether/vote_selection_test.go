@@ -27,15 +27,15 @@ func (s *stubSuggestions) GetSuggestion(_ context.Context, id string) (*Suggesti
 	return nil, ErrSuggestionNotFound
 }
 
-func (s *stubSuggestions) ListSuggestions(context.Context, string, string) ([]Suggestion, error) {
+func (s *stubSuggestions) ListSuggestions(context.Context, string, int, string) ([]Suggestion, error) {
 	out := make([]Suggestion, len(s.ordered))
 	copy(out, s.ordered)
 	return out, nil
 }
 
-func (s *stubSuggestions) DeleteSuggestion(context.Context, string) error { return nil }
-func (s *stubSuggestions) AddVote(context.Context, string, string) error  { return nil }
-func (s *stubSuggestions) RemoveVote(context.Context, string, string) error {
+func (s *stubSuggestions) DeleteSuggestion(context.Context, string) error     { return nil }
+func (s *stubSuggestions) AddVote(context.Context, string, int, string) error { return nil }
+func (s *stubSuggestions) RemoveVote(context.Context, string, int, string) error {
 	return nil
 }
 
@@ -112,16 +112,29 @@ func TestPromotingBeforeAnyoneVotesIsRefused(t *testing.T) {
 	}
 }
 
-// The host bypassing the tally with a direct selection would make the counts on
-// everyone else's screen decoration.
-func TestDirectSelectionIsRefusedInAVoteRoom(t *testing.T) {
-	service, _ := newVoteRoomService(t, RoomSelectionModeVote, voteRoomSuggestions())
-
-	_, err := service.SelectItem(context.Background(), "room-1", 7, "host", SelectItemInput{
-		ContentID: "movie-winner",
-	})
-	if !errors.Is(err, ErrVoteRoomSelection) {
-		t.Fatalf("SelectItem() error = %v, want ErrVoteRoomSelection", err)
+// VoteWinner still reports the leader (and refuses to name one with no votes)
+// for v1 promotion and clients that show who is ahead.
+func TestVoteWinnerStillReportsTheLeader(t *testing.T) {
+	ordered := voteRoomSuggestions()
+	ordered[1].VoteCount = ordered[0].VoteCount
+	service, _ := newVoteRoomService(t, RoomSelectionModeVote, ordered)
+	winner, err := service.VoteWinner(context.Background(), "room-1")
+	if err != nil || winner.ID != "winner" {
+		t.Fatalf("VoteWinner() = %+v, %v", winner, err)
+	}
+	for _, tt := range []struct {
+		name        string
+		suggestions []Suggestion
+	}{
+		{name: "empty"},
+		{name: "unvoted", suggestions: []Suggestion{{ID: "a", RoomID: "room-1", VoteCount: 0}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			service.suggestions = &stubSuggestions{ordered: tt.suggestions}
+			if _, err := service.VoteWinner(context.Background(), "room-1"); !errors.Is(err, ErrNoVotesCast) {
+				t.Fatalf("VoteWinner() with no votes error = %v, want ErrNoVotesCast", err)
+			}
+		})
 	}
 }
 
@@ -139,4 +152,9 @@ func TestHostPickRoomIsUntouchedByTheVoteGates(t *testing.T) {
 	if _, err := service.PromoteSuggestion(context.Background(), "room-1", "a", 7, "host"); err != nil {
 		t.Fatalf("PromoteSuggestion() error = %v, want a host_pick room to promote freely", err)
 	}
+}
+
+func (s *stubSuggestions) ListSuggestionsPage(ctx context.Context, room string, _ int, profile string, _ int, _ *SuggestionPosition) ([]Suggestion, bool, error) {
+	rows, err := s.ListSuggestions(ctx, room, 7, profile)
+	return rows, false, err
 }

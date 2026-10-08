@@ -62,21 +62,6 @@ type ContentRatingResolver interface {
 	MaxContentRating(ctx context.Context, userID int, profileID string) (string, error)
 }
 
-type AudiobookSearchResult struct {
-	Provider       string
-	ProviderItemID string
-	Available      bool
-	Title          string
-	OriginalTitle  string
-	Year           int
-	Overview       string
-	ImageURL       string
-}
-
-type AudiobookSearcher interface {
-	SearchAudiobooks(ctx context.Context, viewer Viewer, query string) ([]AudiobookSearchResult, error)
-}
-
 // RequesterIdentityResolver resolves a requesting user id into the identity a
 // per-user request_router plugin needs (e.g. Seerr attribution by email).
 type RequesterIdentityResolver interface {
@@ -93,21 +78,20 @@ type TVDBIDResolver interface {
 type Service struct {
 	store             Store
 	tmdb              TMDBClient
+	animeIndex        AnimeIndex
 	presence          PresenceResolver
 	router            RequestRouterProvider
 	entitlements      EntitlementResolver
 	groupProvider     access.GroupPolicyProvider
 	users             access.UserRepository
 	requesterIdentity RequesterIdentityResolver
-	audiobookSearch   AudiobookSearcher
-	audiobookLinker   *AudiobookImportLinker
 	tvdbResolver      TVDBIDResolver
 	notifier          FulfillmentNotifier
 	lifecycle         LifecycleNotifier
+	watchlistPref     WatchlistPreference
+	titleObserver     TitleObserver
 	Now               func() time.Time
 }
-
-const submissionLease = 5 * time.Minute
 
 type DiscoverySection struct {
 	Key          string        `json:"key"`
@@ -134,10 +118,6 @@ func NewService(store Store, tmdbClient TMDBClient, presence PresenceResolver) *
 }
 
 func (s *Service) SetRouterProvider(p RequestRouterProvider) { s.router = p }
-
-func (s *Service) SetAudiobookSearcher(searcher AudiobookSearcher) { s.audiobookSearch = searcher }
-
-func (s *Service) SetAudiobookImportLinker(linker *AudiobookImportLinker) { s.audiobookLinker = linker }
 
 func (s *Service) SetEntitlementResolver(r EntitlementResolver) { s.entitlements = r }
 
@@ -733,6 +713,8 @@ func (s *Service) GetDetail(ctx context.Context, viewer Viewer, mediaType MediaT
 	}
 
 	raw, err := s.tmdb.GetMediaDetail(ctx, string(mediaType), tmdbID)
+	// A watchlist title tracking this TMDB ID refreshes from the read.
+	s.observeDetail(ctx, mediaType, tmdbID, raw, err)
 	if err != nil {
 		return nil, err
 	}
@@ -810,6 +792,9 @@ func (s *Service) GetDetail(ctx context.Context, viewer Viewer, mediaType MediaT
 	}
 	primaryState := requestStateFor(viewer, policy, available, primaryRequests[raw.ID])
 	primaryState.Following = primaryRequests[raw.ID] != nil && primaryFollowing[raw.ID]
+	if primaryState.Download, err = s.activeRequestDownload(ctx, primaryRequests[raw.ID]); err != nil {
+		return nil, err
+	}
 
 	detail := &MediaDetail{
 		MediaType:           mediaType,
@@ -931,6 +916,17 @@ func (s *Service) CreateRequest(ctx context.Context, viewer Viewer, input Create
 			year := detail.Year
 			normalized.Year = &year
 		}
+		// A caller without the display fields (a watchlist add keeps only
+		// its own snapshot) gets TMDB's; one that sent them keeps its own.
+		if normalized.Overview == "" {
+			normalized.Overview = strings.TrimSpace(detail.Overview)
+		}
+		if normalized.PosterPath == "" {
+			normalized.PosterPath = strings.TrimSpace(detail.PosterPath)
+		}
+		if normalized.BackdropPath == "" {
+			normalized.BackdropPath = strings.TrimSpace(detail.BackdropPath)
+		}
 	}
 	facts := s.routingFacts(ctx, detail)
 	if normalized.MediaType == MediaTypeSeries && !normalized.WholeSeries {
@@ -999,6 +995,7 @@ func (s *Service) CreateRequest(ctx context.Context, viewer Viewer, input Create
 	if req.Status == StatusApproved {
 		// Auto-approval is a real approval transition; channels subscribed to
 		// approvals see it alongside the submission.
+		s.notifyApproval(ctx, *req, ApprovalOriginPolicy)
 		req.externalIDsResolved = true
 		req.tvdbLookupFailed = tvdbLookupFailed
 		return s.withLibraryContent(ctx, s.submitAfterCommit(ctx, *req, viewer)), nil
@@ -1209,6 +1206,7 @@ func (s *Service) Approve(ctx context.Context, viewer Viewer, id string) (*Reque
 	if err != nil {
 		return nil, err
 	}
+	s.notifyApproval(ctx, *approved, ApprovalOriginAdmin)
 	return s.withLibraryContent(ctx, s.submitAfterCommit(ctx, *approved, viewer)), nil
 }
 
@@ -1363,7 +1361,7 @@ func (s *Service) GetSettings(ctx context.Context, viewer Viewer) (Settings, err
 	return s.store.GetSettings(ctx)
 }
 
-func (s *Service) GetFeatureStatus(ctx context.Context, _ Viewer) (FeatureStatus, error) {
+func (s *Service) GetFeatureStatus(ctx context.Context, viewer Viewer) (FeatureStatus, error) {
 	settings, err := s.store.GetSettings(ctx)
 	if err != nil {
 		return FeatureStatus{}, err
@@ -1381,6 +1379,9 @@ func (s *Service) GetFeatureStatus(ctx context.Context, _ Viewer) (FeatureStatus
 		if status.MissingSeasonsRequestable, err = s.moreSeasonsRequestable(ctx); err != nil {
 			return FeatureStatus{}, err
 		}
+		// The account's own permission is left to the caller, which reads
+		// it for the request capability anyway.
+		status.WatchlistRequests = settings.WatchlistRequests && viewer.UserID != 0 && s.watchlistAutoRequest(ctx, viewer)
 	}
 	return status, nil
 }
@@ -2915,10 +2916,12 @@ func (s *Service) applyTargetStatuses(ctx context.Context, targets []Target, sta
 		if target == nil || target.Status == StatusCompleted || target.Status == StatusFailed {
 			continue
 		}
+		status := target.Status
 		if newStatus := st.Status; newStatus != "" && newStatus != target.Status {
 			if _, err := s.store.UpdateTargetStatus(ctx, target.ID, newStatus, "", st.ExternalStatus, st.Message, Viewer{}); err != nil {
 				return reconcileUnchanged, err
 			}
+			status = newStatus
 			switch newStatus {
 			case StatusCompleted:
 				change = reconcileCompleted
@@ -2938,6 +2941,19 @@ func (s *Service) applyTargetStatuses(ctx context.Context, targets []Target, sta
 			if err := s.store.UpdateTargetExternalStatus(ctx, target.ID, st.ExternalStatus); err != nil {
 				return reconcileUnchanged, err
 			}
+		}
+		if (status == StatusQueued || status == StatusDownloading) && (st.Progress != nil || target.Download != nil) {
+			if err := s.store.UpdateTargetDownload(ctx, target.ID, st.Progress); err != nil {
+				return reconcileUnchanged, err
+			}
+		}
+	}
+	for i, target := range targets {
+		if answered[i] {
+			continue
+		}
+		if err := s.settleUnansweredDownload(ctx, target); err != nil {
+			return reconcileUnchanged, err
 		}
 	}
 	return change, nil
@@ -3015,6 +3031,10 @@ func (s *Service) checkTargetStatuses(ctx context.Context, req Request, targets 
 			errs = append(errs, err)
 			continue
 		}
+		keepProgress, err := s.keepsReportedProgress(ctx, fc, key.installationID, key.capabilityID, statuses)
+		if err != nil {
+			errs = append(errs, err)
+		}
 		// A plugin that omits connection_id from its statuses omits it from
 		// its targets too, and a routed target was recorded on its server
 		// anyway. When every target in the group is on one server, a status
@@ -3023,6 +3043,9 @@ func (s *Service) checkTargetStatuses(ctx context.Context, req Request, targets 
 		for _, st := range statuses {
 			if st.ConnectionID == "" {
 				st.ConnectionID = server
+			}
+			if !keepProgress {
+				st.Progress = nil
 			}
 			out = append(out, st)
 		}

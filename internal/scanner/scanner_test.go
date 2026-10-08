@@ -18,6 +18,15 @@ type recordingQueueSyncer struct {
 	scope    string
 }
 
+func scopedFolderPaths(folder *models.MediaFolder, paths []string) *models.MediaFolder {
+	if folder == nil {
+		return nil
+	}
+	clone := *folder
+	clone.Paths = paths
+	return &clone
+}
+
 func (s *recordingQueueSyncer) SyncForFolder(context.Context, int) error {
 	return nil
 }
@@ -47,7 +56,7 @@ func TestCollectLogicalFilePaths_PreservesLogicalSymlinkRootPaths(t *testing.T) 
 		t.Skipf("symlinks not supported on this platform: %v", err)
 	}
 
-	files, walkFailures, err := collectLogicalFilePaths(context.Background(), []string{logicalRoot}, "series")
+	files, walkFailures, err := collectLogicalFilePaths(t.Context(), []string{logicalRoot}, "series", nil)
 	if err != nil {
 		t.Fatalf("collect logical paths: %v", err)
 	}
@@ -86,7 +95,7 @@ func TestCollectLogicalFilePaths_DedupesSharedPhysicalDirsAndCycles(t *testing.T
 		t.Skipf("symlinks not supported on this platform: %v", err)
 	}
 
-	files, walkFailures, err := collectLogicalFilePaths(context.Background(), []string{physicalRoot, aliasRoot}, "movie")
+	files, walkFailures, err := collectLogicalFilePaths(t.Context(), []string{physicalRoot, aliasRoot}, "movie", nil)
 	if err != nil {
 		t.Fatalf("collect logical paths: %v", err)
 	}
@@ -298,12 +307,12 @@ func TestWalkModeForEbookLibraryTypes(t *testing.T) {
 
 func TestWalkModeEbookAcceptsEbookExtensionsOnly(t *testing.T) {
 	for _, ext := range []string{".epub", ".pdf", ".mobi", ".azw", ".azw3", ".fb2", ".fbz", ".cbz", ".cbr"} {
-		if !walkModeEbook.acceptsExt(ext) {
+		if !walkModeEbook.acceptsPath("Book" + ext) {
 			t.Fatalf("walkModeEbook should accept %s", ext)
 		}
 	}
 	for _, ext := range []string{".txt", ".md", ".mp4", ".mp3", ".mkv"} {
-		if walkModeEbook.acceptsExt(ext) {
+		if walkModeEbook.acceptsPath("Book" + ext) {
 			t.Fatalf("walkModeEbook should reject %s", ext)
 		}
 	}

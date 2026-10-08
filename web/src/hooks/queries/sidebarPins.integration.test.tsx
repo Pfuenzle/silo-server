@@ -17,14 +17,14 @@ const mocks = vi.hoisted(() => ({
   serverOrigin: "https://server-1.example",
   capabilities: {
     api_version: 1,
-    revision: 5,
+    manifest_revision: 5,
     contract_etag: "revision-five",
     supports_batched_effective: true,
     supports_idempotent_writes: true,
     supports_atomic_shortcuts: true,
   } as {
     api_version: number;
-    revision: number;
+    manifest_revision: number;
     contract_etag: string;
     supports_batched_effective?: boolean;
     supports_idempotent_writes?: boolean;
@@ -91,7 +91,7 @@ vi.mock("./settingValues", () => ({
     capabilities:
       | {
           api_version: number;
-          revision: number;
+          manifest_revision: number;
           supports_batched_effective?: boolean;
           supports_idempotent_writes?: boolean;
         }
@@ -99,14 +99,14 @@ vi.mock("./settingValues", () => ({
     key: string,
   ) =>
     capabilities?.api_version === 1 &&
-    capabilities.revision >= (key === SETTING_KEYS.NAV_SHORTCUTS ? 5 : 1) &&
+    capabilities.manifest_revision >= (key === SETTING_KEYS.NAV_SHORTCUTS ? 5 : 1) &&
     capabilities.supports_batched_effective === true &&
     capabilities.supports_idempotent_writes === true,
   settingsCapabilitiesSupportAtomicShortcuts: (
     capabilities:
       | {
           api_version: number;
-          revision: number;
+          manifest_revision: number;
           supports_batched_effective?: boolean;
           supports_idempotent_writes?: boolean;
           supports_atomic_shortcuts?: boolean;
@@ -114,7 +114,7 @@ vi.mock("./settingValues", () => ({
       | undefined,
   ) =>
     capabilities?.api_version === 1 &&
-    capabilities.revision >= 5 &&
+    capabilities.manifest_revision >= 5 &&
     capabilities.supports_batched_effective === true &&
     capabilities.supports_idempotent_writes === true &&
     capabilities.supports_atomic_shortcuts === true,
@@ -149,7 +149,7 @@ describe("serialized sidebar pin writes", () => {
     mocks.serverOrigin = "https://server-1.example";
     mocks.capabilities = {
       api_version: 1,
-      revision: 5,
+      manifest_revision: 5,
       contract_etag: "revision-five",
       supports_batched_effective: true,
       supports_idempotent_writes: true,
@@ -208,7 +208,6 @@ describe("serialized sidebar pin writes", () => {
       invalidateOnSettled: false,
       item: { type: "section", library_id: 42, section_id: "b", label: "B" },
       present: true,
-      mutationId: expect.any(String),
     });
 
     writes[1]!.resolve({});
@@ -216,41 +215,9 @@ describe("serialized sidebar pin writes", () => {
     expect(mocks.mutateAsync.mock.calls[2]![0]).toMatchObject({
       item: { type: "collection", library_id: 42, collection_id: "c", label: "C" },
       present: true,
-      mutationId: expect.any(String),
     });
     writes[2]!.resolve({});
     await waitFor(() => expect(result.current.pins.pins["42"]).toHaveLength(1));
-  });
-
-  it("serializes rapid toggles as stable desired-state operations", async () => {
-    mocks.mutateAsync.mockResolvedValue({});
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-    });
-    const { result } = renderHook(() => useToggleSidebarPin(), {
-      wrapper: wrapper(queryClient),
-    });
-    const pin = { type: "collection" as const, id: "a", label: "A" };
-
-    act(() => {
-      result.current.togglePin(42, pin);
-      result.current.togglePin(42, pin);
-    });
-
-    await waitFor(() => expect(mocks.mutateAsync).toHaveBeenCalledTimes(2));
-    expect(mocks.mutateAsync.mock.calls[0]![0]).toMatchObject({
-      item: { type: "collection", library_id: 42, collection_id: "a", label: "A" },
-      present: true,
-      mutationId: expect.any(String),
-    });
-    expect(mocks.mutateAsync.mock.calls[1]![0]).toMatchObject({
-      item: { type: "collection", library_id: 42, collection_id: "a", label: "A" },
-      present: false,
-      mutationId: expect.any(String),
-    });
-    expect(mocks.mutateAsync.mock.calls[1]![0].mutationId).not.toBe(
-      mocks.mutateAsync.mock.calls[0]![0].mutationId,
-    );
   });
 
   it("orders the same target across separate hook instances", async () => {
@@ -270,11 +237,17 @@ describe("serialized sidebar pin writes", () => {
       second.result.current.togglePin(42, pin);
     });
     await waitFor(() => expect(mocks.mutateAsync).toHaveBeenCalledTimes(1));
-    expect(mocks.mutateAsync.mock.calls[0]![0]).toMatchObject({ present: true });
+    expect(mocks.mutateAsync.mock.calls[0]![0]).toMatchObject({
+      item: { type: "section", library_id: 42, section_id: "recent", label: "Recent" },
+      present: true,
+    });
 
     writes[0]!.resolve({});
     await waitFor(() => expect(mocks.mutateAsync).toHaveBeenCalledTimes(2));
-    expect(mocks.mutateAsync.mock.calls[1]![0]).toMatchObject({ present: false });
+    expect(mocks.mutateAsync.mock.calls[1]![0]).toMatchObject({
+      item: { type: "section", library_id: 42, section_id: "recent", label: "Recent" },
+      present: false,
+    });
     writes[1]!.resolve({});
   });
 
@@ -352,7 +325,7 @@ describe("serialized sidebar pin writes", () => {
   it("fails closed when the atomic shortcut capability is absent", () => {
     mocks.capabilities = {
       api_version: 1,
-      revision: 5,
+      manifest_revision: 5,
       contract_etag: "revision-five-without-atomic-shortcuts",
       supports_batched_effective: true,
       supports_idempotent_writes: true,
@@ -374,7 +347,7 @@ describe("serialized sidebar pin writes", () => {
   it("continues reading legacy sidebar pins from revision-four servers", () => {
     mocks.capabilities = {
       api_version: 1,
-      revision: 4,
+      manifest_revision: 4,
       contract_etag: "revision-four",
       supports_batched_effective: true,
       supports_idempotent_writes: true,

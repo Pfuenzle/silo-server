@@ -25,6 +25,18 @@ func newSkippedRootMemoryRepo(roots ...models.SkippedMediaRoot) *skippedRootMemo
 	return repo
 }
 
+func TestThemeFileDoesNotCreateSkippedVideoRoot(t *testing.T) {
+	repo := newSkippedRootMemoryRepo()
+	e := &Executor{scanner: &finalizeRecordingScanner{}, skippedRootRepo: repo}
+	path := "/movies/Title (2020)/theme-music/opening.mp3"
+	if err := e.reconcileSkippedRoots(t.Context(), 1, "movies", scopeModeFile, path, []string{path}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.roots) != 0 {
+		t.Fatalf("theme audio became a skipped video root: %+v", repo.roots)
+	}
+}
+
 func skippedRootKey(folderID int, rootPath string) string {
 	return fmt.Sprintf("%d:%s", folderID, filepath.Clean(rootPath))
 }
@@ -143,6 +155,11 @@ func (s *settleStubScanner) ScanFile(context.Context, string, *models.MediaFolde
 	return nil
 }
 
+func (s *settleStubScanner) ObserveFileRoot(_ context.Context, _ int, filePath, libraryType string, libraryRoots ...string) (scanner.RootObservation, bool, error) {
+	observation, ok := scanner.ObserveRoot(filePath, libraryType, libraryRoots...)
+	return observation, ok, nil
+}
+
 func (s *settleStubScanner) FinalizeVariantsByPathPrefix(context.Context, *models.MediaFolder, string) error {
 	return nil
 }
@@ -180,6 +197,11 @@ func (s *finalizeRecordingScanner) ScanSubtree(context.Context, *models.MediaFol
 
 func (s *finalizeRecordingScanner) ScanFile(context.Context, string, *models.MediaFolder) error {
 	return nil
+}
+
+func (s *finalizeRecordingScanner) ObserveFileRoot(_ context.Context, _ int, filePath, libraryType string, libraryRoots ...string) (scanner.RootObservation, bool, error) {
+	observation, ok := scanner.ObserveRoot(filePath, libraryType, libraryRoots...)
+	return observation, ok, nil
 }
 
 func (s *finalizeRecordingScanner) FinalizeVariantsByPathPrefix(context.Context, *models.MediaFolder, string) error {
@@ -271,8 +293,8 @@ func TestIngestFolderLetsActiveDrainerBatchFinishAfterSettleWindow(t *testing.T)
 	if got.err != nil {
 		t.Fatalf("expected ingest to complete, got error: %v", got.err)
 	}
-	if got.result == nil || got.result.Skipped {
-		t.Fatalf("expected a non-skipped result, got %+v", got.result)
+	if got.result == nil || got.result.ScanResult == nil {
+		t.Fatalf("expected a scanned result, got %+v", got.result)
 	}
 	if matcher.batchCalls.Load() == 0 {
 		t.Fatal("drainer never ran a batch; test did not exercise the settle-window shutdown path")

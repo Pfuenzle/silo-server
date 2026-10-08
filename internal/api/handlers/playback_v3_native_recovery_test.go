@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -103,11 +104,152 @@ func TestRemapSubtitleSelectionRetainsHearingImpairedVariant(t *testing.T) {
 		}
 		request := playback.StartRequestV3{SubtitleTrackIndex: new(0)}
 		handler := &PlaybackHandler{}
-		if err := handler.remapSubtitleSelectionV3(t.Context(), source, target, &request); err != nil {
-			t.Fatal(err)
+		if dropped, err := handler.remapSubtitleSelectionV3(t.Context(), source, target, &request); err != nil || dropped {
+			t.Fatalf("dropped=%v err=%v", dropped, err)
 		}
 		if *request.SubtitleTrackIndex != 1 {
 			t.Fatalf("external=%v chose non-SDH track", external)
 		}
+	}
+}
+
+// TestRemapSubtitleSelectionAcrossSubtitleFormats covers #1034: auto quality
+// swaps from an HDR edition with PGS subtitles to an SDR edition with SRT ones.
+// The selection keeps its language and forced/SDH variant in the effective
+// file's format instead of failing playback.
+func TestRemapSubtitleSelectionAcrossSubtitleFormats(t *testing.T) {
+	source := &models.MediaFile{ID: 1, SubtitleTracks: []models.SubtitleTrack{
+		{Language: "fre", Codec: "hdmv_pgs_subtitle", Forced: true},
+		{Language: "fre", Codec: "hdmv_pgs_subtitle"},
+	}}
+	cases := []struct {
+		name   string
+		target *models.MediaFile
+		from   int
+		want   int
+	}{
+		{"embedded srt", &models.MediaFile{ID: 2, SubtitleTracks: []models.SubtitleTrack{
+			{Language: "fre", Codec: "subrip", Forced: true},
+			{Language: "fre", Codec: "subrip"},
+		}}, 1, 1},
+		{"embedded teletext", &models.MediaFile{ID: 2, SubtitleTracks: []models.SubtitleTrack{
+			{Language: "fre", Codec: "dvb_teletext"},
+		}}, 1, 0},
+		{"keeps forced variant", &models.MediaFile{ID: 2, SubtitleTracks: []models.SubtitleTrack{
+			{Language: "fre", Codec: "subrip"},
+			{Language: "fre", Codec: "subrip", Forced: true},
+		}}, 0, 1},
+		{"external srt", &models.MediaFile{ID: 2,
+			ExternalSubtitles: []models.ExternalSubtitle{{Language: "fre", Format: "srt"}},
+			SubtitleTracks:    []models.SubtitleTrack{{Language: "eng", Codec: "subrip"}},
+		}, 1, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := playback.StartRequestV3{SubtitleTrackIndex: new(tc.from)}
+			handler := &PlaybackHandler{}
+			if dropped, err := handler.remapSubtitleSelectionV3(t.Context(), source, tc.target, &request); err != nil || dropped {
+				t.Fatalf("dropped=%v err=%v", dropped, err)
+			}
+			if *request.SubtitleTrackIndex != tc.want {
+				t.Fatalf("remapped to %d, want %d", *request.SubtitleTrackIndex, tc.want)
+			}
+			if request.SubtitleTrackID != playback.TrackIDV3(tc.target.ID, "subtitle", tc.want) {
+				t.Fatalf("track id = %q", request.SubtitleTrackID)
+			}
+		})
+	}
+
+	request := playback.StartRequestV3{SubtitleTrackIndex: new(1)}
+	other := &models.MediaFile{ID: 3, SubtitleTracks: []models.SubtitleTrack{{Language: "eng", Codec: "subrip"}}}
+	dropped, err := (&PlaybackHandler{}).remapSubtitleSelectionV3(t.Context(), source, other, &request)
+	if err != nil || !dropped || request.SubtitleTrackIndex != nil || request.SubtitleTrackID != "" {
+		t.Fatalf("a language the effective file lacks must drop the selection: dropped=%v err=%v request=%+v", dropped, err, request)
+	}
+}
+
+// TestRemapSubtitleSelectionAcrossFormatsNeedsOneDeliverableMatch: the
+// cross-format fallback skips formats the subtitle policy cannot deliver, and
+// refuses a match it cannot tell apart from another track by title.
+func TestRemapSubtitleSelectionAcrossFormatsNeedsOneDeliverableMatch(t *testing.T) {
+	remap := func(source, target *models.MediaFile, from int) (int, error) {
+		request := playback.StartRequestV3{SubtitleTrackIndex: new(from)}
+		dropped, err := (&PlaybackHandler{}).remapSubtitleSelectionV3(t.Context(), source, target, &request)
+		if err != nil {
+			return -1, err
+		}
+		if dropped {
+			return -1, errors.New("selection dropped")
+		}
+		return *request.SubtitleTrackIndex, nil
+	}
+	pgs := &models.MediaFile{ID: 1, SubtitleTracks: []models.SubtitleTrack{{Language: "fre", Codec: "hdmv_pgs_subtitle"}}}
+
+	undeliverableFirst := &models.MediaFile{ID: 2,
+		ExternalSubtitles: []models.ExternalSubtitle{{Language: "fre", Format: "sub"}},
+		SubtitleTracks:    []models.SubtitleTrack{{Language: "fre", Codec: "subrip"}},
+	}
+	if got, err := remap(pgs, undeliverableFirst, 0); err != nil || got != 1 {
+		t.Fatalf("undeliverable external first: got %d, %v; want embedded SRT at 1", got, err)
+	}
+
+	ambiguous := &models.MediaFile{ID: 2, SubtitleTracks: []models.SubtitleTrack{
+		{Language: "fre", Codec: "subrip"},
+		{Language: "fre", Codec: "subrip", Title: "Commentary"},
+	}}
+	if _, err := remap(pgs, ambiguous, 0); err == nil {
+		t.Fatal("an untitled selection was remapped to one of two same-language tracks")
+	}
+
+	commentary := &models.MediaFile{ID: 1, SubtitleTracks: []models.SubtitleTrack{
+		{Language: "fre", Codec: "hdmv_pgs_subtitle"},
+		{Language: "fre", Codec: "hdmv_pgs_subtitle", Title: "Commentary"},
+	}}
+	if got, err := remap(commentary, ambiguous, 1); err != nil || got != 1 {
+		t.Fatalf("title disambiguation: got %d, %v; want the Commentary track at 1", got, err)
+	}
+
+	// External bitmaps can be neither burned in nor served as a sidecar, so an
+	// external PGS neither wins the fallback nor makes it ambiguous.
+	externalBitmap := &models.MediaFile{ID: 2,
+		ExternalSubtitles: []models.ExternalSubtitle{{Language: "fre", Format: "hdmv_pgs_subtitle"}},
+		SubtitleTracks:    []models.SubtitleTrack{{Language: "fre", Codec: "subrip"}},
+	}
+	if got, err := remap(pgs, externalBitmap, 0); err != nil || got != 1 {
+		t.Fatalf("external bitmap: got %d, %v; want embedded SRT at 1", got, err)
+	}
+	onlyExternalBitmap := &models.MediaFile{ID: 2, ExternalSubtitles: []models.ExternalSubtitle{{Language: "fre", Format: "hdmv_pgs_subtitle"}}}
+	if _, err := remap(pgs, onlyExternalBitmap, 0); err == nil {
+		t.Fatal("an external bitmap was chosen as the only fallback")
+	}
+
+	// The container's embedded title is what the viewer sees when no stored
+	// title exists, so it disambiguates too.
+	embeddedTitled := &models.MediaFile{ID: 1, SubtitleTracks: []models.SubtitleTrack{
+		{Language: "fre", Codec: "hdmv_pgs_subtitle"},
+		{Language: "fre", Codec: "hdmv_pgs_subtitle", EmbeddedTitle: "Commentary"},
+	}}
+	embeddedTargets := &models.MediaFile{ID: 2, SubtitleTracks: []models.SubtitleTrack{
+		{Language: "fre", Codec: "subrip", EmbeddedTitle: "Main"},
+		{Language: "fre", Codec: "subrip", EmbeddedTitle: "Commentary"},
+	}}
+	if got, err := remap(embeddedTitled, embeddedTargets, 1); err != nil || got != 1 {
+		t.Fatalf("embedded title disambiguation: got %d, %v; want the Commentary track at 1", got, err)
+	}
+}
+
+// A failed downloaded-subtitle lookup is an error, not a missing track: dropping
+// the selection would keep subtitles off for the rest of the session.
+func TestRemapSubtitleSelectionKeepsDownloadedSelectionWhenLookupFails(t *testing.T) {
+	repo := newMockSubtitleRepoForHandler()
+	repo.listErr = errors.New("database unavailable")
+	handler := &PlaybackHandler{SubtitleRepo: repo}
+	request := playback.StartRequestV3{SubtitleTrackIndex: new(0)}
+	dropped, err := handler.remapSubtitleSelectionV3(t.Context(), &models.MediaFile{ID: 1}, &models.MediaFile{ID: 2}, &request)
+	if err == nil || dropped {
+		t.Fatalf("lookup failure must be an error: dropped=%v err=%v", dropped, err)
+	}
+	if request.SubtitleTrackIndex == nil || *request.SubtitleTrackIndex != 0 {
+		t.Fatalf("selection changed on a lookup failure: %+v", request)
 	}
 }

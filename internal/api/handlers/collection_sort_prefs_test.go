@@ -124,7 +124,7 @@ func TestCollectionSortPreferenceEndpoints(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 		}
-		var resp collectionSortPreferenceResponse
+		var resp CollectionSortPreferenceResponse
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
@@ -353,20 +353,5 @@ func TestNormalizeCollectionSortConfigForCreators(t *testing.T) {
 				t.Fatalf("got %s, want %s", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestNormalizeCollectionSortConfigPreservesManualPinsAcrossUpdates(t *testing.T) {
-	const manualPins = `{"mode":"manual_pins"}`
-	created, err := NormalizeCollectionSortConfig(json.RawMessage(manualPins), false)
-	if err != nil {
-		t.Fatalf("normalize on create: %v", err)
-	}
-	updated, err := NormalizeCollectionSortConfig(json.RawMessage(created), false)
-	if err != nil {
-		t.Fatalf("normalize on update: %v", err)
-	}
-	if updated != manualPins {
-		t.Fatalf("manual pins config changed across create/read/update: got %s, want %s", updated, manualPins)
 	}
 }

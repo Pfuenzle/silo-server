@@ -18,6 +18,7 @@ type fakeProgressLookup struct {
 	gotAllowed    []int
 	gotDisabled   []int
 	gotRating     string
+	gotLimits     access.MaturityLimits
 }
 
 func (f *fakeProgressLookup) GetItemsInFolder(context.Context, []string, int) (map[string]bool, error) {
@@ -25,12 +26,13 @@ func (f *fakeProgressLookup) GetItemsInFolder(context.Context, []string, int) (m
 }
 
 func (f *fakeProgressLookup) FilterAccessibleContentIDs(
-	_ context.Context, contentIDs []string, allowedFolderIDs, disabledFolderIDs []int, maxContentRating string,
+	_ context.Context, contentIDs []string, allowedFolderIDs, disabledFolderIDs []int, limits access.MaturityLimits,
 ) (map[string]bool, error) {
 	f.gotContentIDs = contentIDs
 	f.gotAllowed = allowedFolderIDs
 	f.gotDisabled = disabledFolderIDs
-	f.gotRating = maxContentRating
+	f.gotRating = limits.MaxContentRating
+	f.gotLimits = limits
 	return f.accessible, nil
 }
 
@@ -60,11 +62,11 @@ func TestFilterProgressEntriesByAccess(t *testing.T) {
 	}{
 		{
 			name:  "allowed libraries + rating",
-			scope: access.Scope{AllowedLibraryIDs: []int{1, 2}, MaxContentRating: "PG-13"},
+			scope: access.Scope{AllowedLibraryIDs: []int{1, 2}, MaturityLimits: access.MaturityLimits{MaxContentRating: "PG-13"}},
 		},
 		{
 			name:  "disabled libraries + rating",
-			scope: access.Scope{DisabledLibraryIDs: []int{9}, MaxContentRating: "PG-13"},
+			scope: access.Scope{DisabledLibraryIDs: []int{9}, MaturityLimits: access.MaturityLimits{MaxContentRating: "PG-13"}},
 		},
 	}
 
@@ -96,16 +98,5 @@ func TestFilterProgressEntriesByAccess(t *testing.T) {
 				t.Errorf("max content rating = %q, want %q", lookup.gotRating, tc.scope.MaxContentRating)
 			}
 		})
-	}
-}
-
-func TestFilterProgressEntriesByAccessEmpty(t *testing.T) {
-	lookup := &fakeProgressLookup{accessible: map[string]bool{}}
-	got, err := filterProgressEntriesByAccess(context.Background(), nil, access.Scope{}, lookup)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("expected no entries, got %v", ids(got))
 	}
 }

@@ -1,19 +1,26 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  api,
-  apiBlob,
-  apiWithProfileRequestContext,
   bootstrapAccessToken,
-  captureProfileRequestContext,
   getAccessToken,
-  getProfileToken,
-  getPersonCatalogItems,
-  onProfileUnverified,
+  getAuthContextVersion,
+  lastRefreshFailureWasTransient,
+  onRoleChanged,
+  onSessionRejected,
+  refreshAuthentication,
+  SessionRefreshUnavailableError,
   setAccessToken,
-  setProfileId,
-  setProfileToken,
   setRefreshToken,
 } from "./client";
+import { API_READ_TIMEOUT_MS } from "./requestDeadline";
+import { v2 } from "./v2/request";
+import { storage } from "../utils/storage";
+
+function refreshedTokens(accessToken: string, refreshToken: string): Response {
+  return new Response(
+    JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, expires_in: 3600 }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  );
+}
 
 describe("bootstrapAccessToken", () => {
   beforeEach(() => {
@@ -44,136 +51,97 @@ describe("bootstrapAccessToken", () => {
     setRefreshToken(null);
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    setAccessToken(null);
+    setRefreshToken(null);
+  });
+
   it("refreshes the access token before protected requests on startup", async () => {
     setRefreshToken("fake");
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
-      expect(String(input)).toBe("/api/v1/auth/refresh");
-      return new Response(
-        JSON.stringify({
-          access_token: "dummy",
-          refresh_token: "example",
-          expires_in: 3600,
-        }),
-        {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        },
-      );
+      expect(String(input)).toBe("/api/v2/auth/refresh");
+      return refreshedTokens("dummy", "example");
     });
+    vi.stubGlobal("fetch", fetchMock);
+    const signedOutContext = getAuthContextVersion();
 
-    await expect(bootstrapAccessToken(fetchMock)).resolves.toBe(true);
+    await expect(bootstrapAccessToken()).resolves.toBe(true);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(getAccessToken()).toBe("dummy");
     expect(localStorage.getItem("refresh_token")).toBe("example");
+    // Establishing a session is an authority change, unlike a token rotation.
+    expect(getAuthContextVersion()).not.toBe(signedOutContext);
   });
 
   it("does not refresh when an access token is already present", async () => {
     setAccessToken("sample");
     setRefreshToken("fake");
     const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
 
-    await expect(bootstrapAccessToken(fetchMock)).resolves.toBe(true);
+    await expect(bootstrapAccessToken()).resolves.toBe(true);
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(getAccessToken()).toBe("sample");
   });
-});
 
-describe("getPersonCatalogItems", () => {
-  it("requests person filmography through the catalog API", async () => {
-    Object.defineProperty(globalThis, "sessionStorage", {
-      value: {
-        getItem: () => null,
-        setItem: () => {},
-        removeItem: () => {},
-        clear: () => {},
-      },
-      configurable: true,
-    });
-
-    const fetchMock = vi.fn<typeof fetch>(async (input) => {
-      expect(String(input)).toBe("/api/v1/catalog?source=person&person_id=123&limit=24&offset=0");
-      return new Response(
-        JSON.stringify({
-          total: 0,
-          has_more: false,
-          items: [],
+  it("shares one refresh with a request that meets a 401 during the restore", async () => {
+    setRefreshToken("stored");
+    let finishRefresh!: (response: Response) => void;
+    const fetchMock = vi.fn<typeof fetch>(
+      () =>
+        new Promise<Response>((resolve) => {
+          finishRefresh = resolve;
         }),
-        {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        },
-      );
-    });
-
+    );
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(getPersonCatalogItems("123", undefined, 24, 0)).resolves.toEqual({
-      total: 0,
-      has_more: false,
-      items: [],
-    });
+    const restore = bootstrapAccessToken();
+    const joined = refreshAuthentication();
+    finishRefresh(refreshedTokens("fresh", "rotated"));
 
+    await expect(Promise.all([restore, joined])).resolves.toEqual([true, true]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(getAccessToken()).toBe("fresh");
+  });
+
+  it("holds a request sent during the restore until the restored token exists", async () => {
+    setRefreshToken("stored");
+    let finishRefresh!: (response: Response) => void;
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      if (String(input) === "/api/v2/auth/refresh") {
+        return new Promise<Response>((resolve) => {
+          finishRefresh = resolve;
+        });
+      }
+      const headers = init?.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer fresh");
+      return Response.json({ items: [], avatar_upload_enabled: false });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const restore = bootstrapAccessToken();
+    const profiles = v2("GET /api/v2/profiles");
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    finishRefresh(refreshedTokens("fresh", "rotated"));
+
+    await expect(restore).resolves.toBe(true);
+    await expect(profiles).resolves.toEqual({ items: [], avatar_upload_enabled: false });
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "/api/v2/auth/refresh",
+      "/api/v2/profiles",
+    ]);
   });
 });
 
-describe("client helper inventory", () => {
-  it("does not expose the legacy person-items helper anymore", async () => {
-    const clientModule = await import("./client");
+describe("session rejection", () => {
+  const rejected = vi.fn();
 
-    expect(clientModule).not.toHaveProperty("getPersonItems");
-  });
-});
-
-describe("apiBlob", () => {
   beforeEach(() => {
-    Object.defineProperty(globalThis, "sessionStorage", {
-      value: {
-        getItem: () => null,
-        setItem: () => {},
-        removeItem: () => {},
-        clear: () => {},
-      },
-      configurable: true,
-    });
-  });
-
-  it("rejects responses whose Content-Length exceeds the in-memory cap", async () => {
-    const fetchMock = vi.fn<typeof fetch>(async () => {
-      const res = new Response("x", { status: 200 });
-      // 3 GiB; Response normally derives Content-Length from the body, so
-      // override the header lookup instead of materializing a huge body.
-      vi.spyOn(res.headers, "get").mockImplementation((name) =>
-        name.toLowerCase() === "content-length" ? String(3 * 1024 * 1024 * 1024) : null,
-      );
-      return res;
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(apiBlob("/ebooks/abc/files/1/read")).rejects.toMatchObject({
-      name: "ApiClientError",
-      code: "response_too_large",
-      message: expect.stringContaining("too large to open in the browser"),
-    });
-  });
-
-  it("returns the blob when Content-Length is within the cap or missing", async () => {
-    const fetchMock = vi.fn<typeof fetch>(async () => {
-      const res = new Response("epub-bytes", { status: 200 });
-      vi.spyOn(res.headers, "get").mockReturnValue(null);
-      return res;
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const blob = await apiBlob("/ebooks/abc/files/1/read");
-    await expect(blob.text()).resolves.toBe("epub-bytes");
-  });
-});
-
-describe("api", () => {
-  it("keeps the originating profile isolated when retrying after token refresh", async () => {
     const localStorageState = new Map<string, string>();
     Object.defineProperty(globalThis, "localStorage", {
       value: {
@@ -194,459 +162,281 @@ describe("api", () => {
       } satisfies Storage,
       configurable: true,
     });
-    Object.defineProperty(globalThis, "sessionStorage", {
-      value: {
-        getItem: () => null,
-        setItem: () => {},
-        removeItem: () => {},
-        clear: () => {},
-      },
-      configurable: true,
-    });
-    setAccessToken("old");
-    setRefreshToken("old");
-    setProfileId("profile-old");
-    setProfileToken("old");
-    const profileUnverified = vi.fn();
-    onProfileUnverified(profileUnverified);
-
-    let protectedRequestCount = 0;
-    const fetchMock = vi.fn<typeof fetch>(async (input) => {
-      const path = String(input);
-      if (path === "/api/v1/auth/refresh") {
-        // Model a household profile switch while refresh is in flight.
-        setProfileId("profile-new");
-        setProfileToken("new");
-        return new Response(
-          JSON.stringify({
-            access_token: "new",
-            refresh_token: "new",
-            expires_in: 3600,
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
-      }
-      protectedRequestCount += 1;
-      return protectedRequestCount === 1
-        ? new Response(null, { status: 401 })
-        : new Response(
-            JSON.stringify({
-              error: "profile_unverified",
-              message: "Profile verification required.",
-            }),
-            { status: 403, headers: { "Content-Type": "application/json" } },
-          );
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(
-      api("/settings/values/ui.library_page_state?scope=profile_device", {
-        method: "PUT",
-        body: JSON.stringify({ value: { version: 1, libraries: {} } }),
-      }),
-    ).rejects.toMatchObject({ status: 403, code: "profile_unverified" });
-
-    const requestCalls = fetchMock.mock.calls.filter(
-      ([input]) => String(input) !== "/api/v1/auth/refresh",
-    );
-    expect(requestCalls).toHaveLength(2);
-    const firstHeaders = requestCalls[0]?.[1]?.headers as Record<string, string>;
-    const retryHeaders = requestCalls[1]?.[1]?.headers as Record<string, string>;
-    expect(firstHeaders).toMatchObject({
-      Authorization: "Bearer old",
-      "X-Profile-Id": "profile-old",
-      "X-Profile-Token": "old",
-    });
-    expect(retryHeaders).toMatchObject({
-      Authorization: "Bearer new",
-      "X-Profile-Id": "profile-old",
-      "X-Profile-Token": "old",
-    });
-    expect(localStorage.getItem("profile_id")).toBe("profile-new");
-    expect(localStorage.getItem("profile_token")).toBe("new");
-    expect(profileUnverified).not.toHaveBeenCalled();
-    onProfileUnverified(null);
+    setAccessToken(null);
+    setRefreshToken(null);
+    rejected.mockReset();
+    onSessionRejected(rejected);
   });
 
-  it("preserves an explicitly captured profile identity", async () => {
-    Object.defineProperty(globalThis, "sessionStorage", {
-      value: {
-        getItem: () => null,
-        setItem: () => {},
-        removeItem: () => {},
-        clear: () => {},
-      },
-      configurable: true,
-    });
-    setProfileId("profile-new");
-    const fetchMock = vi.fn<typeof fetch>(
-      async () =>
-        new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    await api("/test", { headers: { "X-Profile-Id": "profile-old" } });
-
-    const headers = fetchMock.mock.calls[0]![1]!.headers as Record<string, string>;
-    expect(headers["X-Profile-Id"]).toBe("profile-old");
+  afterEach(() => {
+    onSessionRejected(null);
+    vi.unstubAllGlobals();
+    setAccessToken(null);
+    setRefreshToken(null);
   });
 
-  it("preserves the PIN token captured with an explicit profile identity", async () => {
-    Object.defineProperty(globalThis, "sessionStorage", {
-      value: {
-        getItem: () => null,
-        setItem: () => {},
-        removeItem: () => {},
-        clear: () => {},
-      },
-      configurable: true,
-    });
-    setProfileId("profile-new");
-    setProfileToken("dummy");
-    const fetchMock = vi.fn<typeof fetch>(
-      async () =>
-        new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
+  function refreshProblem(status: number, id: string): Response {
+    return Response.json(
+      { type: `https://siloserver.org/docs/api/v2/problems/${id}`, title: id, status },
+      { status, headers: { "Content-Type": "application/problem+json" } },
+    );
+  }
+
+  // A signed-in request meets a 401, and the refresh answers with `status` and
+  // the problem `id`.
+  function signedInRequestWithRefresh(status: number, id: string) {
+    setAccessToken("active");
+    setRefreshToken("stored");
+    const fetchMock = vi.fn<typeof fetch>(async (input) =>
+      String(input) === "/api/v2/auth/refresh"
+        ? refreshProblem(status, id)
+        : refreshProblem(401, "authentication_required"),
     );
     vi.stubGlobal("fetch", fetchMock);
+    return v2("GET /api/v2/profiles").catch(() => undefined);
+  }
 
-    try {
-      await api("/test", {
-        headers: {
-          "X-Profile-Id": "profile-old",
-          "X-Profile-Token": "fake",
-        },
-      });
-
-      const headers = fetchMock.mock.calls[0]![1]!.headers as Record<string, string>;
-      expect(headers["X-Profile-Id"]).toBe("profile-old");
-      expect(headers["X-Profile-Token"]).toBe("fake");
-    } finally {
-      setProfileToken(null);
-    }
-  });
-
-  it("safely refreshes a captured request without rebasing its profile authority", async () => {
-    Object.defineProperty(globalThis, "sessionStorage", {
-      value: {
-        getItem: () => null,
-        setItem: () => {},
-        removeItem: () => {},
-        clear: () => {},
-      },
-      configurable: true,
-    });
-    setAccessToken("fake");
-    setProfileId("profile-old");
-    setProfileToken("fake");
-    setRefreshToken("dummy");
-    const snapshot = captureProfileRequestContext();
-    expect(snapshot).not.toBeNull();
-    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
-      const url = String(input);
-      if (url === "/api/v1/auth/refresh") {
-        expect(JSON.parse(String(init?.body))).toEqual({ refresh_token: "dummy" });
-        return Response.json({
-          access_token: "example",
-          refresh_token: "sample",
-          expires_in: 3600,
-        });
-      }
-      const headers = init?.headers as Record<string, string>;
-      expect(headers["X-Profile-Id"]).toBe("profile-old");
-      expect(headers["X-Profile-Token"]).toBe("fake");
-      if (headers.Authorization === "Bearer fake") {
-        return Response.json({ error: "unauthorized", message: "expired" }, { status: 401 });
-      }
-      expect(headers.Authorization).toBe("Bearer example");
-      return Response.json({ ok: true });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    try {
-      await expect(
-        apiWithProfileRequestContext("/test", snapshot!, { method: "PUT" }),
-      ).resolves.toEqual({ ok: true });
-
-      expect(fetchMock).toHaveBeenCalledTimes(3);
-      expect(getAccessToken()).toBe("example");
-      expect(localStorage.getItem("refresh_token")).toBe("sample");
-    } finally {
-      setRefreshToken(null);
-      setProfileToken(null);
-      setAccessToken(null);
-    }
-  });
-
-  it("clears the active PIN when its captured profile authority is rejected", async () => {
-    setAccessToken("fake");
-    setProfileId("profile-old");
-    setProfileToken("pin-old");
-    const snapshot = captureProfileRequestContext();
-    expect(snapshot).not.toBeNull();
-    const listener = vi.fn();
-    onProfileUnverified(listener);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn<typeof fetch>(async () =>
-        Response.json({ error: "profile_unverified", message: "PIN required" }, { status: 403 }),
-      ),
-    );
-
-    try {
-      await expect(apiWithProfileRequestContext("/test", snapshot!)).rejects.toMatchObject({
-        status: 403,
-        code: "profile_unverified",
-      });
-      expect(getProfileToken()).toBeNull();
-      expect(listener).toHaveBeenCalledOnce();
-    } finally {
-      onProfileUnverified(null);
-      setProfileToken(null);
-      setProfileId(null);
-      setAccessToken(null);
-    }
+  it("reports a signed-in session whose refresh the server answers session_expired", async () => {
+    await signedInRequestWithRefresh(401, "session_expired");
+    expect(rejected).toHaveBeenCalledTimes(1);
   });
 
   it.each([
-    {
-      authorityChange: "active profile",
-      changeAuthority: () => {
-        setProfileId("profile-new");
-        setProfileToken("pin-new");
-      },
-      expectedToken: "pin-new",
-    },
-    {
-      authorityChange: "active PIN",
-      changeAuthority: () => setProfileToken("pin-new"),
-      expectedToken: "pin-new",
-    },
-  ])(
-    "does not clear the $authorityChange for a delayed rejection of captured authority",
-    async ({ changeAuthority, expectedToken }) => {
-      setAccessToken("fake");
-      setProfileId("profile-old");
-      setProfileToken("pin-old");
-      const snapshot = captureProfileRequestContext();
-      expect(snapshot).not.toBeNull();
-      const listener = vi.fn();
-      onProfileUnverified(listener);
-      let resolveResponse!: (response: Response) => void;
-      const response = new Promise<Response>((resolve) => {
-        resolveResponse = resolve;
-      });
-      const fetchMock = vi.fn<typeof fetch>(() => response);
-      vi.stubGlobal("fetch", fetchMock);
+    // The server also answers its own failures (a database error) this way.
+    [401, "invalid_token"],
+    [400, "validation_failed"],
+    [429, "rate_limited"],
+    [500, "internal_error"],
+    [503, "dependency_unavailable"],
+  ])("keeps the session when the refresh fails with %i %s", async (status, id) => {
+    await signedInRequestWithRefresh(status, id);
+    expect(rejected).not.toHaveBeenCalled();
+  });
 
-      try {
-        const request = apiWithProfileRequestContext("/test", snapshot!);
-        await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
-        changeAuthority();
-        resolveResponse(
-          Response.json({ error: "profile_unverified", message: "PIN required" }, { status: 403 }),
-        );
+  it("keeps the session when a refused refresh has no problem body", async () => {
+    setAccessToken("active");
+    setRefreshToken("stored");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async () => new Response("Unauthorized", { status: 401 })),
+    );
+    await v2("GET /api/v2/profiles").catch(() => undefined);
+    expect(rejected).not.toHaveBeenCalled();
+  });
 
-        await expect(request).rejects.toMatchObject({
-          status: 403,
-          code: "profile_unverified",
-        });
-        expect(getProfileToken()).toBe(expectedToken);
-        expect(listener).not.toHaveBeenCalled();
-      } finally {
-        onProfileUnverified(null);
-        setProfileToken(null);
-        setProfileId(null);
-        setAccessToken(null);
-      }
-    },
-  );
+  it("keeps the session when the refresh cannot reach the server", async () => {
+    setAccessToken("active");
+    setRefreshToken("stored");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input) => {
+        if (String(input) === "/api/v2/auth/refresh") throw new TypeError("offline");
+        return Response.json({ error: "invalid_token" }, { status: 401 });
+      }),
+    );
+    await v2("GET /api/v2/profiles").catch(() => undefined);
+    expect(rejected).not.toHaveBeenCalled();
+  });
 
-  it.each(["account", "origin"] as const)(
-    "cancels captured retry when the %s changes during refresh",
-    async (changedContext) => {
-      Object.defineProperty(globalThis, "sessionStorage", {
-        value: {
-          getItem: () => null,
-          setItem: () => {},
-          removeItem: () => {},
-          clear: () => {},
-        },
-        configurable: true,
-      });
-      const originalLocation = globalThis.location;
-      if (changedContext === "origin") {
-        Object.defineProperty(globalThis, "location", {
-          value: { origin: "https://server-old.example" },
-          configurable: true,
-        });
-      }
-      setAccessToken("fake");
-      setProfileId("profile-old");
-      setProfileToken("fake");
-      setRefreshToken("dummy");
-      const snapshot = captureProfileRequestContext();
-      expect(snapshot).not.toBeNull();
-
-      let resolveRefresh!: (response: Response) => void;
-      const refreshResponse = new Promise<Response>((resolve) => {
-        resolveRefresh = resolve;
-      });
-      const fetchMock = vi.fn<typeof fetch>(async (input) => {
-        if (String(input) === "/api/v1/auth/refresh") return refreshResponse;
-        return Response.json({ error: "unauthorized", message: "expired" }, { status: 401 });
-      });
-      vi.stubGlobal("fetch", fetchMock);
-
-      try {
-        const request = apiWithProfileRequestContext("/test", snapshot!, { method: "PUT" });
-        await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-        if (changedContext === "account") {
-          setAccessToken("sample");
-          setRefreshToken("placeholder");
-        } else {
-          Object.defineProperty(globalThis, "location", {
-            value: { origin: "https://server-new.example" },
-            configurable: true,
-          });
-        }
-        resolveRefresh(
-          Response.json({
-            access_token: "example",
-            refresh_token: "redacted",
-            expires_in: 3600,
-          }),
-        );
-
-        await expect(request).rejects.toMatchObject({ name: "StaleApiRequestContextError" });
-        expect(fetchMock).toHaveBeenCalledTimes(2);
-        expect(getAccessToken()).toBe(changedContext === "account" ? "sample" : "fake");
-        expect(localStorage.getItem("refresh_token")).toBe(
-          changedContext === "account" ? "placeholder" : "dummy",
-        );
-      } finally {
-        if (changedContext === "origin") {
-          Object.defineProperty(globalThis, "location", {
-            value: originalLocation,
-            configurable: true,
-          });
-        }
-        setRefreshToken(null);
-        setProfileToken(null);
-        setAccessToken(null);
-      }
-    },
-  );
-
-  it("refuses a captured request after the account context changes", async () => {
-    Object.defineProperty(globalThis, "sessionStorage", {
-      value: {
-        getItem: () => null,
-        setItem: () => {},
-        removeItem: () => {},
-        clear: () => {},
-      },
-      configurable: true,
-    });
-    setAccessToken("fake");
-    setProfileId("profile-old");
-    setProfileToken("fake");
-    const snapshot = captureProfileRequestContext();
-    expect(snapshot).not.toBeNull();
-    setAccessToken("dummy");
-    setProfileId("profile-new");
-    setProfileToken("dummy");
-    const fetchMock = vi.fn<typeof fetch>();
-    vi.stubGlobal("fetch", fetchMock);
-
+  it("gives up on a refresh the server never answers and keeps the session", async () => {
+    vi.useFakeTimers();
     try {
-      await expect(apiWithProfileRequestContext("/test", snapshot!)).rejects.toMatchObject({
-        name: "StaleApiRequestContextError",
+      setAccessToken("active");
+      setRefreshToken("stored");
+      const fetchMock = vi.fn<typeof fetch>((input, init) => {
+        if (String(input) !== "/api/v2/auth/refresh") {
+          return Promise.resolve(refreshProblem(401, "authentication_required"));
+        }
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+            once: true,
+          });
+        });
       });
-      expect(fetchMock).not.toHaveBeenCalled();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const request = v2("GET /api/v2/profiles").then(
+        () => "resolved",
+        () => "rejected",
+      );
+      await vi.advanceTimersByTimeAsync(API_READ_TIMEOUT_MS);
+      await expect(request).resolves.toBe("rejected");
+      expect(rejected).not.toHaveBeenCalled();
+      expect(getAccessToken()).toBe("active");
+      expect(vi.getTimerCount()).toBe(0);
+
+      // The abandoned exchange no longer holds the refresh single-flight.
+      const refreshCalls = () =>
+        fetchMock.mock.calls.filter(([input]) => String(input) === "/api/v2/auth/refresh").length;
+      expect(refreshCalls()).toBe(1);
+      void refreshAuthentication();
+      expect(refreshCalls()).toBe(2);
     } finally {
-      setProfileToken(null);
+      vi.useRealTimers();
     }
   });
 
-  it("keeps the browser client family canonical", async () => {
-    Object.defineProperty(globalThis, "sessionStorage", {
-      value: {
-        getItem: () => null,
-        setItem: () => {},
-        removeItem: () => {},
-        clear: () => {},
-      },
-      configurable: true,
-    });
-    const fetchMock = vi.fn<typeof fetch>(
-      async () =>
-        new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
+  it("leaves a refused boot restore to the restore path", async () => {
+    setRefreshToken("revoked");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async () => refreshProblem(401, "session_expired")),
+    );
+    await expect(bootstrapAccessToken()).resolves.toBe(false);
+    expect(rejected).not.toHaveBeenCalled();
+    expect(lastRefreshFailureWasTransient()).toBe(false);
+  });
+
+  it("does not take a 401 whose body the deadline cut off as a refusal", async () => {
+    vi.useFakeTimers();
+    try {
+      setRefreshToken("stored");
+      // The status line arrives, then the problem body stalls until the
+      // refresh deadline aborts the exchange.
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (_input, init) => {
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), {
+                once: true,
+              });
+            },
+          });
+          return new Response(body, {
+            status: 401,
+            headers: { "Content-Type": "application/problem+json" },
+          });
         }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
+      );
 
-    await api("/test", { headers: { "x-silo-client-family": "tv" } });
+      const restore = bootstrapAccessToken();
+      await vi.advanceTimersByTimeAsync(API_READ_TIMEOUT_MS);
 
-    const headers = fetchMock.mock.calls[0]![1]!.headers as Record<string, string>;
-    expect(headers["X-Silo-Client-Family"]).toBe("web");
-    expect(
-      Object.keys(headers).filter((key) => key.toLowerCase() === "x-silo-client-family"),
-    ).toEqual(["X-Silo-Client-Family"]);
+      await expect(restore).resolves.toBe(false);
+      // The boot restore keeps the stored session for a transient failure.
+      expect(lastRefreshFailureWasTransient()).toBe(true);
+      expect(storage.get(storage.KEYS.REFRESH_TOKEN)).toBe("stored");
+
+      // A request whose 401 that refresh was answering fails as unavailable,
+      // not with the 401.
+      const fetchMock = vi.mocked(fetch);
+      const stalledRefresh = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation(async (input, init) =>
+        String(input) === "/api/v2/auth/refresh"
+          ? stalledRefresh(input, init)
+          : refreshProblem(401, "authentication_required"),
+      );
+      const request = v2("GET /api/v2/profiles", { timeoutMs: false }).catch(
+        (error: unknown) => error,
+      );
+      await vi.advanceTimersByTimeAsync(API_READ_TIMEOUT_MS);
+      expect(await request).toBeInstanceOf(SessionRefreshUnavailableError);
+      expect(rejected).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("forwards AbortSignal from options to fetch", async () => {
-    Object.defineProperty(globalThis, "sessionStorage", {
-      value: {
-        getItem: () => null,
-        setItem: () => {},
-        removeItem: () => {},
-        clear: () => {},
-      },
-      configurable: true,
-    });
-
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
+  it("ignores a refusal for a session that was replaced during the refresh", async () => {
+    setAccessToken("old");
+    setRefreshToken("old-refresh");
+    let finishRefresh!: (response: Response) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(
+        () =>
+          new Promise<Response>((resolve) => {
+            finishRefresh = resolve;
+          }),
+      ),
     );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const controller = new AbortController();
-    await api("/test", { signal: controller.signal });
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const call = fetchMock.mock.calls[0]!;
-    const init = call[1] as RequestInit;
-    expect(init.signal).toBe(controller.signal);
+    const refresh = refreshAuthentication();
+    setAccessToken("new-account");
+    finishRefresh(refreshProblem(401, "session_expired"));
+    await expect(refresh).resolves.toBe(false);
+    expect(rejected).not.toHaveBeenCalled();
   });
 
-  it("treats 202 responses with an empty body as success", async () => {
-    Object.defineProperty(globalThis, "sessionStorage", {
-      value: {
-        getItem: () => null,
-        setItem: () => {},
-        removeItem: () => {},
-        clear: () => {},
-      },
-      configurable: true,
+  describe("after a role change", () => {
+    const roleChanged = vi.fn();
+
+    beforeEach(() => {
+      roleChanged.mockReset();
+      onRoleChanged(roleChanged);
     });
 
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
-    vi.stubGlobal("fetch", fetchMock);
+    afterEach(() => onRoleChanged(null));
 
-    await expect(
-      api("/webhook-sync/connections/abc/webhook/rotate", { method: "POST" }),
-    ).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Requests carrying `stale` are refused with token_refresh_required; the
+    // refresh answers with `refresh`.
+    function staleTokenServer(refresh: () => Response) {
+      const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+        if (String(input) === "/api/v2/auth/refresh") return refresh();
+        const authorization = new Headers(init?.headers).get("Authorization");
+        return authorization === "Bearer stale"
+          ? refreshProblem(401, "token_refresh_required")
+          : Response.json({ items: [] });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      return fetchMock;
+    }
+
+    it("refreshes, retries once and keeps the session", async () => {
+      setAccessToken("stale");
+      setRefreshToken("stored");
+      const fetchMock = staleTokenServer(() => refreshedTokens("fresh", "rotated"));
+      await expect(v2("GET /api/v2/profiles")).resolves.toBeDefined();
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(getAccessToken()).toBe("fresh");
+      expect(localStorage.getItem(storage.KEYS.REFRESH_TOKEN)).toBe("rotated");
+      expect(rejected).not.toHaveBeenCalled();
+      expect(roleChanged).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports the change once for concurrent requests", async () => {
+      setAccessToken("stale");
+      setRefreshToken("stored");
+      const fetchMock = staleTokenServer(() => refreshedTokens("fresh", "rotated"));
+      await Promise.all([v2("GET /api/v2/profiles"), v2("GET /api/v2/profiles")]);
+      const refreshes = fetchMock.mock.calls.filter(
+        ([input]) => String(input) === "/api/v2/auth/refresh",
+      );
+      expect(refreshes).toHaveLength(1);
+      expect(roleChanged).toHaveBeenCalledTimes(1);
+      expect(rejected).not.toHaveBeenCalled();
+    });
+
+    it("signs out only when the refresh itself is refused with session_expired", async () => {
+      setAccessToken("stale");
+      setRefreshToken("stored");
+      staleTokenServer(() => refreshProblem(401, "session_expired"));
+      await v2("GET /api/v2/profiles").catch(() => undefined);
+      expect(rejected).toHaveBeenCalledTimes(1);
+      expect(roleChanged).not.toHaveBeenCalled();
+    });
+  });
+
+  it("ignores a refusal after another tab stored a new session", async () => {
+    setAccessToken("stale-tab");
+    setRefreshToken("old-refresh");
+    let finishRefresh!: (response: Response) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(
+        () =>
+          new Promise<Response>((resolve) => {
+            finishRefresh = resolve;
+          }),
+      ),
+    );
+    const refresh = refreshAuthentication();
+    // Another tab signs in and writes its refresh token to shared storage;
+    // this tab's in-memory access token is untouched.
+    localStorage.setItem(storage.KEYS.REFRESH_TOKEN, "other-tab-refresh");
+    finishRefresh(refreshProblem(401, "session_expired"));
+    await expect(refresh).resolves.toBe(false);
+    expect(rejected).not.toHaveBeenCalled();
+    expect(localStorage.getItem(storage.KEYS.REFRESH_TOKEN)).toBe("other-tab-refresh");
   });
 });

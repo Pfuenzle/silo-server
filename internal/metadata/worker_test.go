@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1760,7 +1761,14 @@ func TestQueuedMatchIdentityAlternatesRecoversMovieFilenameAndReleaseFolder(t *t
 			file: &models.MediaFile{FilePath: "/movies/Jurassic.World.2015.1080p.WEB-DL-GROUP/291684abcdef012345.mkv"},
 			skeleton: &skeletonResult{Title: "291684abcdef012345", Type: "movie",
 				ObservedRootPath: "/movies/Jurassic.World.2015.1080p.WEB-DL-GROUP"},
-			wantTitle: "Jurassic World", wantYear: 2015, wantSource: "release_folder",
+			wantTitle: "Jurassic World", wantYear: 2015, wantSource: "current_path",
+		},
+		{
+			name: "loose numeric title keeps the complete title",
+			file: &models.MediaFile{FilePath: "/movies/Example Runner 2049.mkv"},
+			skeleton: &skeletonResult{Title: "Example Runner", Year: 2049, Type: "movie",
+				ObservedRootPath: "/movies/Example Runner 2049"},
+			wantTitle: "Example Runner 2049", wantYear: 0, wantSource: "numeric_title",
 		},
 	}
 
@@ -1774,5 +1782,136 @@ func TestQueuedMatchIdentityAlternatesRecoversMovieFilenameAndReleaseFolder(t *t
 			}
 			t.Fatalf("alternate identities = %#v, want %q/%d from %s", got, tt.wantTitle, tt.wantYear, tt.wantSource)
 		})
+	}
+}
+
+func TestSeriesRootRetryFailurePreservesMatchedItem(t *testing.T) {
+	for _, providerError := range []bool{false, true} {
+		t.Run(fmt.Sprint(providerError), func(t *testing.T) {
+			h := newTestHarness()
+			ctx := t.Context()
+			const contentID = "series-existing-match"
+			const root = "/shows/Example Show"
+			h.service.folderRepo = &fakeWorkerFolderRepo{folders: map[int]*models.MediaFolder{10: {ID: 10, Type: "series", Enabled: true}}}
+			if err := h.itemRepo.Upsert(ctx, &models.MediaItem{ContentID: contentID, Status: "matched", Title: "Example Show", Type: "series", TvdbID: "123"}); err != nil {
+				t.Fatal(err)
+			}
+			file := &models.MediaFile{ID: 1, MediaFolderID: 10, FilePath: root + "/Season 01/Example.Show.S01E01.mkv", ObservedRootPath: root, GroupKeyVersion: 1, ContentGroupKey: "v1|series|example_show|0", ContentID: contentID, BaseTitle: "Example Show", BaseType: "series"}
+			h.fileRepo.setGroupFiles(10, 1, file.ContentGroupKey, file)
+			h.fileRepo.contentIDs[file.ID] = contentID
+			called := false
+			h.service.hooks.process = func(context.Context, ProcessRequest) (*ProcessResult, error) {
+				called = true
+				if providerError {
+					return nil, ErrMetadataNotFound
+				}
+				return &ProcessResult{Updated: false}, nil
+			}
+			job := models.SeriesRootMatchJob{MediaFolderID: 10, ObservedRootPath: root, SampleFilePath: file.FilePath, ObservedFileCount: 1, RerunRequested: true}
+			queue := newFakeSeriesQueueRepo(job)
+			worker := NewMatchWorker(h.service, h.fileRepo, 1, 10, 0)
+			worker.SetSeriesRootClaimer(queue, true)
+			if _, err := worker.processSeriesRoot(ctx, job, nil); err != nil {
+				t.Fatal(err)
+			}
+			if !called {
+				t.Fatal("expected provider retry")
+			}
+			item, err := h.itemRepo.GetByID(ctx, contentID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if item.Status != "matched" || item.TvdbID != "123" {
+				t.Fatalf("retry discarded existing match: status=%s provider=%s", item.Status, item.TvdbID)
+			}
+			if _, deleted := queue.deleted["10:"+root]; deleted {
+				t.Fatal("failed retry must retain its queue entry")
+			}
+		})
+	}
+}
+
+func TestMatchFolderConfigDoesNotCacheLookupFailure(t *testing.T) {
+	h := newTestHarness()
+	folders := &fakeWorkerFolderRepo{folders: map[int]*models.MediaFolder{}}
+	h.service.folderRepo = folders
+	worker := NewMatchWorker(h.service, h.fileRepo, 1, 1, 0)
+	cache := &sync.Map{}
+	if config := worker.matchFolderConfig(t.Context(), 10, cache); config.enabled {
+		t.Fatalf("failed lookup matched without library roots: %+v", config)
+	}
+	folders.folders[10] = &models.MediaFolder{ID: 10, Enabled: true, Paths: []string{"/tv"}}
+	if config := worker.matchFolderConfig(t.Context(), 10, cache); !config.enabled || len(config.paths) != 1 {
+		t.Fatalf("transient lookup failure was cached for the batch: %+v", config)
+	}
+}
+
+// TestRetryUnmatchedItems_SkipsItemsRekeyedSinceListing covers the scan retry
+// racing the series-root matcher: an item listed as unmatched is matched and
+// rekeyed (local-… to series-tvdb-…) before the retry loads it, or while the
+// retry waits on providers. That item is resolved and must not be counted as
+// retried or still unmatched, while genuine failures still count.
+func TestRetryUnmatchedItems_SkipsItemsRekeyedSinceListing(t *testing.T) {
+	h := newTestHarness()
+	ctx := context.Background()
+
+	const (
+		rekeyed    = "local-rekeyed"
+		midProcess = "local-rekeyed-mid-process"
+		matched    = "local-matched"
+		noMatch    = "local-placeholder"
+		failing    = "local-provider-error"
+		danglingNF = "local-dangling-not-found"
+	)
+	for _, id := range []string{midProcess, matched, noMatch, failing, danglingNF} {
+		h.itemRepo.items[id] = &models.MediaItem{ContentID: id, Type: "series", Status: "unmatched"}
+	}
+	// rekeyed is listed but already gone from media_items, as after a
+	// concurrent series-root match replaced it with series-tvdb-296762.
+	h.itemRepo.items["series-tvdb-296762"] = &models.MediaItem{ContentID: "series-tvdb-296762", Type: "series", Status: "matched"}
+
+	var processed []string
+	h.service.hooks.process = func(_ context.Context, req ProcessRequest) (*ProcessResult, error) {
+		processed = append(processed, req.ContentID)
+		switch req.ContentID {
+		case rekeyed:
+			return nil, fmt.Errorf("loading existing item: %w", catalog.ErrItemNotFound)
+		case midProcess:
+			// The matcher renames the item while this retry waits on
+			// providers, and the retry then finds no match.
+			h.itemRepo.mu.Lock()
+			delete(h.itemRepo.items, midProcess)
+			h.itemRepo.mu.Unlock()
+			return &ProcessResult{Updated: false}, nil
+		case matched:
+			return &ProcessResult{Updated: true}, nil
+		case noMatch:
+			return &ProcessResult{Updated: false}, nil
+		case failing:
+			return nil, errors.New("provider unavailable")
+		case danglingNF:
+			// A not-found for some other row while the listed item still
+			// exists is a real failure, not a resolved item.
+			return nil, fmt.Errorf("loading parent: %w", catalog.ErrItemNotFound)
+		}
+		t.Fatalf("unexpected content id %q", req.ContentID)
+		return nil, nil
+	}
+
+	h.itemRepo.unmatchedIDs = []string{rekeyed, midProcess, matched, noMatch, failing, danglingNF}
+	worker := NewMatchWorker(h.service, h.fileRepo, 1, 10, 0)
+
+	retried, stillUnmatched, err := worker.RetryUnmatchedItemsByFolderAndPathPrefix(ctx, 1, "/media/tv")
+	if err != nil {
+		t.Fatalf("RetryUnmatchedItemsByFolderAndPathPrefix: %v", err)
+	}
+	if len(processed) != 6 {
+		t.Fatalf("processed = %v, want every listed item attempted", processed)
+	}
+	if retried != 4 {
+		t.Errorf("retried = %d, want 4 (rekeyed items excluded)", retried)
+	}
+	if stillUnmatched != 3 {
+		t.Errorf("stillUnmatched = %d, want 3 (placeholder, provider error, dangling not-found)", stillUnmatched)
 	}
 }

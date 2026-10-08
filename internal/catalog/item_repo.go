@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/Silo-Server/silo-server/internal/idgen"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/pathscope"
@@ -196,6 +197,13 @@ const fuzzyAugmentSimilarityFloor = 0.45
 // item queries. Shared by itemColumns, qualifiedItemColumns, and
 // qualifiedListItemColumns so the select lists can never drift from each
 // other or from scanItem.
+// Advisory column names, shared by every select list and scan-order check in
+// this package so a rename cannot drift between them.
+const (
+	advisoryAgeColumn    = "advisory_age"
+	advisorySourceColumn = "advisory_source"
+)
+
 var itemColumnNames = []string{
 	"content_id", "type", "title", "sort_title", "default_metadata_language", "original_title", "year", "genres",
 	"content_rating", "runtime", "overview", "tagline",
@@ -207,12 +215,14 @@ var itemColumnNames = []string{
 	"show_status",
 	"matched_at", "last_refreshed", "refresh_failures",
 	"episode_metadata_incomplete", "episode_metadata_last_checked_at", "locked_fields", "status", "created_at", "updated_at",
+	advisoryAgeColumn, advisorySourceColumn,
 }
 
 // nullableStringItemColumns are media_items columns that may hold NULL but
 // scan into plain (non-pointer) string fields on models.MediaItem, so select
 // lists coalesce them to ”.
 var nullableStringItemColumns = map[string]bool{
+	advisorySourceColumn:   true,
 	"poster_path":          true,
 	"poster_source_path":   true,
 	"poster_thumbhash":     true,
@@ -332,6 +342,8 @@ func scanItem(row pgx.Row) (*models.MediaItem, error) {
 		&item.Status,
 		&item.CreatedAt,
 		&item.UpdatedAt,
+		&item.AdvisoryAge,
+		&item.AdvisorySource,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -398,6 +410,8 @@ func listItemScanDests(item *models.MediaItem) []any {
 		&item.Status,
 		&item.CreatedAt,
 		&item.UpdatedAt,
+		&item.AdvisoryAge,
+		&item.AdvisorySource,
 	}
 }
 
@@ -492,9 +506,97 @@ func (r *ItemRepository) UpsertTx(ctx context.Context, tx pgx.Tx, item *models.M
 	return r.upsert(ctx, tx, item)
 }
 
+// InsertIfAbsent inserts a new media item and leaves an existing row with the
+// same content_id untouched. It reports whether this call inserted the row, so
+// concurrent creators of a deterministic content_id can tell the winner apart
+// without overwriting metadata another writer already stored.
+func (r *ItemRepository) InsertIfAbsent(ctx context.Context, item *models.MediaItem) (bool, error) {
+	if r.searchIndexEvents.disabledByActiveProvider() {
+		return r.writeItem(ctx, r.pool, item, false)
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin media item insert tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	inserted, err := r.writeItem(ctx, tx, item, false)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit media item insert tx: %w", err)
+	}
+	return inserted, nil
+}
+
+// SetStatusUnlessMatched sets an item's status and leaves a matched item
+// untouched. It reports whether a row changed, and returns ErrItemNotFound when
+// no item has contentID. The condition is part of the UPDATE, so a match
+// another writer stores at the same time is kept; reading the item and then
+// calling Upsert would write the stale copy over it.
+func (r *ItemRepository) SetStatusUnlessMatched(ctx context.Context, contentID, status string) (bool, error) {
+	if r.searchIndexEvents.disabledByActiveProvider() {
+		return r.setStatusUnlessMatched(ctx, r.pool, contentID, status)
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin media item status tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	changed, err := r.setStatusUnlessMatched(ctx, tx, contentID, status)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit media item status tx: %w", err)
+	}
+	return changed, nil
+}
+
+// setStatusUnlessMatched's outer SELECT reads the snapshot taken before the
+// UPDATE, so it finds an item the UPDATE changed as well as one it skipped.
+func (r *ItemRepository) setStatusUnlessMatched(ctx context.Context, querier itemStatusQuerier, contentID, status string) (bool, error) {
+	var exists, changed bool
+	err := querier.QueryRow(ctx, `
+		WITH updated AS (
+			UPDATE media_items
+			SET status = $2, updated_at = NOW()
+			WHERE content_id = $1 AND lower(trim(status)) <> 'matched'
+			RETURNING content_id
+		)
+		SELECT EXISTS (SELECT 1 FROM media_items WHERE content_id = $1), EXISTS (SELECT 1 FROM updated)`, contentID, status).Scan(&exists, &changed)
+	if err != nil {
+		return false, fmt.Errorf("setting media item status: %w", err)
+	}
+	if !exists {
+		return false, ErrItemNotFound
+	}
+	if !changed {
+		return false, nil
+	}
+	if err := r.searchIndexEvents.EnqueueUpsert(ctx, querier, contentID); err != nil {
+		return false, fmt.Errorf("enqueueing catalog search upsert: %w", err)
+	}
+	return true, nil
+}
+
+type itemStatusQuerier interface {
+	itemExecer
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 func (r *ItemRepository) upsert(ctx context.Context, execer itemExecer, item *models.MediaItem) error {
+	_, err := r.writeItem(ctx, execer, item, true)
+	return err
+}
+
+// writeItem inserts item and, when update is set, overwrites every mutable
+// field of an existing row. It reports whether a row was written.
+func (r *ItemRepository) writeItem(ctx context.Context, execer itemExecer, item *models.MediaItem, update bool) (bool, error) {
 	if item.ContentID == "" {
-		return fmt.Errorf("refusing to upsert media item with empty content_id")
+		return false, fmt.Errorf("refusing to write media item with empty content_id")
 	}
 	studios := nonNilStringSlice(item.Studios)
 	networks := nonNilStringSlice(item.Networks)
@@ -511,7 +613,9 @@ func (r *ItemRepository) upsert(ctx context.Context, execer itemExecer, item *mo
 			studios, networks, countries, keywords, original_language, release_date, first_air_date, last_air_date, air_time, air_timezone,
 			show_status,
 			matched_at, last_refreshed, refresh_failures,
-			episode_metadata_incomplete, episode_metadata_last_checked_at, status
+			episode_metadata_incomplete, episode_metadata_last_checked_at, status,
+			content_rating_age,
+			advisory_age, advisory_source
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8,
 			$9, $10, $11, $12,
@@ -522,8 +626,14 @@ func (r *ItemRepository) upsert(ctx context.Context, execer itemExecer, item *mo
 			$31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
 			$41,
 			$42, $43, $44,
-			$45, $46, $47
-		)
+			$45, $46, $47,
+			$48,
+			$49, $50
+		)`
+	conflict := `
+		ON CONFLICT (content_id) DO NOTHING`
+	if update {
+		conflict = `
 		ON CONFLICT (content_id) DO UPDATE SET
 			type = EXCLUDED.type,
 			title = EXCLUDED.title,
@@ -571,9 +681,18 @@ func (r *ItemRepository) upsert(ctx context.Context, execer itemExecer, item *mo
 			episode_metadata_incomplete = EXCLUDED.episode_metadata_incomplete,
 			episode_metadata_last_checked_at = EXCLUDED.episode_metadata_last_checked_at,
 			status = EXCLUDED.status,
+			content_rating_age = EXCLUDED.content_rating_age,
+			advisory_age = EXCLUDED.advisory_age,
+			advisory_source = EXCLUDED.advisory_source,
 			updated_at = NOW()`
+	}
 
-	_, err := execer.Exec(ctx, query,
+	// The stored age is derived here, never in SQL: access.Normalize is the one
+	// ladder, and content_rating stays the verbatim provider string.
+	contentRatingAge := access.StoredRating(item.ContentRating)
+	advisoryAge, advisorySource := models.AdvisoryColumns(item.Type, item.AdvisoryAge, item.AdvisorySource)
+
+	tag, err := execer.Exec(ctx, query+conflict,
 		item.ContentID,
 		item.Type,
 		item.Title,
@@ -621,16 +740,22 @@ func (r *ItemRepository) upsert(ctx context.Context, execer itemExecer, item *mo
 		item.EpisodeMetadataIncomplete,
 		item.EpisodeMetadataLastCheckedAt,
 		item.Status,
+		contentRatingAge,
+		advisoryAge,
+		advisorySource,
 	)
 	if err != nil {
-		return fmt.Errorf("upserting media item: %w", err)
+		return false, fmt.Errorf("writing media item: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
 	}
 
 	if err := r.searchIndexEvents.EnqueueUpsert(ctx, execer, item.ContentID); err != nil {
-		return fmt.Errorf("enqueueing catalog search upsert: %w", err)
+		return false, fmt.Errorf("enqueueing catalog search upsert: %w", err)
 	}
 
-	return nil
+	return true, nil
 }
 
 func nonNilStringSlice(values []string) []string {
@@ -644,6 +769,12 @@ func nonNilStringSlice(values []string) []string {
 func (r *ItemRepository) GetByID(ctx context.Context, contentID string) (*models.MediaItem, error) {
 	query := `SELECT ` + itemColumns + ` FROM media_items WHERE content_id = $1`
 	return scanItem(r.pool.QueryRow(ctx, query, contentID))
+}
+
+// GetByIDTx retrieves a media item within the caller's transaction.
+func (r *ItemRepository) GetByIDTx(ctx context.Context, tx pgx.Tx, contentID string) (*models.MediaItem, error) {
+	query := `SELECT ` + itemColumns + ` FROM media_items WHERE content_id = $1`
+	return scanItem(tx.QueryRow(ctx, query, contentID))
 }
 
 // GetByIDs retrieves multiple media items by their content IDs.
@@ -716,15 +847,66 @@ func (r *ItemRepository) buildGetByIDsWithAccessSQL(contentIDs []string, access 
 	args := []any{contentIDs}
 	argIdx := 2
 
-	var conditions []string
-	appendLibraryAccessConditions("mi.content_id", access, &conditions, &args, &argIdx)
-	applyAccessFilter("mi", AccessFilter{MaxContentRating: access.MaxContentRating, ExcludedMediaTypes: access.ExcludedMediaTypes}, &conditions, &args, &argIdx)
-	for _, c := range conditions {
+	for _, c := range itemAccessConditions(access, &args, &argIdx) {
 		sql += "\n            AND " + c
 	}
 
 	sql += " ORDER BY mi.content_id ASC"
 	return sql, args
+}
+
+// itemAccessConditions are the predicates over media_items mi that decide
+// whether the viewer may see an item addressed by ID: library access, the
+// maturity limits, and excluded media types.
+func itemAccessConditions(access AccessFilter, args *[]any, argIdx *int) []string {
+	var conditions []string
+	appendLibraryAccessConditions("mi.content_id", access, &conditions, args, argIdx)
+	applyAccessFilter("mi", AccessFilter{MaturityLimits: access.MaturityLimits, ExcludedMediaTypes: access.ExcludedMediaTypes}, &conditions, args, argIdx)
+	return conditions
+}
+
+// CountVisiblePersonalCollectionMembers counts, per collection, the members of
+// the account's hand-picked or imported personal collections that the viewer
+// can see, as their catalog view counts them. It ignores smart definitions and
+// display filters; CountPersonalCollections handles those collections.
+// Collections with no visible members are absent from the result. It reads the
+// Postgres user store's membership table, so callers must not use it for
+// collections kept elsewhere.
+func (r *ItemRepository) CountVisiblePersonalCollectionMembers(ctx context.Context, userID int, collectionIDs []string, access AccessFilter) (map[string]int, error) {
+	counts := make(map[string]int, len(collectionIDs))
+	if len(collectionIDs) == 0 || (access.AllowedLibraryIDs != nil && len(access.AllowedLibraryIDs) == 0) {
+		return counts, nil
+	}
+	sql, args := buildCountVisiblePersonalCollectionMembersSQL(userID, collectionIDs, access)
+	rows, err := r.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("counting visible personal collection members: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("scanning personal collection member count: %w", err)
+		}
+		counts[id] = n
+	}
+	return counts, rows.Err()
+}
+
+func buildCountVisiblePersonalCollectionMembersSQL(userID int, collectionIDs []string, access AccessFilter) (string, []any) {
+	sql := `SELECT upci.collection_id, COUNT(*)
+            FROM user_personal_collection_items upci
+            JOIN media_items mi ON mi.content_id = upci.media_item_id
+            WHERE upci.user_id = $1 AND upci.collection_id = ANY($2) AND upci.sub_item_id = ''`
+	args := []any{userID, collectionIDs}
+	argIdx := 3
+	for _, c := range itemAccessConditions(access, &args, &argIdx) {
+		sql += "\n            AND " + c
+	}
+	// The catalog view never lists manga chapters as items.
+	sql += "\n            AND " + MangaChapterExclusionWhere("mi")
+	return sql + "\n            GROUP BY upci.collection_id", args
 }
 
 // GetOriginalLanguage returns the original_language for a media item by content ID.
@@ -1127,12 +1309,19 @@ func (r *ItemRepository) searchWithFuzzyFallback(
 	return page, total, hi < total, !fuzzyTruncated, nil
 }
 
+// searchBlockHasExactTitle mirrors exact_title_match for a block's titles,
+// including yearSuffixedTitleSQL for non-episode items.
 func searchBlockHasExactTitle(items []*models.MediaItem, normalizedTitle string) bool {
 	if normalizedTitle == "" {
 		return false
 	}
 	for _, item := range items {
-		if item != nil && normalizeTitleForComparison(item.Title) == normalizedTitle {
+		if item == nil {
+			continue
+		}
+		title := normalizeTitleForComparison(item.Title)
+		if title == normalizedTitle ||
+			(item.Type != recentTVTypeEpisode && item.Year > 0 && title == normalizedTitle+" "+strconv.Itoa(item.Year)) {
 			return true
 		}
 	}
@@ -1458,7 +1647,7 @@ type searchQuerier interface {
 // independently of the caller's page size and to hand the fuzzy fallback the
 // complete block without a second FTS query.
 func (r *ItemRepository) execSearchBlock(ctx context.Context, q searchQuerier, dataSQL, countSQL string, args []any, limit, offset int, includeTotal bool) ([]*models.MediaItem, int, bool, []*models.MediaItem, error) {
-	rows, err := q.Query(ctx, dataSQL, args...)
+	rows, err := q.Query(ctx, dataSQL, searchPlanArgs(args)...)
 	if err != nil {
 		return nil, 0, false, nil, fmt.Errorf("searching media items: %w", err)
 	}
@@ -1489,7 +1678,7 @@ func (r *ItemRepository) execSearchBlock(ctx context.Context, q searchQuerier, d
 	if len(items) == 0 && offset > 0 {
 		// Drop the trailing limit/offset args from the data query.
 		countArgs := args[:len(args)-2]
-		if err := q.QueryRow(ctx, countSQL, countArgs...).Scan(&total); err != nil {
+		if err := q.QueryRow(ctx, countSQL, searchPlanArgs(countArgs)...).Scan(&total); err != nil {
 			return nil, 0, false, nil, fmt.Errorf("count fallback for empty search page: %w", err)
 		}
 		hasMore = total > offset+len(items)
@@ -1586,7 +1775,7 @@ func appendSearchScopeFilters(itemTypes []string, filter AccessFilter, condition
 	// needs no JOIN.
 	appendLibraryAccessConditions("mi.content_id", filter, conditions, args, argIdx)
 
-	applyAccessFilter("mi", AccessFilter{MaxContentRating: filter.MaxContentRating, ExcludedMediaTypes: filter.ExcludedMediaTypes}, conditions, args, argIdx)
+	applyAccessFilter("mi", AccessFilter{MaturityLimits: filter.MaturityLimits, ExcludedMediaTypes: filter.ExcludedMediaTypes}, conditions, args, argIdx)
 
 	// Manga chapters (type='ebook' rows linked into a manga series) are internal
 	// sub-units and must never surface as standalone search results.
@@ -1628,6 +1817,9 @@ func (r *ItemRepository) buildFuzzySearchSQL(query string, itemTypes []string, l
 // buildFuzzySearchFromParsed is the fuzzy query builder proper; the string-taking
 // wrapper above parses first. SearchPage parses once and calls this directly.
 func (r *ItemRepository) buildFuzzySearchFromParsed(parsed parsedSearchQuery, itemTypes []string, limit, offset int, filter AccessFilter, includeTotal bool, excludeContentIDs []string, minSimilarity float64) (dataSQL, countSQL string, args []any) {
+	return r.buildFuzzySearchCursorSQL(parsed, itemTypes, limit, offset, filter, includeTotal, excludeContentIDs, minSimilarity, nil)
+}
+func (r *ItemRepository) buildFuzzySearchCursorSQL(parsed parsedSearchQuery, itemTypes []string, limit, offset int, filter AccessFilter, includeTotal bool, excludeContentIDs []string, minSimilarity float64, cursor *searchCursorSQL) (dataSQL, countSQL string, args []any) {
 	searchText := searchTextFromParsed(parsed)
 	if searchText == "" {
 		return "", "", nil
@@ -1660,6 +1852,10 @@ func (r *ItemRepository) buildFuzzySearchFromParsed(parsed parsedSearchQuery, it
 	}
 
 	fromClause := appendSearchScopeFilters(itemTypes, filter, &conditions, &args, &argIdx)
+	r.appendSearchCursorDefinition(cursor, false, filter, &conditions, &args, &argIdx)
+	if cursor != nil && cursor.err != nil {
+		return "", "", nil
+	}
 
 	if len(excludeContentIDs) > 0 {
 		conditions = append(conditions, fmt.Sprintf("NOT (mi.content_id = ANY($%d))", argIdx))
@@ -1726,6 +1922,9 @@ func (r *ItemRepository) buildFuzzySearchFromParsed(parsed parsedSearchQuery, it
 	totalColumn := ""
 	if includeTotal {
 		totalColumn = ", COUNT(*) OVER () AS total_count"
+	}
+	if cursor != nil {
+		totalColumn += ", fuzzy_rank::text, fuzzy_full_rank::text, LOWER(title)::text, content_id::text"
 	}
 	dataSQL = scoredCTE + fmt.Sprintf(`
 		SELECT %s%s
@@ -1830,7 +2029,7 @@ func buildEnsureAccessibleSQL(contentID string, filter AccessFilter) (string, []
 	argIdx++
 
 	appendLibraryAccessConditions("mi.content_id", filter, &conditions, &args, &argIdx)
-	applyAccessFilter("mi", AccessFilter{MaxContentRating: filter.MaxContentRating, ExcludedMediaTypes: filter.ExcludedMediaTypes}, &conditions, &args, &argIdx)
+	applyAccessFilter("mi", AccessFilter{MaturityLimits: filter.MaturityLimits, ExcludedMediaTypes: filter.ExcludedMediaTypes}, &conditions, &args, &argIdx)
 
 	return fmt.Sprintf("SELECT 1 FROM media_items mi WHERE %s LIMIT 1", strings.Join(conditions, " AND ")), args
 }
@@ -1879,7 +2078,7 @@ func buildEnsureAccessibleIDsSQL(contentIDs []string, filter AccessFilter) (stri
 	argIdx++
 
 	appendLibraryAccessConditions("mi.content_id", filter, &conditions, &args, &argIdx)
-	applyAccessFilter("mi", AccessFilter{MaxContentRating: filter.MaxContentRating, ExcludedMediaTypes: filter.ExcludedMediaTypes}, &conditions, &args, &argIdx)
+	applyAccessFilter("mi", AccessFilter{MaturityLimits: filter.MaturityLimits, ExcludedMediaTypes: filter.ExcludedMediaTypes}, &conditions, &args, &argIdx)
 
 	return fmt.Sprintf("SELECT mi.content_id FROM media_items mi WHERE %s", strings.Join(conditions, " AND ")), args
 }
@@ -2095,6 +2294,14 @@ func (r *ItemRepository) UpdateMetadataTx(ctx context.Context, tx pgx.Tx, conten
 	addString("overview", upd.Overview)
 	addString("tagline", upd.Tagline)
 	addString("content_rating", upd.ContentRating)
+	if upd.ContentRating != nil {
+		// content_rating_age is derived, so an edit that changes the rating
+		// string has to rewrite it in the same statement; leaving the old age
+		// behind would keep filtering by the previous certification.
+		setClauses = append(setClauses, fmt.Sprintf("content_rating_age = $%d", argIdx))
+		args = append(args, access.StoredRating(*upd.ContentRating))
+		argIdx++
+	}
 	addInt("year", upd.Year)
 	addInt("runtime", upd.Runtime)
 	addFloat("rating_imdb", upd.RatingIMDB)

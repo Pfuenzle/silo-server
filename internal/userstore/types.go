@@ -4,13 +4,26 @@ import "time"
 
 // Profile represents a user profile.
 type Profile struct {
-	ID                         string
-	Name                       string
-	Avatar                     string
-	PINHash                    string
-	IsChild                    bool
-	IsPrimary                  bool
-	MaxContentRating           string
+	ID               string
+	Name             string
+	Avatar           string
+	PINHash          string
+	IsChild          bool
+	IsPrimary        bool
+	MaxContentRating string
+	// MaxAdvisoryAge is the profile's advisory-age limit (see
+	// access.MaturityLimits.MaxAdvisoryAge); 0 means no limit and is stored
+	// as NULL.
+	MaxAdvisoryAge int
+	// PINRevision advances whenever this profile's PIN is set, changed or
+	// cleared. Profile verification tokens are bound to it, so a PIN change
+	// invalidates the profile's outstanding tokens while edits to any other
+	// field, or to another profile, leave them valid.
+	PINRevision int64
+	// RequireAdvisoryAge hides titles with no advisory age from the profile
+	// (see access.MaturityLimits.RequireAdvisoryAge). It only takes effect
+	// with a MaxAdvisoryAge limit.
+	RequireAdvisoryAge         bool
 	QualityPreference          string
 	Language                   string
 	PreferredMetadataLanguage  string // ISO 639-1; "" = inherit library metadata language
@@ -47,16 +60,23 @@ type DeviceEntry struct {
 	DeviceID       string
 	DeviceName     string
 	DevicePlatform string
-	LastSeenAt     string
+	// LastSeenAt is an RFC3339 timestamp. Every store formats it the same way so
+	// callers can parse it and compare it against other RFC3339 timestamps.
+	LastSeenAt string
 }
 
 // UpdateProfileInput holds optional fields for updating a profile.
 type UpdateProfileInput struct {
-	Name                       *string
-	Avatar                     *string
-	PIN                        *string
-	IsChild                    *bool
-	MaxContentRating           *string
+	Name             *string
+	Avatar           *string
+	PIN              *string
+	IsChild          *bool
+	MaxContentRating *string
+	// MaxAdvisoryAge: nil leaves the limit untouched, 0 clears it, and a
+	// positive age sets it.
+	MaxAdvisoryAge *int
+	// RequireAdvisoryAge: nil leaves it untouched.
+	RequireAdvisoryAge         *bool
 	QualityPreference          *string
 	Language                   *string
 	PreferredMetadataLanguage  *string
@@ -70,6 +90,37 @@ type UpdateProfileInput struct {
 	LibraryRestrictionsEnabled *bool
 	AllowedLibraryIDs          *[]int
 	MaxPlaybackQuality         *string
+}
+
+// ProgressKey is the keyset position ListProgressPage resumes after: the
+// (UpdatedAt, MediaItemID) of the last row a caller already holds, copied
+// verbatim from a WatchProgress that ListProgressPage returned. The pair is
+// unique per profile (media_item_id is in the primary key), so together with
+// the fixed ORDER BY updated_at DESC, media_item_id DESC it orders every row
+// totally. UpdatedAt keeps whatever sub-second precision the store keeps, so
+// a round trip through the string compares equal to the stored value.
+type ProgressKey struct {
+	UpdatedAt   string
+	MediaItemID string
+}
+
+// ListKey is the keyset position ListFavoritesPage and ListWatchlistPage
+// resume after: the (AddedAt, MediaItemID) of the last row a caller already
+// holds, copied verbatim from a Favorite or WatchlistEntry the page returned.
+// media_item_id is unique per profile in both tables, so with the fixed
+// ORDER BY added_at DESC, media_item_id DESC the pair orders every row
+// totally, and a row added or removed between pages neither repeats nor
+// hides another.
+type ListKey struct {
+	AddedAt     string
+	MediaItemID string
+}
+
+// HistoryKey is the keyset position of one visible history row in
+// (watched_at DESC, id DESC) order, in the store's own string form.
+type HistoryKey struct {
+	WatchedAt string
+	ID        string
 }
 
 // WatchProgress represents watch progress for a media item.
@@ -181,7 +232,9 @@ type WatchlistEntry struct {
 	AddedAt     string
 }
 
-// Collection represents a user-created collection.
+// Collection represents a user-created collection. CreatorProfileID owns it:
+// only that profile changes it. IsShared shows it to every profile on the
+// login, including profiles added later; otherwise only its creator sees it.
 type Collection struct {
 	ID                         string
 	ProfileID                  string
@@ -190,7 +243,6 @@ type Collection struct {
 	Description                string
 	CollectionType             string
 	IsShared                   bool
-	AllowedProfileIDs          []string
 	QueryDefinition            string
 	SortConfig                 string
 	SourceURL                  string
@@ -209,6 +261,14 @@ type Collection struct {
 	GroupID                    *string
 	CreatedAt                  string
 	UpdatedAt                  string
+}
+
+// VisibleTo reports whether profileID, a profile on the collection's login,
+// may read the collection: it created it, or the collection is shared. Stores
+// only return collections of the login they serve, so this never crosses
+// logins.
+func (c *Collection) VisibleTo(profileID string) bool {
+	return c != nil && profileID != "" && (c.CreatorProfileID == profileID || c.IsShared)
 }
 
 type GroupSortMode string
@@ -240,7 +300,6 @@ type CreateCollectionInput struct {
 	Description                string
 	CollectionType             string
 	IsShared                   bool
-	AllowedProfileIDs          []string
 	QueryDefinition            string
 	SortConfig                 string
 	SourceURL                  string
@@ -253,16 +312,20 @@ type CreateCollectionInput struct {
 }
 
 type UpdateCollectionInput struct {
-	ID                         string
-	RequestProfileID           string
-	Name                       *string
-	Description                *string
-	IsShared                   *bool
-	AllowedProfileIDs          *[]string
-	QueryDefinition            *string
-	SortConfig                 *string
-	SourceURL                  *string
-	SourceConfig               *string
+	// ExpectedRevision, when set, is atomically checked in the mutation transaction.
+	ExpectedRevision *int64
+	ID               string
+	RequestProfileID string
+	Name             *string
+	Description      *string
+	IsShared         *bool
+	QueryDefinition  *string
+	SortConfig       *string
+	SourceURL        *string
+	SourceConfig     *string
+	// SourceConfigPatch atomically merges only present top-level source config members.
+	// Imported collections are supported only by the PostgreSQL store.
+	SourceConfigPatch          *string
 	SyncSchedule               *string
 	ClearSyncSchedule          bool
 	NextSyncAt                 *time.Time
@@ -281,6 +344,14 @@ type UpdateCollectionSyncStateInput struct {
 	ItemCount  int
 	LastSyncAt time.Time
 	NextSyncAt *time.Time
+	// ScheduleAtStart and NextSyncAtAtStart are the collection's sync_schedule
+	// and next_sync_at when the sync began. NextSyncAt is written only while
+	// the stored row still holds both, so a schedule edited during the sync,
+	// on any node, keeps the next_sync_at the edit wrote, even when the edit
+	// saved the same cadence again. The rest of the sync state is written
+	// either way.
+	ScheduleAtStart   *string
+	NextSyncAtAtStart *time.Time
 }
 
 type CollectionItemReplacement struct {

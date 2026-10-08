@@ -1,4 +1,5 @@
 import type { PersonalizedSorts } from "@/lib/querySortOptions";
+import { useShownRatingSources } from "@/hooks/queries/ratingsCapability";
 import { useMemo } from "react";
 
 import {
@@ -29,6 +30,7 @@ import type { CatalogSearchState } from "@/pages/catalogSearchParams";
 import {
   getDefaultQuerySortOrder,
   normalizeQuerySortForScope,
+  querySortScopeForMediaScope,
   type QuerySortRelevanceScope,
 } from "@/lib/querySortOptions";
 import { cn } from "@/lib/utils";
@@ -394,7 +396,7 @@ interface CollectionGuidedRulesEditorProps {
   libraryType?: string;
   // When set, the book-native facet sections (Author / Series, and
   // audiobook-only Narrator) switch to typeahead-backed FacetSearchSelect, querying
-  // /api/v1/catalog/filters/search scoped to this state. Without it
+  // /api/v2/catalog/filters/search scoped to this state. Without it
   // they fall back to the bulk filters payload (top 1000 alphabetical).
   catalogState?: CatalogSearchState;
 }
@@ -446,10 +448,21 @@ export default function CollectionGuidedRulesEditor({
     : isAudiobookLibrary
       ? "Unlistened"
       : "Unwatched";
-  const sortOptions = getCollectionSortOptions(allowPersonalizedSorts, sortRelevanceScope);
+  const shownRatingSources = useShownRatingSources();
+  const sortOptions = getCollectionSortOptions(
+    allowPersonalizedSorts,
+    sortRelevanceScope,
+    shownRatingSources,
+    state.sortField,
+  );
   const selectedSort = normalizeQuerySortForScope(
     { field: state.sortField, order: state.sortOrder },
-    { includePersonalized: allowPersonalizedSorts, relevanceScope: sortRelevanceScope },
+    {
+      includePersonalized: allowPersonalizedSorts,
+      relevanceScope: sortRelevanceScope,
+      shownRatingSources,
+      keepSortField: state.sortField,
+    },
   );
 
   function update(patch: Partial<GuidedFormState>) {
@@ -488,19 +501,11 @@ export default function CollectionGuidedRulesEditor({
               <Select
                 value={state.mediaScope}
                 onValueChange={(v) => {
-                  const nextRelevanceScope: QuerySortRelevanceScope =
-                    v === "all" || v === "video"
-                      ? "all"
-                      : // Manga has no dedicated sort scope; it reuses the ebook
-                        // sort universe (its chapters are ebook items).
-                        v === "manga"
-                        ? "ebook"
-                        : (v as QuerySortRelevanceScope);
                   const nextSort = normalizeQuerySortForScope(
                     { field: state.sortField, order: state.sortOrder },
                     {
                       includePersonalized: allowPersonalizedSorts,
-                      relevanceScope: nextRelevanceScope,
+                      relevanceScope: querySortScopeForMediaScope(v),
                     },
                   );
                   update({

@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ItemDetail } from "@/api/types";
+import type { CrewMember, ItemDetail } from "@/api/types";
 import SeasonContent from "./SeasonContent";
 
 const mocks = vi.hoisted(() => {
@@ -36,9 +36,16 @@ const mocks = vi.hoisted(() => {
     useSetRating: vi.fn(),
     useDeleteRating: vi.fn(),
     useAuth: vi.fn(),
+    useDetailWatchTogether: vi.fn(() => ({ menu: undefined, sheet: null })),
   };
 });
 
+vi.mock("@/hooks/queries/shuffles", () => ({
+  useStartShuffle: () => ({ startShuffle: vi.fn(), isStarting: false }),
+}));
+vi.mock("@/pages/watchtogether/DetailWatchTogether", () => ({
+  useDetailWatchTogether: mocks.useDetailWatchTogether,
+}));
 vi.mock("@/hooks/queries/episodes", () => ({
   useItemEpisodes: mocks.useItemEpisodes,
 }));
@@ -86,10 +93,6 @@ vi.mock("@/components/CastCarousel", () => ({
   default: () => <div />,
 }));
 
-vi.mock("@/components/CrewList", () => ({
-  default: () => <div />,
-}));
-
 vi.mock("@/components/ui/skeleton", () => ({
   Skeleton: () => <div />,
 }));
@@ -128,6 +131,7 @@ function makeSeasonItem(
     rating_tmdb: null,
     rating_rt_critic: null,
     rating_rt_audience: null,
+    ratings: [],
     imdb_id: "",
     tmdb_id: "",
     tvdb_id: "",
@@ -161,7 +165,20 @@ function makeSeasonItem(
 }
 
 describe("SeasonContent", () => {
+  it("disables collection membership without removing the item identity", () => {
+    renderToStaticMarkup(
+      <MemoryRouter>
+        <SeasonContent item={makeSeasonItem()} />
+      </MemoryRouter>,
+    );
+    expect(mocks.capturedActionBarProps.value).toMatchObject({
+      contentId: "season-1",
+      canAddToCollection: false,
+    });
+  });
+
   beforeEach(() => {
+    mocks.useDetailWatchTogether.mockClear();
     mocks.capturedActionBarProps.value = null;
     mocks.capturedDetailHeroProps.value = null;
     mocks.capturedMediaMenuProps.length = 0;
@@ -189,15 +206,47 @@ describe("SeasonContent", () => {
     mocks.useDeleteRating.mockReturnValue({ mutate: vi.fn() });
   });
 
-  it("does not pass rating props to ActionBar", () => {
+  it.each([
+    { name: "skips unavailable unwatched episodes", playablePlayed: false, hasPlayable: true },
+    { name: "falls back to a playable watched episode", playablePlayed: true, hasPlayable: true },
+    {
+      name: "leaves the target empty when no episode is playable",
+      playablePlayed: false,
+      hasPlayable: false,
+    },
+  ])("$name", ({ playablePlayed, hasPlayable }) => {
+    mocks.useItemEpisodes.mockReturnValue({
+      data: {
+        episodes: [
+          {
+            content_id: "missing",
+            title: "Missing",
+            episode_number: 1,
+            files: [],
+            user_data: { played: false },
+          },
+          {
+            content_id: "playable",
+            title: "Available",
+            episode_number: 2,
+            files: hasPlayable ? [{ file_id: 2 }] : [],
+            user_data: { played: playablePlayed },
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+    });
     renderToStaticMarkup(
       <MemoryRouter initialEntries={["/item/season-1"]}>
         <SeasonContent item={makeSeasonItem()} />
       </MemoryRouter>,
     );
-
-    expect(mocks.capturedActionBarProps.value).not.toHaveProperty("rating");
-    expect(mocks.capturedActionBarProps.value).not.toHaveProperty("onRatingChange");
+    expect(mocks.useDetailWatchTogether).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: hasPlayable ? expect.objectContaining({ content_id: "playable" }) : null,
+      }),
+    );
   });
 
   it("passes partial-progress restart eligibility to episode menus", () => {
@@ -237,25 +286,21 @@ describe("SeasonContent", () => {
     });
   });
 
-  it("passes on-view translation controls to the hero", () => {
-    const onTranslate = vi.fn();
-    mocks.useOnViewTranslation.mockReturnValue({
-      translating: true,
-      onTranslate,
-    });
+  it("keeps the series' creators out of the season Crew section", () => {
+    const crew: CrewMember[] = [
+      { name: "Series Creator", job: "Creator", person_id: "creator-1" },
+      { name: "Season Director", job: "Director", person_id: "director-1" },
+    ];
 
-    renderToStaticMarkup(
+    const markup = renderToStaticMarkup(
       <MemoryRouter initialEntries={["/item/season-1"]}>
-        <SeasonContent item={makeSeasonItem({ pending_translation_language: "fr" })} />
+        <SeasonContent item={makeSeasonItem({ crew })} />
       </MemoryRouter>,
     );
 
-    expect(mocks.useOnViewTranslation).toHaveBeenCalledWith(
-      expect.objectContaining({ content_id: "season-1", type: "season" }),
-    );
-    expect(mocks.capturedDetailHeroProps.value).toMatchObject({
-      overviewTranslating: true,
-      onTranslateOverview: onTranslate,
-    });
+    expect(markup).toContain(">Directors</dt>");
+    expect(markup).toContain("Season Director");
+    expect(markup).not.toContain("Creators");
+    expect(markup).not.toContain("Series Creator");
   });
 });

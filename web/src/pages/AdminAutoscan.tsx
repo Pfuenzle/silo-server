@@ -1,3 +1,8 @@
+import {
+  captureProfileRequestContext,
+  isCapturedProfileAuthorityActive,
+  type ProfileRequestContextSnapshot,
+} from "@/api/client";
 import { useState } from "react";
 import { useSearchParams } from "react-router";
 import { ChevronDown, ChevronRight, Play } from "lucide-react";
@@ -10,12 +15,14 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   useAutoscanSettings,
+  useAutoscanSources,
   useTriggerAutoscan,
   useUpdateAutoscanSettings,
 } from "@/hooks/queries/useAutoscan";
 import ConnectionsPanel from "@/pages/admin/autoscan/ConnectionsPanel";
 import ActivityPanel from "@/pages/admin/autoscan/ActivityPanel";
 import SourcesPanel from "@/pages/admin/autoscan/SourcesPanel";
+import { showRunNow } from "@/pages/admin/autoscan/runNow";
 import { isLegacyAdvancedTab, normalizeTab } from "@/pages/autoscanSearchParams";
 
 // ---------------------------------------------------------------------------
@@ -24,34 +31,49 @@ import { isLegacyAdvancedTab, normalizeTab } from "@/pages/autoscanSearchParams"
 
 function SettingsTab() {
   const settings = useAutoscanSettings();
+  const readAuthority = captureProfileRequestContext();
   const updateSettings = useUpdateAutoscanSettings();
 
-  // Local form state — initialised from server data; reflected immediately on
-  // every mutation so the UI stays responsive without waiting for refetch.
-  const [form, setForm] = useState<AutoscanSettings | null>(null);
-
-  // Merge server data into local form on first load (and after invalidation).
-  const serverData = settings.data;
-  const effective: AutoscanSettings = form ??
-    serverData ?? { enabled: false, default_poll_interval_seconds: 300, debounce_seconds: 10 };
-
+  const [form, setForm] = useState<{
+    value: AutoscanSettings;
+    authority: ProfileRequestContextSnapshot;
+  } | null>(null);
+  const activeForm = form && isCapturedProfileAuthorityActive(form.authority) ? form : null;
+  const effective = activeForm?.value ?? settings.data;
   function patch(delta: Partial<AutoscanSettings>) {
-    setForm((prev) => ({
-      ...(prev ?? effective),
-      ...delta,
-    }));
+    const authority = captureProfileRequestContext();
+    if (
+      !authority ||
+      !effective ||
+      !readAuthority ||
+      !isCapturedProfileAuthorityActive(readAuthority)
+    )
+      return;
+    setForm({ value: { ...effective, ...delta }, authority });
   }
-
-  function save(override?: Partial<AutoscanSettings>) {
-    const body: AutoscanSettings = { ...effective, ...override };
-    updateSettings.mutate(body, {
-      onSuccess: () => setForm(null), // reset to server truth after save
-    });
+  function save() {
+    if (
+      !effective ||
+      updateSettings.isPending ||
+      !settings.data ||
+      !readAuthority ||
+      !isCapturedProfileAuthorityActive(readAuthority) ||
+      (activeForm && !isCapturedProfileAuthorityActive(activeForm.authority))
+    )
+      return;
+    const captured = activeForm;
+    updateSettings.mutate(
+      { ...effective },
+      { onSuccess: () => setForm((current) => (current === captured ? null : current)) },
+    );
   }
 
   if (settings.isLoading) {
     return <p className="text-muted-foreground py-4 text-sm">Loading settings…</p>;
   }
+
+  if (!effective || settings.isError)
+    return <p role="alert">Autoscan settings could not be loaded. Reload before editing.</p>;
 
   return (
     <div className="max-w-lg space-y-6">
@@ -68,7 +90,6 @@ function SettingsTab() {
             onChange={(e) =>
               patch({ default_poll_interval_seconds: Number(e.target.value) || 300 })
             }
-            onBlur={() => save()}
           />
           <span className="text-muted-foreground text-sm">sec</span>
         </div>
@@ -88,14 +109,17 @@ function SettingsTab() {
             min={0}
             value={effective.debounce_seconds}
             onChange={(e) => patch({ debounce_seconds: Number(e.target.value) || 0 })}
-            onBlur={() => save()}
           />
           <span className="text-muted-foreground text-sm">sec</span>
         </div>
         <p className="text-muted-foreground text-xs">
-          Coalesces rapid change events before triggering a scan.
+          Skips repeat reports of an unchanged file within this window. Changed or deleted files
+          still scan.
         </p>
       </div>
+      <Button onClick={save} disabled={!activeForm || updateSettings.isPending}>
+        Save settings
+      </Button>
     </div>
   );
 }
@@ -120,6 +144,7 @@ export default function AdminAutoscan({ embedded = false }: AdminAutoscanProps =
   const activeTab = normalizeTab(requestedTab);
   const trigger = useTriggerAutoscan();
   const settings = useAutoscanSettings();
+  const readAuthority = captureProfileRequestContext();
   const updateSettings = useUpdateAutoscanSettings();
 
   // Open Advanced automatically when arriving from an old connections/settings
@@ -128,8 +153,14 @@ export default function AdminAutoscan({ embedded = false }: AdminAutoscanProps =
 
   const enabled = settings.data?.enabled ?? false;
 
+  // Run now polls every enabled polling source at once, so hide it when
+  // Autoscan is off or no loaded source polls.
+  const sources = useAutoscanSources();
+  const runNowVisible = showRunNow(sources.data, settings.data);
+
   function toggleEnabled(checked: boolean) {
-    if (!settings.data) return;
+    if (!settings.data || !readAuthority || !isCapturedProfileAuthorityActive(readAuthority))
+      return;
     updateSettings.mutate({ ...settings.data, enabled: checked });
   }
 
@@ -182,15 +213,17 @@ export default function AdminAutoscan({ embedded = false }: AdminAutoscanProps =
               aria-label="Enable autoscan"
             />
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={trigger.isPending}
-            onClick={() => trigger.mutate()}
-          >
-            <Play />
-            {trigger.isPending ? "Triggering…" : "Run now"}
-          </Button>
+          {runNowVisible ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={trigger.isPending}
+              onClick={() => trigger.mutate()}
+            >
+              <Play />
+              {trigger.isPending ? "Triggering…" : "Run now"}
+            </Button>
+          ) : null}
         </div>
       </div>
 

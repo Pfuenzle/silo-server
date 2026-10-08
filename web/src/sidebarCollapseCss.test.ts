@@ -163,9 +163,33 @@ describe("sidebar collapse CSS", () => {
     );
   });
 
-  it("compensates the banner on the same breakpoint that moves its margin", () => {
-    // `html[data-text-scale]` re-bases rem, so 64rem and 1024px diverge at large
-    // text. The compensation must follow `--app-sidebar-offset`'s own query.
+  it("only reserves sidebar room for out-of-tree chrome while a shell is mounted", () => {
+    // The banner and the audiobook MiniBar render above every route, including
+    // /profiles, /login and /watch, which live outside Layout and have no
+    // sidebar. Layout publishes `data-app-shell` for exactly the sidebar's
+    // lifetime and AdminLayout publishes `data-admin-shell` for its own fixed
+    // 240px sidebar, so every desktop offset must hang off one of them; an
+    // unconditional 260px left a blank strip on the profile picker while
+    // impersonating (#1290).
+    expect(ruleBody(":root[data-app-shell] {")).toContain("--app-sidebar-offset: 260px");
+    expect(ruleBody(':root[data-app-shell][data-sidebar-collapsed="true"] {')).toContain(
+      "--app-sidebar-offset: 64px",
+    );
+    expect(ruleBody(":root[data-admin-shell] {")).toContain("--app-sidebar-offset: 240px");
+    // Nothing else may reintroduce a non-zero offset without a shell gate.
+    const desktopOffsets =
+      css.match(/^\s*([^{\n]+)\{\s*--app-sidebar-offset: (?:260|240|64)px;/gm) ?? [];
+    expect(desktopOffsets.length).toBe(3);
+    for (const rule of desktopOffsets) expect(rule).toMatch(/\[data-(?:app|admin)-shell\]/);
+    // Off-shell the variable stays at its 0px default.
+    expect(css).toMatch(/:root \{\s*--app-sidebar-offset: 0px;/);
+  });
+
+  it("moves the offset and the banner compensation on the sidebar's own breakpoint", () => {
+    // Layout shows the sidebar at Tailwind's `lg` (64rem), and a rem media query
+    // follows the browser's default font size. A px breakpoint kept the offset
+    // while a larger browser font had already hidden the sidebar (#1816). The
+    // compensation must follow the query that moves the margin it compensates.
     const nearestQueryBefore = (needle: string) => {
       const at = css.indexOf(needle);
       expect(at, `missing: ${needle}`).toBeGreaterThan(-1);
@@ -173,11 +197,11 @@ describe("sidebar collapse CSS", () => {
       return css.slice(queryAt, css.indexOf("{", queryAt)).trim();
     };
 
-    expect(nearestQueryBefore("--app-sidebar-offset: 64px")).toBe("@media (min-width: 1024px)");
+    expect(nearestQueryBefore("--app-sidebar-offset: 64px")).toBe("@media (min-width: 64rem)");
     expect(
       nearestQueryBefore(
         ':root[data-sidebar-collapsed="true"]:not([data-sidebar-visual-collapsed="true"])',
       ),
-    ).toBe("@media (min-width: 1024px)");
+    ).toBe("@media (min-width: 64rem)");
   });
 });

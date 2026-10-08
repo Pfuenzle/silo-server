@@ -52,14 +52,10 @@ func routingFactsFrom(detail *tmdb.MediaDetail, listed bool, now time.Time) Rout
 		Year:             detail.Year,
 		NetworkIDs:       detail.NetworkIDs,
 		CompanyIDs:       detail.CompanyIDs,
-		Anime:            detectAnime(detail.KeywordIDs, detail.GenreIDs, detail.OriginalLanguage),
+		Anime:            detectAnime(detail, listed),
 		ContentRating:    &rating,
 		CapturedAt:       &now,
 	}
-}
-
-func (s *Service) routingFacts(_ context.Context, detail *tmdb.MediaDetail) RoutingFacts {
-	return routingFactsFrom(detail, false, time.Now().UTC())
 }
 
 // routingRating picks the rating routing matches a title on. Most rules are

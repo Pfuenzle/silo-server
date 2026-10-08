@@ -8,11 +8,32 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/access"
+	"github.com/Silo-Server/silo-server/internal/clientip"
 	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/Silo-Server/silo-server/internal/netaccess"
 	"github.com/Silo-Server/silo-server/internal/playback"
 	"github.com/Silo-Server/silo-server/internal/policy"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
 )
+
+func TestSessionManager_CapturesStartNetwork(t *testing.T) {
+	sm := playback.NewSessionManager(0, 0)
+	ctx := clientip.SetContext(t.Context(), "192.168.1.8")
+	ctx = netaccess.WithPath(ctx, netaccess.Path{Provider: "tailscale"})
+	session, err := sm.StartSessionWithContext(ctx, 1, "profile", 42, playback.PlayDirect, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.ClientIP != "192.168.1.8" || session.RoutingNetworkProvider == nil || *session.RoutingNetworkProvider != "tailscale" || session.StreamLocation != "remote" {
+		t.Fatalf("start network = (%q, %v)", session.ClientIP, session.RoutingNetworkProvider)
+	}
+	if err := sm.SetStreamLocation(session.ID, "local"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := sm.GetSession(session.ID); err != nil || got.StreamLocation != "local" {
+		t.Fatalf("frozen stream location = %v, %v", got, err)
+	}
+}
 
 func TestSessionManager_StartStop(t *testing.T) {
 	sm := playback.NewSessionManager(5, 2)
@@ -77,6 +98,28 @@ func TestSessionManager_StartStop(t *testing.T) {
 	}
 }
 
+func TestSessionManagerOutputFormatFollowsReplacement(t *testing.T) {
+	sm := playback.NewSessionManager(5, 2)
+	session, err := sm.StartSession(1, "profile", 100, playback.PlayRemux, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sm.SetOutputFormat(session.ID, "fmp4", "hls"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := sm.GetSession(session.ID)
+	if err != nil || got.OutputContainer != "fmp4" || got.OutputProtocol != "hls" {
+		t.Fatal("transport output format was not recorded")
+	}
+	if err := sm.UpdateStreamState(session.ID, playback.SessionStreamState{PlayMethod: playback.PlayDirect, TranscodeRouteSet: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = sm.GetSession(session.ID)
+	if got.OutputContainer != "" || got.OutputProtocol != "" {
+		t.Fatal("a replacement retained the previous container")
+	}
+}
+
 func TestSessionManager_StopNonExistent(t *testing.T) {
 	sm := playback.NewSessionManager(5, 2)
 
@@ -130,37 +173,6 @@ func TestSessionManager_UpdateProgress_NotFound(t *testing.T) {
 	err := sm.UpdateProgress("nonexistent", 0, false)
 	if err != playback.ErrSessionNotFound {
 		t.Errorf("UpdateProgress(nonexistent) = %v, want ErrSessionNotFound", err)
-	}
-}
-
-func TestSessionManager_GetSessionsByMediaFileID(t *testing.T) {
-	sm := playback.NewSessionManager(5, 2)
-
-	matchA, _ := sm.StartSession(1, "profile-1", 100, playback.PlayDirect, false)
-	matchB, _ := sm.StartSession(2, "profile-2", 100, playback.PlayDirect, false)
-	matchRequested, _ := sm.StartSessionWithFiles(4, "profile-4", 200, 100, playback.PlayDirect, false)
-	other, _ := sm.StartSession(3, "profile-3", 101, playback.PlayDirect, false)
-
-	sessions := sm.GetSessionsByMediaFileID(100)
-	if len(sessions) != 3 {
-		t.Fatalf("len(GetSessionsByMediaFileID(100)) = %d, want 3", len(sessions))
-	}
-
-	gotIDs := map[string]struct{}{}
-	for _, session := range sessions {
-		gotIDs[session.ID] = struct{}{}
-	}
-	if _, ok := gotIDs[matchA.ID]; !ok {
-		t.Fatalf("missing matching session %q", matchA.ID)
-	}
-	if _, ok := gotIDs[matchB.ID]; !ok {
-		t.Fatalf("missing matching session %q", matchB.ID)
-	}
-	if _, ok := gotIDs[matchRequested.ID]; !ok {
-		t.Fatalf("missing requested-file session %q", matchRequested.ID)
-	}
-	if _, ok := gotIDs[other.ID]; ok {
-		t.Fatalf("unexpected non-matching session %q", other.ID)
 	}
 }
 
@@ -735,29 +747,6 @@ func TestApplyReplacementIfRouteRejectsStalePredecessor(t *testing.T) {
 	}
 }
 
-func TestSetEffectiveMediaFileID(t *testing.T) {
-	mgr := playback.NewSessionManager(0, 0)
-	session, err := mgr.StartSession(1, "profile-1", 100, playback.PlayDirect, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := mgr.SetEffectiveMediaFileID(session.ID, 200); err != nil {
-		t.Fatalf("SetEffectiveMediaFileID: %v", err)
-	}
-
-	got, err := mgr.GetSession(session.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.MediaFileID != 200 {
-		t.Errorf("MediaFileID = %d, want 200", got.MediaFileID)
-	}
-	if got.RequestedMediaFileID != 100 {
-		t.Errorf("RequestedMediaFileID = %d, want 100", got.RequestedMediaFileID)
-	}
-}
-
 // TestSessionReplacementAppliesAndRollsBackAtomically verifies failed replacement restores the prior stream.
 func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 	manager := playback.NewSessionManager(0, 0)
@@ -766,17 +755,18 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := manager.UpdateStreamState(session.ID, playback.SessionStreamState{
-		PlayMethod:           playback.PlayDirect,
-		BasePlayMethod:       playback.PlayDirect,
-		AudioTrackIndex:      0,
-		TranscodeRouteSet:    true,
-		SubtitleTrackIndex:   -1,
-		StreamBitrateKbps:    8_000,
-		SourceAudioChannels:  6,
-		TranscodeHWAccel:     "qsv",
-		ToneMapMode:          tonemap.ModeHardware,
-		TranscodeNodeURL:     "http://old-node",
-		TranscodeTransportID: "old-transport",
+		PlayMethod:             playback.PlayDirect,
+		BasePlayMethod:         playback.PlayDirect,
+		AudioTrackIndex:        0,
+		TranscodeRouteSet:      true,
+		SubtitleTrackIndex:     -1,
+		StreamBitrateKbps:      8_000,
+		SourceAudioChannels:    6,
+		TranscodeHWAccel:       "qsv",
+		ToneMapMode:            tonemap.ModeHardware,
+		TranscodeNodeURL:       "http://old-node",
+		TranscodeTransportID:   "old-transport",
+		RoutingNetworkProvider: new("tailscale"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -784,18 +774,19 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 	rollback, err := manager.ApplyReplacement(session.ID, playback.SessionReplacement{
 		EffectiveMediaFileID: 84,
 		StreamState: playback.SessionStreamState{
-			PlayMethod:           playback.PlayTranscode,
-			BasePlayMethod:       playback.PlayTranscode,
-			AudioTrackIndex:      2,
-			TranscodeAudio:       true,
-			TranscodeRouteSet:    true,
-			SubtitleTrackIndex:   1,
-			StreamBitrateKbps:    3_500,
-			SourceAudioChannels:  8,
-			TranscodeHWAccel:     "none",
-			ToneMapMode:          tonemap.ModeSoftware,
-			TranscodeNodeURL:     "http://new-node",
-			TranscodeTransportID: "new-transport",
+			PlayMethod:             playback.PlayTranscode,
+			BasePlayMethod:         playback.PlayTranscode,
+			AudioTrackIndex:        2,
+			TranscodeAudio:         true,
+			TranscodeRouteSet:      true,
+			SubtitleTrackIndex:     1,
+			StreamBitrateKbps:      3_500,
+			SourceAudioChannels:    8,
+			TranscodeHWAccel:       "none",
+			ToneMapMode:            tonemap.ModeSoftware,
+			TranscodeNodeURL:       "http://new-node",
+			TranscodeTransportID:   "new-transport",
+			RoutingNetworkProvider: new(""),
 		},
 		PositionSeconds: &position,
 		IsPaused:        true,
@@ -808,7 +799,7 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	if replaced.MediaFileID != 84 || replaced.PlayMethod != playback.PlayTranscode || replaced.AudioTrackIndex != 2 ||
-		replaced.SourceAudioChannels != 8 ||
+		replaced.SourceAudioChannels != 8 || replaced.RoutingNetworkProvider == nil || *replaced.RoutingNetworkProvider != "" ||
 		replaced.TranscodeNodeURL != "http://new-node" || replaced.TranscodeHWAccel != "none" || replaced.ToneMapMode != "software" || replaced.Position != position || !replaced.IsPaused {
 		t.Fatalf("replacement session = %#v", replaced)
 	}
@@ -820,7 +811,7 @@ func TestSessionReplacementAppliesAndRollsBackAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	if restored.MediaFileID != 42 || restored.PlayMethod != playback.PlayDirect || restored.AudioTrackIndex != 0 ||
-		restored.SourceAudioChannels != 6 ||
+		restored.SourceAudioChannels != 6 || restored.RoutingNetworkProvider == nil || *restored.RoutingNetworkProvider != "tailscale" ||
 		restored.TranscodeNodeURL != "http://old-node" || restored.TranscodeTransportID != "old-transport" ||
 		restored.TranscodeHWAccel != "qsv" || restored.ToneMapMode != "hardware" ||
 		restored.Position != 0 || restored.IsPaused {
@@ -1021,41 +1012,6 @@ func TestUpdateAudioTrack_PreservesTranscodeTransportForRemuxBase(t *testing.T) 
 	}
 }
 
-func TestSessionManager_WebSocketTracking(t *testing.T) {
-	sm := playback.NewSessionManager(5, 2)
-
-	session, err := sm.StartSession(1, "profile-1", 100, playback.PlayDirect, false)
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
-
-	// New sessions should not have WebSocket.
-	got, _ := sm.GetSession(session.ID)
-	if got.HasWebSocket {
-		t.Error("new session should not have WebSocket")
-	}
-
-	// Set WebSocket connected.
-	if err := sm.SetWebSocket(session.ID, true); err != nil {
-		t.Fatalf("SetWebSocket(true): %v", err)
-	}
-
-	got, _ = sm.GetSession(session.ID)
-	if !got.HasWebSocket {
-		t.Error("HasWebSocket should be true after SetWebSocket(true)")
-	}
-
-	// Disconnect WebSocket.
-	if err := sm.SetWebSocket(session.ID, false); err != nil {
-		t.Fatalf("SetWebSocket(false): %v", err)
-	}
-
-	got, _ = sm.GetSession(session.ID)
-	if got.HasWebSocket {
-		t.Error("HasWebSocket should be false after SetWebSocket(false)")
-	}
-}
-
 func TestSetRealtimeConnection(t *testing.T) {
 	sm := playback.NewSessionManager(5, 2)
 
@@ -1081,11 +1037,29 @@ func TestSetRealtimeConnection(t *testing.T) {
 		t.Error("HasWebSocket should mirror realtime connection state")
 	}
 
+	got.HasRealtimeConnection = false
+	again, err := sm.GetSession(session.ID)
+	if err != nil {
+		t.Fatalf("GetSession after mutating copy: %v", err)
+	}
+	if !again.HasRealtimeConnection {
+		t.Error("mutating GetSession copy should not change manager state")
+	}
+
 	if err := sm.SetRealtimeConnection(session.ID, false); err != nil {
 		t.Fatalf("SetRealtimeConnection(false): %v", err)
 	}
 
-	got, _ = sm.GetSession(session.ID)
+	got, err = sm.GetSession(session.ID)
+	if err != nil {
+		t.Fatalf("GetSession after realtime disconnect: %v", err)
+	}
+	if got.ID != session.ID {
+		t.Fatalf("GetSession ID = %q, want %q", got.ID, session.ID)
+	}
+	if count := sm.ActiveCount(1); count != 1 {
+		t.Errorf("ActiveCount after realtime disconnect = %d, want 1", count)
+	}
 	if got.HasRealtimeConnection {
 		t.Error("HasRealtimeConnection should be false after SetRealtime(false)")
 	}
@@ -1096,16 +1070,22 @@ func TestSetRealtimeConnection(t *testing.T) {
 
 func TestSessionManager_LimitCountsIgnoreStaleSessions(t *testing.T) {
 	sm := playback.NewSessionManager(5, 2)
-	sm.SetLivenessGracePeriods(20*time.Millisecond, 40*time.Millisecond)
+	sm.SetLivenessGracePeriods(time.Hour, 2*time.Hour)
 
-	if _, err := sm.StartSession(1, "profile-1", 100, playback.PlayDirect, false); err != nil {
+	direct, err := sm.StartSession(1, "profile-1", 100, playback.PlayDirect, false)
+	if err != nil {
 		t.Fatalf("StartSession direct: %v", err)
 	}
-	if _, err := sm.StartSession(1, "profile-1", 101, playback.PlayTranscode, false); err != nil {
+	transcode, err := sm.StartSession(1, "profile-1", 101, playback.PlayTranscode, false)
+	if err != nil {
 		t.Fatalf("StartSession transcode: %v", err)
 	}
 
-	time.Sleep(30 * time.Millisecond)
+	stale := time.Now().Add(-2 * time.Hour)
+	direct.LastActivityAt = stale
+	direct.UpdatedAt = stale
+	transcode.LastActivityAt = stale
+	transcode.UpdatedAt = stale
 
 	if got := sm.ActiveCount(1); got != 0 {
 		t.Fatalf("ActiveCount after grace = %d, want 0", got)
@@ -1117,7 +1097,7 @@ func TestSessionManager_LimitCountsIgnoreStaleSessions(t *testing.T) {
 
 func TestSessionManager_ActiveTransportKeepsSessionLive(t *testing.T) {
 	sm := playback.NewSessionManager(5, 2)
-	sm.SetLivenessGracePeriods(20*time.Millisecond, 40*time.Millisecond)
+	sm.SetLivenessGracePeriods(time.Hour, 2*time.Hour)
 
 	session, err := sm.StartSession(1, "profile-1", 100, playback.PlayDirect, false)
 	if err != nil {
@@ -1127,7 +1107,8 @@ func TestSessionManager_ActiveTransportKeepsSessionLive(t *testing.T) {
 		t.Fatalf("BeginTransport: %v", err)
 	}
 
-	time.Sleep(30 * time.Millisecond)
+	session.LastActivityAt = time.Now().Add(-2 * time.Hour)
+	session.UpdatedAt = session.LastActivityAt
 
 	if got := sm.ActiveCount(1); got != 1 {
 		t.Fatalf("ActiveCount with active transport = %d, want 1", got)
@@ -1136,76 +1117,11 @@ func TestSessionManager_ActiveTransportKeepsSessionLive(t *testing.T) {
 	if err := sm.EndTransport(session.ID); err != nil {
 		t.Fatalf("EndTransport: %v", err)
 	}
-	time.Sleep(30 * time.Millisecond)
+	session.LastActivityAt = time.Now().Add(-2 * time.Hour)
+	session.UpdatedAt = session.LastActivityAt
 
 	if got := sm.ActiveCount(1); got != 0 {
 		t.Fatalf("ActiveCount after transport ends = %d, want 0", got)
-	}
-}
-
-func TestRealtimeDisconnectDoesNotStopSession(t *testing.T) {
-	sm := playback.NewSessionManager(5, 2)
-
-	session, err := sm.StartSession(1, "profile-1", 100, playback.PlayDirect, false)
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
-
-	if err := sm.SetRealtimeConnection(session.ID, true); err != nil {
-		t.Fatalf("SetRealtimeConnection(true): %v", err)
-	}
-	if err := sm.SetRealtimeConnection(session.ID, false); err != nil {
-		t.Fatalf("SetRealtimeConnection(false): %v", err)
-	}
-
-	got, err := sm.GetSession(session.ID)
-	if err != nil {
-		t.Fatalf("GetSession after realtime disconnect: %v", err)
-	}
-	if got.ID != session.ID {
-		t.Fatalf("GetSession ID = %q, want %q", got.ID, session.ID)
-	}
-	if sm.ActiveCount(1) != 1 {
-		t.Errorf("ActiveCount after realtime disconnect = %d, want 1", sm.ActiveCount(1))
-	}
-}
-
-func TestGetSessionIncludesRealtimeState(t *testing.T) {
-	sm := playback.NewSessionManager(5, 2)
-
-	session, err := sm.StartSession(1, "profile-1", 100, playback.PlayDirect, false)
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
-
-	if err := sm.SetRealtimeConnection(session.ID, true); err != nil {
-		t.Fatalf("SetRealtimeConnection(true): %v", err)
-	}
-
-	got, err := sm.GetSession(session.ID)
-	if err != nil {
-		t.Fatalf("GetSession: %v", err)
-	}
-	if !got.HasRealtimeConnection {
-		t.Error("GetSession copy should include realtime connection state")
-	}
-	got.HasRealtimeConnection = false
-
-	again, err := sm.GetSession(session.ID)
-	if err != nil {
-		t.Fatalf("GetSession after mutating copy: %v", err)
-	}
-	if !again.HasRealtimeConnection {
-		t.Error("mutating GetSession copy should not change manager state")
-	}
-}
-
-func TestSessionManager_SetWebSocket_NotFound(t *testing.T) {
-	sm := playback.NewSessionManager(5, 2)
-
-	err := sm.SetWebSocket("nonexistent", true)
-	if err != playback.ErrSessionNotFound {
-		t.Errorf("SetWebSocket(nonexistent) = %v, want ErrSessionNotFound", err)
 	}
 }
 
@@ -1305,34 +1221,6 @@ func TestSessionManager_CleanExpired_RespectsMaxIdle(t *testing.T) {
 	}
 }
 
-func TestSessionManager_CleanInactive_TriggersExpirationHook(t *testing.T) {
-	sm := playback.NewSessionManager(0, 0)
-
-	session, err := sm.StartSession(1, "prof", 100, playback.PlayDirect, false)
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
-
-	expiredCh := make(chan string, 1)
-	sm.SetExpirationHook(func(session *playback.Session) {
-		expiredCh <- session.ID
-	})
-
-	expired := sm.CleanInactive(0, 0)
-	if len(expired) != 1 {
-		t.Fatalf("CleanInactive removed %d sessions, want 1", len(expired))
-	}
-
-	select {
-	case got := <-expiredCh:
-		if got != session.ID {
-			t.Fatalf("expiration hook session = %q, want %q", got, session.ID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expiration hook was not called")
-	}
-}
-
 func TestSessionManager_CleanInactive_TriggersAllExpirationHooks(t *testing.T) {
 	sm := playback.NewSessionManager(0, 0)
 
@@ -1377,14 +1265,14 @@ func TestSessionManager_CleanExpired_PausedGracePeriod(t *testing.T) {
 	paused, _ := sm.StartSession(1, "prof", 101, playback.PlayDirect, false)
 	_ = sm.UpdateProgress(paused.ID, 50.0, true)
 
-	// Let both sessions age past the base maxIdle but within the 3x
-	// paused grace period. With 20ms maxIdle: cutoff = now-20ms,
-	// pausedCutoff = now-60ms. After sleeping 50ms, sessions created
-	// 50ms ago are older than cutoff (20ms) but newer than
-	// pausedCutoff (60ms).
-	time.Sleep(50 * time.Millisecond)
+	// Both sessions are past the base idle limit and inside the paused 3x grace.
+	stale := time.Now().Add(-2 * time.Hour)
+	playing.LastActivityAt = stale
+	playing.UpdatedAt = stale
+	paused.LastActivityAt = stale
+	paused.UpdatedAt = stale
 
-	expired := sm.CleanExpired(20 * time.Millisecond)
+	expired := sm.CleanExpired(time.Hour)
 
 	// Only the playing session should be expired.
 	if len(expired) != 1 {
@@ -1406,14 +1294,15 @@ func TestSessionManager_CleanExpired_PausedGracePeriod(t *testing.T) {
 // to another live transcode.
 func TestCheckReplacementAllowedExcludesOnlyTheReplacedSession(t *testing.T) {
 	sm := playback.NewSessionManager(10, 2)
-	sm.SetLivenessGracePeriods(25*time.Millisecond, time.Hour)
+	sm.SetLivenessGracePeriods(time.Hour, 2*time.Hour)
 
 	failed, err := sm.StartSession(1, "profile-1", 100, playback.PlayTranscode, false)
 	if err != nil {
 		t.Fatalf("StartSession(failed): %v", err)
 	}
 	// Age the failed session past the active grace so it no longer counts.
-	time.Sleep(60 * time.Millisecond)
+	failed.LastActivityAt = time.Now().Add(-2 * time.Hour)
+	failed.UpdatedAt = failed.LastActivityAt
 
 	for i := 0; i < 2; i++ {
 		if _, err := sm.StartSession(1, "profile-1", 200+i, playback.PlayTranscode, false); err != nil {

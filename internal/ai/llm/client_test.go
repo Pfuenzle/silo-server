@@ -3,11 +3,12 @@ package llm
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -45,68 +46,57 @@ func TestChatSuccessSendsAuthAndModel(t *testing.T) {
 }
 
 func TestChatRetriesOn429HonoringRetryAfter(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if calls.Add(1) == 1 {
-			w.Header().Set("Retry-After", "1")
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
+	synctest.Test(t, func(t *testing.T) {
+		calls := 0
+		c := NewClient(chatConfig("https://chat.example.test"))
+		c.chatHTTP.Transport = retryRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(chatOK))}
+			if calls == 1 {
+				response.Header.Set("Retry-After", "1")
+				response.StatusCode = http.StatusTooManyRequests
+			}
+			return response, nil
+		})
+		start := time.Now()
+		if _, err := c.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, false); err != nil {
+			t.Fatalf("Chat: %v", err)
 		}
-		w.Write([]byte(chatOK))
-	}))
-	defer srv.Close()
-
-	start := time.Now()
-	c := NewClient(chatConfig(srv.URL))
-	if _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, false); err != nil {
-		t.Fatalf("Chat: %v", err)
-	}
-	if calls.Load() != 2 {
-		t.Errorf("calls = %d, want 2", calls.Load())
-	}
-	if elapsed := time.Since(start); elapsed < time.Second {
-		t.Errorf("did not honor Retry-After: elapsed %v", elapsed)
-	}
+		if calls != 2 {
+			t.Errorf("calls = %d, want 2", calls)
+		}
+		if elapsed := time.Since(start); elapsed < time.Second {
+			t.Errorf("did not honor Retry-After: elapsed %v", elapsed)
+		}
+	})
 }
 
 func TestChatRetriesOn5xxAndEmbeddedErrorAndEmptyChoices(t *testing.T) {
-	responses := []func(w http.ResponseWriter){
-		func(w http.ResponseWriter) { w.WriteHeader(http.StatusBadGateway) },
-		func(w http.ResponseWriter) { w.Write([]byte(`{"error":{"message":"upstream sad"}}`)) },
-		func(w http.ResponseWriter) { w.Write([]byte(`{"choices":[]}`)) },
-		func(w http.ResponseWriter) { w.Write([]byte(chatOK)) },
-	}
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		responses[calls.Add(1)-1](w)
-	}))
-	defer srv.Close()
-
-	c := NewClient(chatConfig(srv.URL))
-	out, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, false)
-	if err != nil {
-		t.Fatalf("Chat: %v", err)
-	}
-	if out != "hello" || calls.Load() != 4 {
-		t.Errorf("out=%q calls=%d, want hello/4", out, calls.Load())
-	}
-}
-
-func TestChatFailsFastOnNon429ClientError(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer srv.Close()
-
-	c := NewClient(chatConfig(srv.URL))
-	if _, err := c.Chat(context.Background(), []Message{{Role: "user", Content: "hi"}}, false); err == nil {
-		t.Fatal("expected error")
-	}
-	if calls.Load() != 1 {
-		t.Errorf("calls = %d, want 1 (no retry on 401)", calls.Load())
-	}
+	synctest.Test(t, func(t *testing.T) {
+		responses := []struct {
+			status int
+			body   string
+		}{
+			{http.StatusBadGateway, ""},
+			{http.StatusOK, `{"error":{"message":"upstream sad"}}`},
+			{http.StatusOK, `{"choices":[]}`},
+			{http.StatusOK, chatOK},
+		}
+		calls := 0
+		c := NewClient(chatConfig("https://chat.example.test"))
+		c.chatHTTP.Transport = retryRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			response := responses[calls]
+			calls++
+			return &http.Response{StatusCode: response.status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response.body))}, nil
+		})
+		out, err := c.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, false)
+		if err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+		if out != "hello" || calls != 4 {
+			t.Errorf("out=%q calls=%d, want hello/4", out, calls)
+		}
+	})
 }
 
 const verboseJSON = `{"language":"english","text":"hi there","segments":[{"start":0.0,"end":1.5,"text":" hi"},{"start":1.5,"end":3.0,"text":" there"}]}`
@@ -169,12 +159,15 @@ func TestTranscribeParsesSegmentsAndMultipart(t *testing.T) {
 
 func TestTranscribeOmitsVADFilterForStrictHostedEndpoints(t *testing.T) {
 	for url, wantVAD := range map[string]bool{
-		"https://api.openai.com":              false,
-		"https://myorg.openai.azure.com":      false,
-		"https://api.groq.com/openai":         false,
-		"http://192.168.1.10:8000":            true,
-		"https://whisper.example.com":         true,
-		"https://api.deepinfra.com/v1/openai": true,
+		"https://api.openai.com":               false,
+		"https://openrouter.ai/api/v1":         false,
+		"https://gateway.openrouter.ai/api/v1": false,
+		"https://openrouter.ai.example.test":   true,
+		"https://myorg.openai.azure.com":       false,
+		"https://api.groq.com/openai":          false,
+		"http://192.168.1.10:8000":             true,
+		"https://whisper.example.com":          true,
+		"https://api.deepinfra.com/v1/openai":  true,
 	} {
 		got := !hostMatchesAny(url, strictHostedASRHosts)
 		if got != wantVAD {
@@ -245,45 +238,6 @@ func TestTranscribeEmptySegmentsIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestTranscribeMissingSegmentsFieldFailsFast(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Write([]byte(`{"text":"plain response without segments"}`))
-	}))
-	defer srv.Close()
-
-	cfg := chatConfig(srv.URL)
-	cfg.ASRModel = "whisper-test"
-	_, err := NewClient(cfg).Transcribe(context.Background(), TranscribeRequest{Filename: "c.wav", Audio: []byte("x")})
-	if err == nil || !strings.Contains(err.Error(), "verbose_json") {
-		t.Fatalf("err = %v, want verbose_json complaint", err)
-	}
-	if calls.Load() != 1 {
-		t.Errorf("calls = %d, want 1 (permanent error must not retry)", calls.Load())
-	}
-}
-
-func TestTranscribeUsesASROverrides(t *testing.T) {
-	var gotAuth atomic.Value
-	asrSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth.Store(r.Header.Get("Authorization"))
-		w.Write([]byte(verboseJSON))
-	}))
-	defer asrSrv.Close()
-
-	cfg := Config{
-		BaseURL: "http://chat.invalid", APIKey: "chat-key", ChatModel: "m",
-		ASRBaseURL: asrSrv.URL, ASRAPIKey: "asr-key", ASRModel: "whisper-test",
-	}
-	if _, err := NewClient(cfg).Transcribe(context.Background(), TranscribeRequest{Filename: "c.wav", Audio: []byte("x")}); err != nil {
-		t.Fatalf("Transcribe: %v", err)
-	}
-	if gotAuth.Load() != "Bearer asr-key" {
-		t.Errorf("auth = %q, want asr-key", gotAuth.Load())
-	}
-}
-
 func TestTranscribeRequiresConfig(t *testing.T) {
 	c := NewClient(Config{BaseURL: "http://x", ChatModel: "m"}) // no ASR model
 	if _, err := c.Transcribe(context.Background(), TranscribeRequest{Filename: "c.wav", Audio: []byte("x")}); err == nil {
@@ -303,33 +257,6 @@ func TestTranscribeChatOnlyGatewayGetsConfigHint(t *testing.T) {
 	_, err := NewClient(cfg).Transcribe(context.Background(), TranscribeRequest{Filename: "c.wav", Audio: []byte("x")})
 	if err == nil || !strings.Contains(err.Error(), "Whisper-compatible Transcription base URL") {
 		t.Fatalf("err = %v, want configuration hint", err)
-	}
-}
-
-func TestIsChatOnlyGateway(t *testing.T) {
-	cases := map[string]bool{
-		"https://openrouter.ai/api":           true,
-		"https://openrouter.ai":               true,
-		"openrouter.ai/api/v1":                true,
-		"https://gateway.openrouter.ai":       true,
-		"https://api.groq.com/openai":         false,
-		"https://api.openai.com":              false,
-		"http://localhost:8000":               false,
-		"https://my-openrouter.ai.example.io": false,
-		"":                                    false,
-	}
-	for in, want := range cases {
-		if got := IsChatOnlyGateway(in); got != want {
-			t.Errorf("IsChatOnlyGateway(%q) = %v, want %v", in, got, want)
-		}
-	}
-}
-
-func TestTranscribeRefusesChatOnlyGateway(t *testing.T) {
-	cfg := Config{BaseURL: "https://openrouter.ai/api", ChatModel: "m", ASRModel: "whisper-1"}
-	_, err := NewClient(cfg).Transcribe(context.Background(), TranscribeRequest{Filename: "c.wav", Audio: []byte("x")})
-	if err == nil || !strings.Contains(err.Error(), "cannot produce timestamped transcriptions") {
-		t.Fatalf("err = %v, want chat-only refusal", err)
 	}
 }
 

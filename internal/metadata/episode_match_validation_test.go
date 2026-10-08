@@ -76,11 +76,19 @@ func TestExtractEpisodeMatchTitle(t *testing.T) {
 		"standard radarr style": "/tv/Crims/Season 1/Crims - S01E01 - Day One[WEBDL-1080p.AAC.h264.NTb].mp4",
 		"dotted release":        "/tv/Crims/Season 1/Crims.S01E01.Day.One.1080p.WEB-DL.x264-GROUP.mkv",
 		"no episode title":      "/tv/Crims/Season 1/Crims.S01E01.1080p.WEB.x264-GROUP.mkv",
+		// Absolute-numbered episodes: the whole episode code has to be consumed,
+		// or its last digit is read as the start of the episode title.
+		"four digit episode":        "/tv/One Piece/Season 23/One Piece S23E1162 - Wano Country.mkv",
+		"four digit dotted release": "/tv/One Piece/Season 23/One.Piece.S23E1162.Wano.Country.1080p.WEB-DL.x264-GROUP.mkv",
+		"four digit multi episode":  "/tv/One Piece/Season 23/One Piece S23E1162E1163 - Wano Country.mkv",
 	}
 	wants := map[string]string{
-		"standard radarr style": "Day One",
-		"dotted release":        "Day One",
-		"no episode title":      "",
+		"standard radarr style":     "Day One",
+		"dotted release":            "Day One",
+		"no episode title":          "",
+		"four digit episode":        "Wano Country",
+		"four digit dotted release": "Wano Country",
+		"four digit multi episode":  "Wano Country",
 	}
 	for name, path := range tests {
 		name, path := name, path
@@ -90,42 +98,6 @@ func TestExtractEpisodeMatchTitle(t *testing.T) {
 				t.Fatalf("extractEpisodeMatchTitle() = %q, want %q", got, wants[name])
 			}
 		})
-	}
-}
-
-func TestValidateSeriesMatchByEpisodes_SelectsSecondExactTitleCandidate(t *testing.T) {
-	t.Parallel()
-	provider := &episodeValidationStubProvider{episodes: map[string][]EpisodeResult{
-		"2020": {
-			{SeasonNumber: 1, EpisodeNumber: 1, Title: "Arrival"},
-			{SeasonNumber: 1, EpisodeNumber: 2, Title: "Departure"},
-		},
-		"2015": {
-			{SeasonNumber: 1, EpisodeNumber: 1, Title: "Day One"},
-			{SeasonNumber: 1, EpisodeNumber: 2, Title: "Crime and Punishment"},
-		},
-	}}
-	hints := &MatchHints{
-		Title: "Crims", Type: "series",
-		AllGroupFilePaths: []string{
-			"/tv/Crims/Season 1/Crims - S01E01 - Day One[WEBDL-1080p].mkv",
-			"/tv/Crims/Season 1/Crims - S01E02 - Crime and Punishment[WEBDL-1080p].mkv",
-		},
-	}
-	candidates := []MatchCandidate{
-		{Title: "Crims", Year: 2020, ContentType: "series", Sources: []string{"tmdb"}, ProviderIDs: map[string]string{"tmdb": "2020"}},
-		{Title: "Crims", Year: 2015, ContentType: "series", Sources: []string{"tmdb"}, ProviderIDs: map[string]string{"tmdb": "2015"}},
-	}
-
-	winner, errs := validateSeriesMatchByEpisodes(context.Background(), hints, candidates, []Provider{provider}, "en")
-	if len(errs) != 0 {
-		t.Fatalf("validation errors = %v", errs)
-	}
-	if winner == nil || winner.ProviderIDs["tmdb"] != "2015" {
-		t.Fatalf("winner = %+v, want 2015 candidate", winner)
-	}
-	if !containsString(winner.MatchReasons, "episode_title_corroboration:2_of_2") {
-		t.Fatalf("winner reasons = %v", winner.MatchReasons)
 	}
 }
 

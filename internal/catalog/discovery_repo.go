@@ -321,32 +321,15 @@ func appendDiscoveryLibraryScope(
 		scope = libraryIDs
 	}
 
-	// Intersect the section scope with the viewer's allowed set so a scoped
-	// section can never widen access beyond what the viewer may see.
-	allowed := filter.AllowedLibraryIDs
-	if len(scope) > 0 {
-		if allowed != nil {
-			allowed = intersectInts(scope, allowed)
-			if len(allowed) == 0 {
-				return false
-			}
-		} else {
-			allowed = scope
-		}
-	} else if allowed != nil && len(allowed) == 0 {
+	// Limit the section scope to the viewer's access so a scoped section can
+	// never widen it beyond what the viewer may see.
+	allowed, none := filter.LibraryScope(scope)
+	if none {
 		return false
 	}
 
 	// buildLibraryScopeJoin uses semi-joins: disabled libraries are an item-level
 	// exclusion, matching the rest of catalog access filtering and avoiding row fanout.
-	if len(allowed) == 0 && len(filter.DisabledLibraryIDs) > 0 {
-		// In deny-only mode, require at least one library membership. Without this,
-		// stale or provisional media_items rows with no membership pass NOT EXISTS.
-		*conditions = append(*conditions,
-			"EXISTS (SELECT 1 FROM media_item_libraries mil_scope_any WHERE mil_scope_any.content_id = mi.content_id)",
-		)
-	}
-
 	whereSQL, scopeArgs, ok := buildLibraryScopeJoin(
 		allowed,
 		filter.DisabledLibraryIDs,

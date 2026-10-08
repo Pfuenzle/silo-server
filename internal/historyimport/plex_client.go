@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Silo-Server/silo-server/internal/netguard"
 )
 
 const (
@@ -29,8 +32,10 @@ const (
 	// plexMetadataBatchSize caps how many rating keys one /library/metadata/{a,b,c}
 	// request carries. The PMS accepts comma-separated keys; batching keeps a
 	// history sweep of thousands of id-less items to a handful of requests under
-	// the shared upstream rate limit.
-	plexMetadataBatchSize = 50
+	// the shared upstream rate limit. Full movie metadata is heavy: on a loaded
+	// PMS 1.43 server a cold batch of 50 movies took over 40s, past the client
+	// timeout, so batches stay small enough to finish well inside it.
+	plexMetadataBatchSize = 20
 )
 
 type PlexClient struct {
@@ -46,10 +51,44 @@ type PlexAccount struct {
 }
 
 func NewPlexClient() *PlexClient {
+	httpClient := netguard.NewClient(30 * time.Second)
+	httpClient.CheckRedirect = checkPlexRedirect
 	return &PlexClient{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: httpClient,
 		limiter:    sharedHistoryImportUpstreamLimiter,
 	}
+}
+
+// checkPlexRedirect bounds the redirect chain and drops the Plex credential
+// once the chain leaves the host it was sent to.
+//
+// net/http strips Authorization, Cookie, and WWW-Authenticate across a
+// cross-host redirect but knows nothing about X-Plex-Token, so a redirect from
+// a user-supplied or advertised Plex address to another host would otherwise
+// hand that host the user's token. Same-host redirects (including a port
+// change) keep it.
+//
+// The comparison is against via[0], not the previous hop: net/http re-copies
+// the original request's headers onto every redirect, so deleting the header
+// here clears it for this hop alone. A chain that leaves the origin host and
+// then redirects within the new host would otherwise get the token back.
+//
+// A redirect from HTTPS to cleartext HTTP drops the token too, even on the
+// same host, so a token sent over an encrypted connection never follows a
+// downgrade.
+func checkPlexRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 Plex redirects")
+	}
+	if len(via) == 0 {
+		return nil
+	}
+	origin := via[0].URL
+	downgrade := strings.EqualFold(origin.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https")
+	if downgrade || !strings.EqualFold(origin.Hostname(), req.URL.Hostname()) {
+		req.Header.Del("X-Plex-Token")
+	}
+	return nil
 }
 
 func (c *PlexClient) CreatePin(ctx context.Context) (pinID int, pinCode string, err error) {
@@ -123,9 +162,11 @@ func (c *PlexClient) GetResources(ctx context.Context, token string) ([]PlexServ
 			Name:             entry.Name,
 			ClientIdentifier: entry.ClientIdentifier,
 			AccessToken:      entry.AccessToken,
+			ConnectionURLs:   make([]string, 0, len(entry.Connections)),
 			Owned:            entry.Owned,
 		}
 		for _, conn := range entry.Connections {
+			server.ConnectionURLs = append(server.ConnectionURLs, conn.URI)
 			if conn.Local {
 				server.LocalURL = conn.URI
 				server.HasLocalURL = true
@@ -155,22 +196,24 @@ func (c *PlexClient) GetCurrentUser(ctx context.Context, token string) (*PlexAcc
 	return &account, nil
 }
 
+type plexMediaContainerBody struct {
+	Size      int        `json:"size"`
+	TotalSize int        `json:"totalSize"`
+	Offset    int        `json:"offset"`
+	Metadata  []PlexItem `json:"Metadata"`
+	// Video mirrors Metadata: the discover API inconsistently keys some
+	// responses on "Video" instead of "Metadata" (movie items in
+	// particular), so both must be decoded.
+	Video     []PlexItem `json:"Video"`
+	Directory []struct {
+		Key   string `json:"key"`
+		Type  string `json:"type"`
+		Title string `json:"title"`
+	} `json:"Directory"`
+}
+
 type plexMediaContainer struct {
-	MediaContainer struct {
-		Size      int        `json:"size"`
-		TotalSize int        `json:"totalSize"`
-		Offset    int        `json:"offset"`
-		Metadata  []PlexItem `json:"Metadata"`
-		// Video mirrors Metadata: the discover API inconsistently keys some
-		// responses on "Video" instead of "Metadata" (movie items in
-		// particular), so both must be decoded.
-		Video     []PlexItem `json:"Video"`
-		Directory []struct {
-			Key   string `json:"key"`
-			Type  string `json:"type"`
-			Title string `json:"title"`
-		} `json:"Directory"`
-	} `json:"MediaContainer"`
+	MediaContainer plexMediaContainerBody `json:"MediaContainer"`
 }
 
 // items returns the container's media entries regardless of whether the
@@ -237,9 +280,18 @@ func (c *PlexClient) FetchLibrarySections(ctx context.Context, baseURL, token st
 		return nil, err
 	}
 	c.setPlexHeaders(req, token)
-	var container plexMediaContainer
+	// Decoded through a pointer so an absent MediaContainer is distinguishable
+	// from an empty one: a stale reverse proxy that answers 200 with unrelated
+	// JSON would otherwise decode into a zero container, win the connection
+	// race against the real server, and import no history at all.
+	var container struct {
+		MediaContainer *plexMediaContainerBody `json:"MediaContainer"`
+	}
 	if err := c.doJSON(req, &container); err != nil {
 		return nil, fmt.Errorf("fetching Plex library sections: %w", err)
+	}
+	if container.MediaContainer == nil {
+		return nil, fmt.Errorf("fetching Plex library sections: response is missing MediaContainer")
 	}
 	var sections []struct{ Key, Type, Title string }
 	for _, dir := range container.MediaContainer.Directory {
@@ -248,22 +300,31 @@ func (c *PlexClient) FetchLibrarySections(ctx context.Context, baseURL, token st
 	return sections, nil
 }
 
+// FetchWatchedItems lists the section items the token's user has played at
+// least once, including items marked watched without playback.
 func (c *PlexClient) FetchWatchedItems(ctx context.Context, baseURL, token, sectionKey string, mediaType int) ([]PlexItem, error) {
-	return c.fetchSectionItems(ctx, baseURL, token, sectionKey, mediaType, true)
+	return c.fetchSectionItems(ctx, baseURL, token, sectionKey, mediaType, "unwatched", "0")
+}
+
+// FetchInProgressItems lists the section items with a saved resume position.
+// Unlike /library/onDeck it has no Continue Watching age window and never
+// adds unstarted next-up episodes.
+func (c *PlexClient) FetchInProgressItems(ctx context.Context, baseURL, token, sectionKey string, mediaType int) ([]PlexItem, error) {
+	return c.fetchSectionItems(ctx, baseURL, token, sectionKey, mediaType, "inProgress", "1")
 }
 
 func (c *PlexClient) FetchSectionItems(ctx context.Context, baseURL, token, sectionKey string, mediaType int) ([]PlexItem, error) {
-	return c.fetchSectionItems(ctx, baseURL, token, sectionKey, mediaType, false)
+	return c.fetchSectionItems(ctx, baseURL, token, sectionKey, mediaType, "", "")
 }
 
-func (c *PlexClient) fetchSectionItems(ctx context.Context, baseURL, token, sectionKey string, mediaType int, watchedOnly bool) ([]PlexItem, error) {
+func (c *PlexClient) fetchSectionItems(ctx context.Context, baseURL, token, sectionKey string, mediaType int, filterKey, filterValue string) ([]PlexItem, error) {
 	var allItems []PlexItem
 	offset := 0
 	for {
 		query := url.Values{}
 		query.Set("type", strconv.Itoa(mediaType))
-		if watchedOnly {
-			query.Set("unwatched", "0")
+		if filterKey != "" {
+			query.Set(filterKey, filterValue)
 		}
 		query.Set("includeGuids", "1")
 		query.Set("X-Plex-Container-Start", strconv.Itoa(offset))
@@ -278,9 +339,10 @@ func (c *PlexClient) fetchSectionItems(ctx context.Context, baseURL, token, sect
 		if err := c.doJSON(req, &container); err != nil {
 			return nil, fmt.Errorf("fetching Plex section items (section %s, type %d, offset %d): %w", sectionKey, mediaType, offset, err)
 		}
-		allItems = append(allItems, container.MediaContainer.Metadata...)
-		offset += len(container.MediaContainer.Metadata)
-		if offset >= container.MediaContainer.TotalSize || len(container.MediaContainer.Metadata) == 0 {
+		pageItems := container.items()
+		allItems = append(allItems, pageItems...)
+		offset += len(pageItems)
+		if offset >= container.MediaContainer.TotalSize || len(pageItems) == 0 {
 			break
 		}
 	}
@@ -295,7 +357,7 @@ func (c *PlexClient) fetchSectionItems(ctx context.Context, baseURL, token, sect
 // The discover listing does not honor includeGuids, so items usually arrive
 // without external ids. Each id-less item gets a follow-up per-item metadata
 // fetch to resolve its Guid array; failures there degrade to warnings so the
-// rest of the watchlist still imports (matching falls back to title/year).
+// remaining watchlist items can still import.
 func (c *PlexClient) FetchWatchlist(ctx context.Context, accountToken string) ([]PlexItem, []string, error) {
 	base := c.discoverBaseURL
 	if base == "" {
@@ -330,24 +392,53 @@ func (c *PlexClient) FetchWatchlist(ctx context.Context, accountToken string) ([
 	var firstErr error
 	unresolved := 0
 	attempted := 0
+	failureStreak := 0
+	gaveUp := false
+	unreached := 0
 	for i := range allItems {
-		if len(allItems[i].Guid) > 0 {
+		if hasMatchablePlexGuid(allItems[i].Guid) {
 			continue
 		}
 		attempted++
+		if gaveUp {
+			// The lookup gave up below; still count what it never asked about so
+			// the warning names every item that stays unmatched.
+			unreached++
+			unresolved++
+			continue
+		}
 		detail, err := c.fetchWatchlistItemMetadata(ctx, base, accountToken, allItems[i].RatingKey)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 		if err != nil || detail == nil {
 			unresolved++
+			// A 404 means that one entry is gone; anything else (auth, outage,
+			// timeout) repeats on every remaining entry, so stop asking.
+			if err != nil && !isPlexHTTPStatus(err, http.StatusNotFound) {
+				failureStreak++
+				gaveUp = failureStreak >= plexMetadataFailureStreakLimit
+			} else {
+				failureStreak = 0
+			}
 			continue
 		}
+		failureStreak = 0
 		allItems[i].Guid, allItems[i].Year = applyPlexMetadataFallback(
-			allItems[i].Guid, allItems[i].Year, allItems[i].Type, detail)
+			allItems[i].Guid, allItems[i].Year, detail)
+		if !hasMatchablePlexGuid(allItems[i].Guid) {
+			unresolved++
+		}
+	}
+	// Giving up on the last unresolved item skipped nothing, so it is not an
+	// early stop the run has to explain.
+	aborted := unreached > 0
+	if aborted {
+		slog.WarnContext(ctx, "plex history import: giving up on watchlist metadata after repeated failures",
+			"component", "historyimport", "unreached", unreached, "attempted", attempted, "error", firstErr)
 	}
 	if unresolved > 0 {
-		warnings = append(warnings, plexUnresolvedIDsWarning("watchlist", "items", unresolved, attempted, firstErr))
+		warnings = append(warnings, plexUnresolvedIDsWarning("watchlist", "items", unresolved, attempted, firstErr, aborted))
 	}
 	return allItems, warnings, nil
 }
@@ -370,19 +461,6 @@ func (c *PlexClient) fetchWatchlistItemMetadata(ctx context.Context, base, accou
 		return nil, nil
 	}
 	return &items[0], nil
-}
-
-func (c *PlexClient) FetchOnDeck(ctx context.Context, baseURL, token string) ([]PlexItem, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/library/onDeck?includeGuids=1", nil)
-	if err != nil {
-		return nil, err
-	}
-	c.setPlexHeaders(req, token)
-	var container plexMediaContainer
-	if err := c.doJSON(req, &container); err != nil {
-		return nil, fmt.Errorf("fetching Plex on-deck items: %w", err)
-	}
-	return container.MediaContainer.Metadata, nil
 }
 
 func (c *PlexClient) FetchMetadata(ctx context.Context, baseURL, token, ratingKey string) (*PlexItem, error) {
@@ -529,12 +607,15 @@ func (c *PlexClient) ListAccounts(ctx context.Context, baseURL, token string) ([
 
 // PlexHistoryItem is a single entry from the PMS session history endpoint.
 // It shares fields with plexItem but comes from the history API rather than the library API.
+// History rows are sparse: PMS 1.43 sends no Guid, year, duration, or
+// grandparentRatingKey, only grandparentKey (/library/metadata/{key}).
 type PlexHistoryItem struct {
 	RatingKey            string    `json:"ratingKey"`
 	Key                  string    `json:"key"`
 	Type                 string    `json:"type"`
 	Title                string    `json:"title"`
 	GrandparentTitle     string    `json:"grandparentTitle"`
+	GrandparentKey       string    `json:"grandparentKey"`
 	GrandparentRatingKey string    `json:"grandparentRatingKey"`
 	ParentIndex          int       `json:"parentIndex"`
 	Index                int       `json:"index"`
@@ -573,6 +654,12 @@ func (c *PlexClient) FetchUserHistory(ctx context.Context, baseURL, token, accou
 		if err := c.doJSON(req, &container); err != nil {
 			return nil, fmt.Errorf("fetching Plex user history (account %s, offset %d): %w", accountID, offset, err)
 		}
+		for i := range container.MediaContainer.Metadata {
+			item := &container.MediaContainer.Metadata[i]
+			if item.GrandparentRatingKey == "" {
+				item.GrandparentRatingKey = plexRatingKeyFromMetadataPath(item.GrandparentKey)
+			}
+		}
 		allItems = append(allItems, container.MediaContainer.Metadata...)
 		offset += len(container.MediaContainer.Metadata)
 		if offset >= container.MediaContainer.TotalSize || len(container.MediaContainer.Metadata) == 0 {
@@ -580,6 +667,16 @@ func (c *PlexClient) FetchUserHistory(ctx context.Context, baseURL, token, accou
 		}
 	}
 	return allItems, nil
+}
+
+// plexRatingKeyFromMetadataPath returns the rating key of a PMS metadata path
+// such as "/library/metadata/4000", or "" for any other shape.
+func plexRatingKeyFromMetadataPath(path string) string {
+	key, ok := strings.CutPrefix(path, "/library/metadata/")
+	if !ok || key == "" || strings.Contains(key, "/") {
+		return ""
+	}
+	return key
 }
 
 func (c *PlexClient) Scrobble(ctx context.Context, baseURL, token, ratingKey string) error {

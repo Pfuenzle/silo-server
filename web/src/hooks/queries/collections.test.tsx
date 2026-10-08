@@ -4,10 +4,24 @@ import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ProfileRequestContextSnapshot } from "@/api/client";
-import { useSetCollectionSortPreference } from "./collections";
+import type { Collection, CollectionsListResponse } from "@/api/types";
+import {
+  useAddItemToCollection,
+  useRemoveCollectionItem,
+  useReorderCollectionItems,
+  useReorderCollections,
+  useSetCollectionSortPreference,
+} from "./collections";
+import { collectionKeys, libraryCollectionKeys } from "./keys";
 
 const apiMock = vi.hoisted(() => vi.fn());
 const apiWithProfileRequestContextMock = vi.hoisted(() => vi.fn());
+vi.mock("@/api/v2/request", async () => ({
+  ...(await vi.importActual<typeof import("@/api/v2/request")>("@/api/v2/request")),
+  v2: apiWithProfileRequestContextMock,
+}));
+const errorToast = vi.hoisted(() => vi.fn());
+vi.mock("sonner", () => ({ toast: { error: errorToast, success: vi.fn() } }));
 // Both guards are stubbed so these tests exercise the hook's own branching
 // rather than the client module's internal auth-generation counter.
 const isProfileRequestContextCurrentMock = vi.hoisted(() => vi.fn(() => true));
@@ -89,9 +103,10 @@ describe("useSetCollectionSortPreference", () => {
 
     first.resolve({});
     await waitFor(() => expect(apiWithProfileRequestContextMock).toHaveBeenCalledTimes(2));
-    expect(
-      JSON.parse(apiWithProfileRequestContextMock.mock.calls[1]?.[2]?.body as string),
-    ).toMatchObject({ field: "title", order: "asc" });
+    expect(apiWithProfileRequestContextMock.mock.calls[1]?.[1]?.body).toMatchObject({
+      field: "title",
+      order: "asc",
+    });
 
     second.resolve({});
   });
@@ -103,52 +118,36 @@ describe("useSetCollectionSortPreference", () => {
     const first = deferred<unknown>();
     apiWithProfileRequestContextMock.mockReturnValueOnce(first.promise).mockResolvedValue({});
 
-    const { result } = renderSortPreferenceHook();
+    const { result, queryClient } = renderSortPreferenceHook();
+    const writes: Promise<void>[] = [];
     const chooser = profileAuth("profile-1");
 
     act(() => {
-      void result.current({
-        collection_kind: "watchlist",
-        field: "title",
-        order: "asc",
-        profileAuth: chooser,
-      });
-      void result.current({
-        collection_kind: "favorites",
-        field: "runtime",
-        order: "desc",
-        profileAuth: chooser,
-      });
+      writes.push(
+        result.current({
+          collection_kind: "watchlist",
+          field: "title",
+          order: "asc",
+          profileAuth: chooser,
+        }),
+      );
+      writes.push(
+        result.current({
+          collection_kind: "favorites",
+          field: "runtime",
+          order: "desc",
+          profileAuth: chooser,
+        }),
+      );
     });
 
     await waitFor(() => expect(apiWithProfileRequestContextMock).toHaveBeenCalledTimes(1));
     first.resolve({});
     await waitFor(() => expect(apiWithProfileRequestContextMock).toHaveBeenCalledTimes(2));
 
-    for (const call of apiWithProfileRequestContextMock.mock.calls) {
-      expect(call[0]).toBe("/collections/sort-preference");
-      expect(call[1]).toBe(chooser);
-      // The snapshot is request authority, not part of the stored preference.
-      expect(JSON.parse(call[2]?.body as string)).not.toHaveProperty("profileAuth");
-    }
-  });
-
-  // The snapshot carries the bearer access token and the profile PIN token.
-  // Routing these writes through a TanStack mutation would strand both in the
-  // mutation cache after the request settles, which api/client.ts forbids.
-  it("keeps the profile snapshot out of cached client state", async () => {
-    apiWithProfileRequestContextMock.mockResolvedValue({});
-    const { result, queryClient } = renderSortPreferenceHook();
-
     await act(async () => {
-      await result.current({
-        collection_kind: "favorites",
-        field: "title",
-        order: "asc",
-        profileAuth: profileAuth("profile-1"),
-      });
+      await Promise.all(writes);
     });
-
     expect(queryClient.getMutationCache().getAll()).toHaveLength(0);
     const cached = JSON.stringify([
       queryClient.getMutationCache().getAll(),
@@ -159,7 +158,18 @@ describe("useSetCollectionSortPreference", () => {
     ]);
     expect(cached).not.toContain("access-token-secret");
     expect(cached).not.toContain("pin-token-secret");
+
+    for (const call of apiWithProfileRequestContextMock.mock.calls) {
+      expect(call[0]).toBe("PUT /api/v2/collections/sort-preference");
+      expect(call[1].profileContext).toBe(chooser);
+      // The snapshot is request authority, not part of the stored preference.
+      expect(call[1]?.body).not.toHaveProperty("profileAuth");
+    }
   });
+
+  // The snapshot carries the bearer access token and the profile PIN token.
+  // Routing these writes through a TanStack mutation would strand both in the
+  // mutation cache after the request settles, which api/client.ts forbids.
 
   it("does not invalidate another profile's catalog after a profile switch", async () => {
     apiWithProfileRequestContextMock.mockResolvedValue({});
@@ -179,5 +189,109 @@ describe("useSetCollectionSortPreference", () => {
 
     expect(apiWithProfileRequestContextMock).toHaveBeenCalledTimes(1);
     expect(invalidate).not.toHaveBeenCalled();
+  });
+});
+
+describe("reordering personal collections", () => {
+  afterEach(() => vi.clearAllMocks());
+
+  function listed(id: string, creator: string, sortOrder: number) {
+    return { id, creator_profile_id: creator, sort_order: sortOrder } as Collection;
+  }
+
+  it("sends a flat order and moves only the profile's own collections in the cache", async () => {
+    const pending = deferred<unknown>();
+    apiWithProfileRequestContextMock.mockReturnValue(pending.promise);
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    queryClient.setQueryData<CollectionsListResponse>(collectionKeys.list(), {
+      collections: [
+        listed("mine-a", "p-me", 0),
+        listed("mine-b", "p-me", 1),
+        listed("theirs", "p-parent", 0),
+      ],
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useReorderCollections(), { wrapper });
+
+    act(() => {
+      result.current.mutate({ orderedIds: ["mine-b", "mine-a"], etag: '"order"' });
+    });
+
+    await waitFor(() =>
+      expect(
+        queryClient
+          .getQueryData<CollectionsListResponse>(collectionKeys.list())
+          ?.collections.map((c) => [c.id, c.sort_order]),
+      ).toEqual([
+        ["mine-b", 0],
+        ["mine-a", 1],
+        ["theirs", 0],
+      ]),
+    );
+    expect(apiWithProfileRequestContextMock).toHaveBeenCalledWith("PUT /api/v2/collections/order", {
+      headers: { "If-Match": '"order"' },
+      body: { ordered_ids: ["mine-b", "mine-a"] },
+    });
+    pending.resolve({});
+  });
+});
+
+describe("personal collection writes refresh library Collections tabs", () => {
+  afterEach(() => vi.clearAllMocks());
+
+  // A personal collection shown on the Collections tab is also listed, with its
+  // item count and poster, on each library's Collections tab.
+  const writes: Array<[string, () => () => Promise<unknown>]> = [
+    [
+      "adding an item",
+      () => {
+        const m = useAddItemToCollection();
+        return () => m.mutateAsync({ collectionId: "c", mediaItemId: "m" });
+      },
+    ],
+    [
+      "removing an item",
+      () => {
+        const m = useRemoveCollectionItem("c");
+        return () => m.mutateAsync("m");
+      },
+    ],
+    [
+      "reordering items",
+      () => {
+        const m = useReorderCollectionItems("c");
+        return () => m.mutateAsync({ orderedIds: ["m"], etag: '"items"' });
+      },
+    ],
+    [
+      "reordering collections",
+      () => {
+        const m = useReorderCollections();
+        return () => m.mutateAsync({ orderedIds: ["c"], etag: '"order"' });
+      },
+    ],
+  ];
+
+  it.each(writes)("%s marks loaded library Collections tabs stale", async (_name, useWrite) => {
+    apiWithProfileRequestContextMock.mockReset().mockResolvedValue({});
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    const libraryTab = [...libraryCollectionKeys.all, 7];
+    queryClient.setQueryData(libraryTab, []);
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useWrite(), { wrapper });
+
+    await act(async () => {
+      await result.current();
+    });
+
+    await waitFor(() => expect(queryClient.getQueryState(libraryTab)?.isInvalidated).toBe(true));
   });
 });

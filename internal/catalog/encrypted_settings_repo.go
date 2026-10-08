@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Silo-Server/silo-server/internal/config"
 	"github.com/Silo-Server/silo-server/internal/secret"
 )
 
@@ -58,9 +61,12 @@ var SensitiveSettingKeys = map[string]bool{
 	"s3.operational_access_key":   true,
 	"s3.operational_secret_key":   true,
 	"s3.operational_token_secret": true,
+	// A staged storage transition contains a complete target credential bundle.
+	// It is machine-managed and cleared when the transition commits.
+	"storage.transition.target": true,
 
-	// Redis — url may embed credentials (redis://:pass@host); sentinel_password
-	// is read at db_loader L334 and was MISSING from the old redaction map.
+	// Redis — url may embed credentials (redis://:pass@host). sentinel_password
+	// is no longer read, but rows written by older builds stay encrypted.
 	"redis.url":               true,
 	"redis.sentinel_password": true,
 
@@ -157,6 +163,10 @@ type settingsBatchWriter interface {
 	SetMany(ctx context.Context, values map[string]string) error
 }
 
+type settingsBatchReader interface {
+	GetMany(ctx context.Context, keys ...string) (map[string]string, error)
+}
+
 type settingsAtomicUpdater interface {
 	UpdateAtomic(
 		ctx context.Context,
@@ -192,11 +202,18 @@ func (r *EncryptedSettingsRepo) UpdateAtomic(
 	ctx context.Context,
 	update func(current map[string]string) (map[string]string, error),
 ) error {
-	inner, ok := r.inner.(settingsAtomicUpdater)
-	if !ok {
-		return fmt.Errorf("settings store does not support atomic updates")
-	}
-	return inner.UpdateAtomic(ctx, func(rawCurrent map[string]string) (map[string]string, error) {
+	return r.UpdateAtomicInTransaction(ctx, func(current map[string]string, _ pgx.Tx) (map[string]string, error) {
+		return update(current)
+	})
+}
+
+// UpdateAtomicInTransaction preserves the plaintext callback contract and
+// passes through the raw store's transaction when it supports one.
+func (r *EncryptedSettingsRepo) UpdateAtomicInTransaction(
+	ctx context.Context,
+	update func(current map[string]string, tx pgx.Tx) (map[string]string, error),
+) error {
+	encryptedUpdate := func(rawCurrent map[string]string, tx pgx.Tx) (map[string]string, error) {
 		current := make(map[string]string, len(rawCurrent))
 		for key, value := range rawCurrent {
 			plain, err := r.cipher.DecryptIfEncrypted(value, secret.SettingsAAD(key))
@@ -205,7 +222,7 @@ func (r *EncryptedSettingsRepo) UpdateAtomic(
 			}
 			current[key] = plain
 		}
-		writes, err := update(current)
+		writes, err := update(current, tx)
 		if err != nil {
 			return nil, err
 		}
@@ -221,7 +238,18 @@ func (r *EncryptedSettingsRepo) UpdateAtomic(
 			encrypted[key] = value
 		}
 		return encrypted, nil
-	})
+	}
+	if inner, ok := r.inner.(interface {
+		UpdateAtomicInTransaction(context.Context, func(map[string]string, pgx.Tx) (map[string]string, error)) error
+	}); ok {
+		return inner.UpdateAtomicInTransaction(ctx, encryptedUpdate)
+	}
+	if inner, ok := r.inner.(settingsAtomicUpdater); ok {
+		return inner.UpdateAtomic(ctx, func(current map[string]string) (map[string]string, error) {
+			return encryptedUpdate(current, nil)
+		})
+	}
+	return fmt.Errorf("settings store does not support atomic updates")
 }
 
 // SetIfAbsent applies Set's encryption contract to a conditional write: the
@@ -256,8 +284,31 @@ func (r *EncryptedSettingsRepo) Get(ctx context.Context, key string) (string, er
 	return out, nil
 }
 
-// GetAll reads every setting and decrypts any enc:v1: value in place, so
-// callers (notably config.LoadFromDB) receive a fully plaintext map.
+// GetMany reads keys from the raw store in one snapshot and decrypts each
+// value as Get does. Keys without a value are absent from the map.
+func (r *EncryptedSettingsRepo) GetMany(ctx context.Context, keys ...string) (map[string]string, error) {
+	inner, ok := r.inner.(settingsBatchReader)
+	if !ok {
+		return nil, fmt.Errorf("settings store does not support batch reads")
+	}
+	values, err := inner.GetMany(ctx, keys...)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range values {
+		out, err := r.cipher.DecryptIfEncrypted(value, secret.SettingsAAD(key))
+		if err != nil {
+			return nil, fmt.Errorf("decrypt setting %q: %w", key, err)
+		}
+		values[key] = out
+	}
+	return values, nil
+}
+
+// GetAll reads every setting and decrypts any enc:v1: value in place. An
+// unreadable transition receipt is omitted from configuration snapshots so
+// startup can reach blocked recovery. Its owner still receives the error from
+// Get; unreadable active settings remain fatal.
 func (r *EncryptedSettingsRepo) GetAll(ctx context.Context) (map[string]string, error) {
 	all, err := r.inner.GetAll(ctx)
 	if err != nil {
@@ -266,6 +317,10 @@ func (r *EncryptedSettingsRepo) GetAll(ctx context.Context) (map[string]string, 
 	for key, value := range all {
 		out, derr := r.cipher.DecryptIfEncrypted(value, secret.SettingsAAD(key))
 		if derr != nil {
+			if key == config.StorageTransitionTargetKey {
+				delete(all, key)
+				continue
+			}
 			return nil, fmt.Errorf("decrypt setting %q: %w", key, derr)
 		}
 		all[key] = out

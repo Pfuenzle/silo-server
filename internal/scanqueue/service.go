@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/workmetrics"
+
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/libraryingest"
@@ -16,6 +18,8 @@ import (
 	"github.com/Silo-Server/silo-server/internal/scanbatch"
 	"github.com/Silo-Server/silo-server/internal/scantrigger"
 )
+
+const scanRunUnknown = "unknown"
 
 const (
 	defaultPollInterval      = 2 * time.Second
@@ -115,22 +119,25 @@ func (s *Service) EnqueueLibraryScan(ctx context.Context, folderID int, trigger 
 }
 
 func (s *Service) EnqueueScans(ctx context.Context, targets []scantrigger.Target) error {
-	_, _, err := s.enqueueScans(ctx, targets, nil)
+	_, err := s.enqueueScans(ctx, targets, nil)
 	return err
 }
 
-func (s *Service) EnqueueAutoscanScans(ctx context.Context, targets []scantrigger.Target, eventID int64) (int, int, error) {
+// EnqueueAutoscanScans enqueues targets linked to an autoscan event and
+// reports, per target and in order, which run covers it and whether that run
+// was created or an existing queued/running run for the same scope was reused.
+func (s *Service) EnqueueAutoscanScans(ctx context.Context, targets []scantrigger.Target, eventID int64) ([]scantrigger.EnqueueOutcome, error) {
 	return s.enqueueScans(ctx, targets, &eventID)
 }
 
-func (s *Service) enqueueScans(ctx context.Context, targets []scantrigger.Target, autoscanEventID *int64) (int, int, error) {
+func (s *Service) enqueueScans(ctx context.Context, targets []scantrigger.Target, autoscanEventID *int64) ([]scantrigger.EnqueueOutcome, error) {
 	if s == nil || s.repo == nil {
-		return 0, 0, fmt.Errorf("scan queue is not configured")
+		return nil, fmt.Errorf("scan queue is not configured")
 	}
 	inputs := make([]CreateInput, 0, len(targets))
 	for _, target := range targets {
 		if target.Folder == nil {
-			return 0, 0, fmt.Errorf("scan queue: target is missing folder")
+			return nil, fmt.Errorf("scan queue: target is missing folder")
 		}
 		inputs = append(inputs, CreateInput{
 			LibraryID:       target.Folder.ID,
@@ -142,19 +149,23 @@ func (s *Service) enqueueScans(ctx context.Context, targets []scantrigger.Target
 	}
 	runs, created, err := s.repo.CreateBatch(ctx, inputs)
 	if err != nil {
-		return 0, 0, err
+		return nil, err
 	}
-	createdCount := 0
-	reusedCount := 0
+	outcomes := make([]scantrigger.EnqueueOutcome, 0, len(runs))
 	for i, run := range runs {
-		if i < len(created) && created[i] {
-			createdCount++
-			s.publish(ctx, "scan.accepted", run)
-		} else {
-			reusedCount++
+		outcome := scantrigger.EnqueueOutcome{Created: i < len(created) && created[i]}
+		if run != nil {
+			outcome.RunID = run.ID
+			// coalesceIntoActive owes a running run's scope one follow-up scan
+			// for queue-claimed triggers; that scan, not this run, covers it.
+			outcome.FollowUp = !outcome.Created && run.Status == StatusRunning && !isDirectTrigger(targets[i].Trigger)
 		}
+		if outcome.Created {
+			s.publish(ctx, "scan.accepted", run)
+		}
+		outcomes = append(outcomes, outcome)
 	}
-	return createdCount, reusedCount, nil
+	return outcomes, nil
 }
 
 func (s *Service) CancelAcceptedByLibrary(ctx context.Context, libraryID int) (int, error) {
@@ -271,6 +282,7 @@ func (s *Service) requeueStale() {
 	if failed, err := s.repo.FailStaleDirect(ctx, staleBefore); err != nil {
 		slog.Warn("scan queue: failed to abandon stale direct runs", "error", err)
 	} else if failed > 0 {
+		workmetrics.Recovered("scan", int64(failed))
 		slog.Info("scan queue: failed abandoned direct runs", "count", failed)
 	}
 
@@ -280,6 +292,7 @@ func (s *Service) requeueStale() {
 		return
 	}
 	if requeued > 0 {
+		workmetrics.Recovered("scan", int64(requeued))
 		slog.Info("scan queue: requeued stale runs", "count", requeued)
 	}
 }
@@ -330,6 +343,9 @@ func (s *Service) process(run *models.ScanRun) {
 
 	ctx, cancel := context.WithCancel(s.appCtx)
 	defer cancel()
+	ctx, observation := workmetrics.Start(ctx, "scan", run.RequestedAt)
+	defer workmetrics.Profile(ctx)()
+	defer observation.Finish(scanRunUnknown)
 	ctx = scanbatch.WithRunID(ctx, run.ID)
 	s.trackRunning(run.ID, run.MediaFolderID, cancel)
 	defer s.untrackRunning(run.ID)
@@ -343,13 +359,13 @@ func (s *Service) process(run *models.ScanRun) {
 	folder, err := s.folders.GetByID(ctx, run.MediaFolderID)
 	switch {
 	case errors.Is(err, catalog.ErrFolderNotFound):
-		s.cancelRun(run.ID)
+		observation.Finish(s.cancelRun(run.ID))
 		return
 	case err != nil:
-		s.failRun(run.ID, fmt.Errorf("load library for scan: %w", err))
+		observation.Finish(s.failRun(run.ID, fmt.Errorf("load library for scan: %w", err)))
 		return
 	case folder == nil || !folder.Enabled:
-		s.cancelRun(run.ID)
+		observation.Finish(s.cancelRun(run.ID))
 		return
 	}
 
@@ -366,11 +382,11 @@ func (s *Service) process(run *models.ScanRun) {
 	}
 	switch {
 	case errors.Is(err, context.Canceled):
-		s.cancelRun(run.ID)
+		observation.Finish(s.cancelRun(run.ID))
 	case err != nil:
-		s.failRun(run.ID, err)
+		observation.Finish(s.failRun(run.ID, err))
 	default:
-		s.completeRun(run.ID, result)
+		observation.Finish(s.completeRun(run.ID, result))
 	}
 }
 
@@ -417,6 +433,7 @@ func (r *scanProgressReporter) Report(update libraryingest.ProgressUpdate) {
 		return
 	}
 	if run != nil {
+		workmetrics.Progress("scan")
 		slog.Info("scan queue: progress",
 			"scan_id", run.ID,
 			"library_id", run.MediaFolderID,
@@ -473,42 +490,73 @@ func (s *Service) heartbeatLoop(ctx context.Context, runID string, stop <-chan s
 	}
 }
 
-func (s *Service) cancelRun(runID string) {
+func (s *Service) cancelRun(runID string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	run, changed, err := s.repo.MarkCancelled(ctx, runID)
 	if err != nil {
 		slog.Warn("scan queue: failed to mark cancelled", "scan_id", runID, "error", err)
-		return
+		return scanRunUnknown
 	}
 	if changed {
 		s.publish(context.Background(), "scan.cancelled", run)
 	}
+	if run == nil {
+		return scanRunUnknown
+	}
+	return run.Status
 }
 
-func (s *Service) failRun(runID string, runErr error) {
+func (s *Service) failRun(runID string, runErr error) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	run, err := s.repo.Fail(ctx, runID, errString(runErr))
+	run, followUp, err := s.repo.FailWithFollowUp(ctx, runID, errString(runErr))
 	if err != nil {
 		slog.Warn("scan queue: failed to mark failed", "scan_id", runID, "error", err)
-		return
+		return scanRunUnknown
 	}
 	s.publish(context.Background(), "scan.failed", run)
+	s.publishFollowUp(run, followUp)
+	if run == nil {
+		return scanRunUnknown
+	}
+	return run.Status
 }
 
-func (s *Service) completeRun(runID string, result *libraryingest.Result) {
+// publishFollowUp announces the follow-up scan a finished run enqueued for a
+// request that was coalesced into it while it was running.
+func (s *Service) publishFollowUp(finished, followUp *models.ScanRun) {
+	if followUp == nil {
+		return
+	}
+	slog.Info("scan queue: enqueued follow-up scan for request coalesced into running scan",
+		"scan_id", followUp.ID,
+		"finished_scan_id", finished.ID,
+		"library_id", followUp.MediaFolderID,
+		"mode", followUp.Mode,
+		"path", followUp.Path,
+		"trigger", followUp.Trigger,
+	)
+	s.publish(context.Background(), "scan.accepted", followUp)
+}
+
+func (s *Service) completeRun(runID string, result *libraryingest.Result) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	run, err := s.repo.Complete(ctx, runID, scanResultFromIngest(result))
+	run, followUp, err := s.repo.CompleteWithFollowUp(ctx, runID, scanResultFromIngest(result))
 	if err != nil {
 		slog.Warn("scan queue: failed to mark completed", "scan_id", runID, "error", err)
-		return
+		return scanRunUnknown
 	}
 	s.publish(context.Background(), "scan.completed", run)
+	s.publishFollowUp(run, followUp)
+	if run == nil {
+		return scanRunUnknown
+	}
+	return run.Status
 }
 
 func (s *Service) publish(ctx context.Context, eventName string, run *models.ScanRun) {
@@ -552,9 +600,6 @@ func scanResultFromIngest(result *libraryingest.Result) *evt.ScanRunResult {
 		MatchedFiles:           result.MatchedFiles,
 		RetriedItems:           result.RetriedItems,
 		StillUnmatchedWarnings: result.StillUnmatchedWarnings,
-	}
-	if result.Skipped {
-		resp.Skipped = 1
 	}
 	if result.ScanResult != nil {
 		resp.New = result.ScanResult.New

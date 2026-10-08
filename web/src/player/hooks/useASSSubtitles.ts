@@ -1,7 +1,17 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type JASSUB from "jassub";
-import type { PlayerSubtitleInfo } from "../types";
+import type { PlayerSubtitleInfo, VideoFitMode } from "../types";
 import { isASSCodec } from "../utils/subtitleCodecs";
+import {
+  applyASSMarginInset,
+  coverZoom,
+  NO_ASS_MARGIN_INSET,
+  NO_COVER_CROP,
+  resolveASSMarginInset,
+  sameASSMarginInset,
+  type ASSMarginInset,
+  type CoverCrop,
+} from "../utils/assFillMargins";
 import {
   fallbackFontForSubtitle,
   forceASSFontFamily,
@@ -15,6 +25,57 @@ import {
 // leave libass with no usable default font (queryFonts is disabled) and
 // silently render nothing.
 import liberationSansUrl from "../assets/liberation-sans.woff2?url";
+
+// Window drags and fullscreen transitions resize the player many times in a
+// row; reload the track once the crop settles rather than on every frame.
+const FILL_MARGIN_DEBOUNCE_MS = 150;
+
+interface ASSFillState {
+  instance: JASSUB;
+  /** Track content before any Fill margin inset. */
+  baseContent: string;
+  /** The fallback font family forced onto the script, if one was. */
+  fallbackFamily?: string;
+  /** Inset currently loaded into the renderer. */
+  inset: ASSMarginInset;
+  /** JASSUB's own render-resolution settings, restored in Fit. */
+  prescaleFactor: number;
+  prescaleHeightLimit: number;
+}
+
+function fillInset(content: string, videoFit: VideoFitMode, coverCrop: CoverCrop) {
+  return videoFit === "cover" ? resolveASSMarginInset(content, coverCrop) : NO_ASS_MARGIN_INSET;
+}
+
+/**
+ * Puts the canvas on the video's Fit/Fill crop, reloads the track with margins
+ * that keep regular events inside the visible area, and repaints. JASSUB sizes
+ * its canvas as if the video always used object-fit: contain, so Fill relies on
+ * the `player-ass-fill` override to crop the canvas exactly like the video and
+ * raises the render resolution by the zoom so the enlarged bitmap stays sharp.
+ */
+async function syncASSFill(
+  fill: ASSFillState,
+  videoFit: VideoFitMode,
+  coverCrop: CoverCrop,
+  isCurrent: () => boolean,
+): Promise<void> {
+  const { instance } = fill;
+  instance._canvas.classList.toggle("player-ass-fill", videoFit === "cover");
+  if (videoFit === "cover") {
+    instance.prescaleFactor = coverZoom(coverCrop);
+    instance.prescaleHeightLimit = Number.POSITIVE_INFINITY;
+  } else {
+    instance.prescaleFactor = fill.prescaleFactor;
+    instance.prescaleHeightLimit = fill.prescaleHeightLimit;
+  }
+  const inset = fillInset(fill.baseContent, videoFit, coverCrop);
+  if (!sameASSMarginInset(inset, fill.inset)) {
+    fill.inset = inset;
+    await instance.renderer.setTrack(applyASSMarginInset(fill.baseContent, inset));
+  }
+  if (isCurrent()) await instance.resize(true);
+}
 
 /**
  * Manages client-side ASS/SSA subtitle rendering via JASSUB (libass WASM).
@@ -35,12 +96,33 @@ export function useASSSubtitles(
   isDetached: boolean,
   streamOriginSeconds: number,
   subtitleDelayMs: number,
-  onLoadState?: (state: "idle" | "loading" | "ready" | "error") => void,
+  // "refreshing" is a reload of the track on screen for new timing: its
+  // current events stay up meanwhile, so it is not announced as loading.
+  onLoadState?: (state: "idle" | "loading" | "refreshing" | "ready" | "error") => void,
+  videoFit: VideoFitMode = "contain",
+  coverCrop: CoverCrop = NO_COVER_CROP,
+  // Bumped when the server retimed the active track behind an unchanged URL
+  // (subtitle sync or a timing reset); changing it swaps the track's script
+  // in the running renderer.
+  cueRevision = 0,
 ): { isActive: boolean } {
   const onLoadStateRef = useRef(onLoadState);
   onLoadStateRef.current = onLoadState;
+  const videoFitRef = useRef(videoFit);
+  videoFitRef.current = videoFit;
+  const coverCropRef = useRef(coverCrop);
+  coverCropRef.current = coverCrop;
   const jassubRef = useRef<JASSUB | null>(null);
+  const fillRef = useRef<ASSFillState | null>(null);
+  const syncedFitRef = useRef(videoFit);
   const jassubImportRef = useRef<Promise<typeof JASSUB> | null>(null);
+  // The track and cue revision the running renderer was built from, and
+  // whether it finished loading: a retime swaps the script only then.
+  const cueRevisionRef = useRef(cueRevision);
+  cueRevisionRef.current = cueRevision;
+  const builtRef = useRef<{ url: string; revision: number; ready: boolean } | null>(null);
+  // Bumped to rebuild the renderer when a script swap cannot be made.
+  const [rebuild, setRebuild] = useState(0);
   // Effective JASSUB time offset. JASSUB renders the ASS event matching
   // `video.currentTime + timeOffset`, so an event at source time S appears
   // at video time S - timeOffset. `streamOriginSeconds` accounts for HLS
@@ -85,6 +167,8 @@ export function useASSSubtitles(
     async function initJASSUB(signal: AbortSignal, progress: () => void) {
       if (!video || cancelled) return;
       onLoadStateRef.current?.("loading");
+      const built = { url: activeUrl!, revision: cueRevisionRef.current, ready: false };
+      builtRef.current = built;
 
       // Lazy-load JASSUB module (only once).
       if (!jassubImportRef.current) {
@@ -173,9 +257,10 @@ export function useASSSubtitles(
 
       const JASSUBClass = await classPromise;
       if (cancelled || signal.aborted) return;
+      const initialInset = fillInset(renderedSubContent, videoFitRef.current, coverCropRef.current);
       const instance = new JASSUBClass({
         video,
-        subContent: renderedSubContent,
+        subContent: applyASSMarginInset(renderedSubContent, initialInset),
         timeOffset: streamOriginRef.current,
         // The browser Local Font Access API is inconsistent and permissioned.
         // Letting JASSUB probe it produces noisy console warnings for common ASS
@@ -197,8 +282,32 @@ export function useASSSubtitles(
       }
 
       jassubRef.current = instance;
+      const fill: ASSFillState = {
+        instance,
+        baseContent: renderedSubContent,
+        fallbackFamily: fallbackFont && fallbackFontData ? fallbackFont.family : undefined,
+        inset: initialInset,
+        prescaleFactor: instance.prescaleFactor,
+        prescaleHeightLimit: instance.prescaleHeightLimit,
+      };
+      fillRef.current = fill;
+      instance._canvas.classList.toggle("player-ass-fill", videoFitRef.current === "cover");
       await instance.ready;
-      if (!cancelled && !signal.aborted) onLoadStateRef.current?.("ready");
+      if (cancelled || signal.aborted || jassubRef.current !== instance) return;
+
+      // Fit and the player size can change while the subtitle source, fonts,
+      // or renderer are still loading. Re-read both after readiness so the
+      // first rendered frame cannot inherit what this effect started with.
+      await syncASSFill(
+        fill,
+        videoFitRef.current,
+        coverCropRef.current,
+        () => jassubRef.current === instance,
+      );
+      if (!cancelled && !signal.aborted && jassubRef.current === instance) {
+        built.ready = true;
+        onLoadStateRef.current?.("ready");
+      }
     }
 
     async function load() {
@@ -248,7 +357,45 @@ export function useASSSubtitles(
     // videoRef is a stable ref object. streamOriginSeconds is read from
     // streamOriginRef inside the async function to always get the latest value.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeUrl, activeLanguage, activeFontBundleUrl, isDetached]);
+  }, [activeUrl, activeLanguage, activeFontBundleUrl, isDetached, rebuild]);
+
+  // A retime of the track on screen (subtitle sync, a timing reset) loads the
+  // corrected script into the running renderer: the current events stay up
+  // until it is in, and nothing is announced. A renderer still loading, or a
+  // swap that fails, rebuilds instead.
+  useEffect(() => {
+    const built = builtRef.current;
+    if (!activeUrl || !built || built.url !== activeUrl || built.revision === cueRevision) return;
+    const fill = fillRef.current;
+    if (!built.ready || !fill || jassubRef.current !== fill.instance) {
+      setRebuild((n) => n + 1);
+      return;
+    }
+    built.revision = cueRevision;
+    const { instance } = fill;
+    const controller = new AbortController();
+    onLoadStateRef.current?.("refreshing");
+    void (async () => {
+      try {
+        const response = await fetch(activeUrl, { signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const text = await response.text();
+        if (controller.signal.aborted || jassubRef.current !== instance) return;
+        const content = fill.fallbackFamily ? forceASSFontFamily(text, fill.fallbackFamily) : text;
+        fill.baseContent = content;
+        fill.inset = fillInset(content, videoFitRef.current, coverCropRef.current);
+        await instance.renderer.setTrack(applyASSMarginInset(content, fill.inset));
+        if (!controller.signal.aborted && jassubRef.current === instance) {
+          onLoadStateRef.current?.("ready");
+        }
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        console.error("[useASSSubtitles] Unable to load retimed subtitles:", err);
+        setRebuild((n) => n + 1);
+      }
+    })();
+    return () => controller.abort();
+  }, [activeUrl, cueRevision]);
 
   // Update JASSUB's time offset when either the media timeline remaps or
   // the user nudges subtitle sync. Avoids destroying and recreating the
@@ -268,6 +415,38 @@ export function useASSSubtitles(
         }
       });
   }, [effectiveOffset, activeUrl]);
+
+  // Keep the canvas crop and the Fill margins in step with the video. A fit
+  // toggle applies immediately; crop changes from resizing are debounced.
+  const cropX = coverCrop.x;
+  const cropY = coverCrop.y;
+  useEffect(() => {
+    const fitChanged = syncedFitRef.current !== videoFit;
+    syncedFitRef.current = videoFit;
+    const fill = fillRef.current;
+    const instance = jassubRef.current;
+    if (!fill || !instance || fill.instance !== instance || !activeUrl) return;
+
+    instance._canvas.classList.toggle("player-ass-fill", videoFit === "cover");
+    const isCurrent = () => jassubRef.current === instance;
+    const timer = setTimeout(
+      () => {
+        void instance.ready
+          .then(() => {
+            if (isCurrent()) {
+              return syncASSFill(fill, videoFit, { x: cropX, y: cropY }, isCurrent);
+            }
+          })
+          .catch((err) => {
+            if (isCurrent()) {
+              console.error("[useASSSubtitles] Unable to apply video fit to subtitles:", err);
+            }
+          });
+      },
+      fitChanged ? 0 : FILL_MARGIN_DEBOUNCE_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [activeUrl, videoFit, cropX, cropY]);
 
   // Cleanup on unmount.
   useEffect(() => {

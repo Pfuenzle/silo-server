@@ -130,11 +130,9 @@ func (e *QueryExecutor) tryEpisodeCatalogUserStatePreviewPage(
 	}
 
 	if prefix := strings.TrimSpace(access.NamePrefix); prefix != "" {
-		whereParts = append(whereParts, fmt.Sprintf(
-			"(ece.sort_key LIKE $%d ESCAPE '\\' OR LOWER(ece.title) LIKE $%d ESCAPE '\\')",
-			argIdx,
-			argIdx,
-		))
+		// sort_key is the lowered episode title (or "episode N"), the key
+		// the list sorts by, so it alone decides the letter.
+		whereParts = append(whereParts, fmt.Sprintf("ece.sort_key LIKE $%d ESCAPE '\\'", argIdx))
 		args = append(args, escapePrefixForLike(prefix)+"%")
 		argIdx++
 	}
@@ -288,11 +286,9 @@ func (e *QueryExecutor) tryEpisodeCatalogEntriesPreviewPage(
 	}
 
 	if prefix := strings.TrimSpace(access.NamePrefix); prefix != "" {
-		whereParts = append(whereParts, fmt.Sprintf(
-			"(ece.sort_key LIKE $%d ESCAPE '\\' OR LOWER(ece.title) LIKE $%d ESCAPE '\\')",
-			argIdx,
-			argIdx,
-		))
+		// sort_key is the lowered episode title (or "episode N"), the key
+		// the list sorts by, so it alone decides the letter.
+		whereParts = append(whereParts, fmt.Sprintf("ece.sort_key LIKE $%d ESCAPE '\\'", argIdx))
 		args = append(args, escapePrefixForLike(prefix)+"%")
 		argIdx++
 	}
@@ -762,19 +758,9 @@ func (e *QueryExecutor) hydrateEpisodeCatalogEntryPage(
 }
 
 func singleEpisodeCatalogLibraryID(def QueryDefinition, access AccessFilter) (int, bool, bool) {
-	libraryIDs := append([]int(nil), def.LibraryIDs...)
-	if access.AllowedLibraryIDs != nil {
-		if len(libraryIDs) == 0 {
-			libraryIDs = append([]int(nil), access.AllowedLibraryIDs...)
-		} else {
-			libraryIDs = intersectInts(libraryIDs, access.AllowedLibraryIDs)
-		}
-	}
-	if len(libraryIDs) == 0 {
-		if access.AllowedLibraryIDs != nil {
-			return 0, true, true
-		}
-		return 0, false, false
+	libraryIDs, empty := access.LibraryScope(def.LibraryIDs)
+	if empty {
+		return 0, true, true
 	}
 	if len(libraryIDs) != 1 {
 		return 0, false, false
@@ -782,11 +768,6 @@ func singleEpisodeCatalogLibraryID(def QueryDefinition, access AccessFilter) (in
 	libraryID := libraryIDs[0]
 	if libraryID <= 0 {
 		return 0, true, true
-	}
-	for _, disabledID := range access.DisabledLibraryIDs {
-		if disabledID == libraryID {
-			return 0, true, true
-		}
 	}
 	return libraryID, false, true
 }
@@ -1061,7 +1042,11 @@ func episodeCatalogEntryOrderBy(sortConfig QuerySort) (string, bool) {
 	case "year":
 		return fmt.Sprintf("ORDER BY ece.year %s, ece.sort_key ASC, ece.episode_id ASC", dir), true
 	case "content_rating":
-		return fmt.Sprintf("ORDER BY ece.content_rating_rank %s, ece.content_rating_label %s, ece.sort_key ASC, ece.episode_id ASC", dir, dir), true
+		// The stored age, with SQL's default NULL ordering: last ascending,
+		// first descending — the same order the dropped content_rating_rank
+		// column produced with 2147483647 for an unknown rating, and the order
+		// idx_episode_catalog_entries_content_rating is built for.
+		return fmt.Sprintf("ORDER BY ece.content_rating_age %s, ece.content_rating_label %s, ece.sort_key ASC, ece.episode_id ASC", dir, dir), true
 	case "runtime":
 		return fmt.Sprintf("ORDER BY ece.runtime %s NULLS LAST, ece.sort_key ASC, ece.episode_id ASC", dir), true
 	case "rating_imdb":

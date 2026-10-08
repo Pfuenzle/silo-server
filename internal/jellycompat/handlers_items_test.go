@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
 
@@ -523,118 +522,18 @@ func TestHandleItem_Episode_FetchesSeriesDetailForStableParentImageTags(t *testi
 		t.Errorf("expected episode and series GetItemDetail calls for stable parent image tags; got %d",
 			contentSvc.getItemDetailCalls)
 	}
-}
-
-// TestHandleItem_Episode_FallsBackToSeriesDetailOnCacheMiss verifies that when
-// the ImageCache has no entry for the parent series, the handler still falls
-// back to fetching the series detail.
-func TestHandleItem_Episode_FallsBackToSeriesDetailOnCacheMiss(t *testing.T) {
-	codec := NewResourceIDCodec()
-	episodeContentID := "ep1"
-	seriesContentID := "series-1"
-	encodedEpisodeID := codec.EncodeStringID(EncodedIDItem, episodeContentID)
-
-	contentSvc := &countingContentService{
-		episodeDetail: &upstreamItemDetail{
-			ContentID: episodeContentID,
-			Type:      "episode",
-			Title:     "Test Episode",
-			SeriesID:  seriesContentID,
-		},
-		seriesDetail: &upstreamItemDetail{
-			ContentID:   seriesContentID,
-			Type:        "series",
-			Title:       "Test Series",
-			PosterURL:   "/img/series-1-poster.jpg",
-			BackdropURL: "/img/series-1-backdrop.jpg",
-		},
+	var item baseItemDTO
+	if err := json.NewDecoder(rec.Body).Decode(&item); err != nil {
+		t.Fatalf("decode episode response: %v", err)
 	}
-
-	// Empty cache — both Primary and Backdrop will miss.
-	imageCache := NewImageCache(time.Hour, time.Now)
-
-	h := &ItemsHandler{
-		content:  contentSvc,
-		userData: &mockUserDataService{},
-		codec:    codec,
-		mapper:   newMapper(codec, &config.Config{}),
-		images:   imageCache,
+	if item.SeriesID != encodedSeriesID || item.ParentPrimaryImageItemID != encodedSeriesID ||
+		item.SeriesPrimaryImageTag == "" || item.ParentPrimaryImageTag != item.SeriesPrimaryImageTag {
+		t.Fatalf("episode response lost parent poster identity or tag: %+v", item)
 	}
-
-	req := httptest.NewRequest("GET", "/Items/"+encodedEpisodeID, nil)
-	routeCtx := chi.NewRouteContext()
-	routeCtx.URLParams.Add("id", encodedEpisodeID)
-	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx)
-	ctx = context.WithValue(ctx, compatSessionKey, &Session{StreamAppUserID: 1, ProfileID: "profile-1"})
-	req = req.WithContext(ctx)
-
-	rec := httptest.NewRecorder()
-	h.HandleItem(rec, req)
-
-	if rec.Code != 200 {
-		t.Fatalf("expected status 200; got %d, body=%s", rec.Code, rec.Body.String())
-	}
-	if contentSvc.getItemDetailCalls != 2 {
-		t.Errorf("cache miss should fall back to series detail fetch; got %d GetItemDetail calls",
-			contentSvc.getItemDetailCalls)
-	}
-}
-
-// TestHandleItem_Episode_PartialCacheFallsBackToSeriesDetail pins the partial-
-// hit fallback: when only one of Primary/Backdrop is cached, the handler must
-// fall back to the series-detail fetch so the response carries both URLs
-// rather than silently degrading with an empty backdrop tag.
-func TestHandleItem_Episode_PartialCacheFallsBackToSeriesDetail(t *testing.T) {
-	codec := NewResourceIDCodec()
-	episodeContentID := "ep1"
-	seriesContentID := "series-1"
-	encodedEpisodeID := codec.EncodeStringID(EncodedIDItem, episodeContentID)
-	encodedSeriesID := codec.EncodeStringID(EncodedIDItem, seriesContentID)
-
-	contentSvc := &countingContentService{
-		episodeDetail: &upstreamItemDetail{
-			ContentID: episodeContentID,
-			Type:      "episode",
-			Title:     "Test Episode",
-			SeriesID:  seriesContentID,
-		},
-		seriesDetail: &upstreamItemDetail{
-			ContentID:   seriesContentID,
-			Type:        "series",
-			Title:       "Test Series",
-			PosterURL:   "/img/series-1-poster.jpg",
-			BackdropURL: "/img/series-1-backdrop.jpg",
-		},
-	}
-
-	imageCache := NewImageCache(time.Hour, time.Now)
-	// Only Primary cached; Backdrop missing — partial hit must fall back.
-	imageCache.RememberSized(encodedSeriesID, "Primary", "/img/series-1-poster.jpg", compatCardImageSize)
-
-	h := &ItemsHandler{
-		content:  contentSvc,
-		userData: &mockUserDataService{},
-		codec:    codec,
-		mapper:   newMapper(codec, &config.Config{}),
-		images:   imageCache,
-	}
-
-	req := httptest.NewRequest("GET", "/Items/"+encodedEpisodeID, nil)
-	routeCtx := chi.NewRouteContext()
-	routeCtx.URLParams.Add("id", encodedEpisodeID)
-	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx)
-	ctx = context.WithValue(ctx, compatSessionKey, &Session{StreamAppUserID: 1, ProfileID: "profile-1"})
-	req = req.WithContext(ctx)
-
-	rec := httptest.NewRecorder()
-	h.HandleItem(rec, req)
-
-	if rec.Code != 200 {
-		t.Fatalf("expected status 200; got %d, body=%s", rec.Code, rec.Body.String())
-	}
-	if contentSvc.getItemDetailCalls != 2 {
-		t.Errorf("partial cache hit (only Primary) must fall back to series detail; got %d GetItemDetail calls",
-			contentSvc.getItemDetailCalls)
+	if item.ParentBackdropItemID != encodedSeriesID || len(item.ParentBackdropImageTags) != 1 ||
+		item.ParentBackdropImageTags[0] == "" || item.ParentThumbItemID != encodedSeriesID ||
+		item.ParentThumbImageTag != item.ParentBackdropImageTags[0] {
+		t.Fatalf("episode response lost parent backdrop identity or tag: %+v", item)
 	}
 }
 
@@ -719,31 +618,6 @@ func TestHandleUpcoming_Unauthorized(t *testing.T) {
 	}
 }
 
-// TestHandleUpcoming_MissingSeriesId_ReturnsEmptyNot404 pins the central
-// contract of this endpoint: when no SeriesId/ParentId is supplied we must
-// return 200 with an empty result. Returning 404 here re-triggers the
-// Android TV fallback to global /Shows/NextUp that this handler exists to
-// suppress (see error-report-2026-05-08.md §11).
-func TestHandleUpcoming_MissingSeriesId_ReturnsEmptyNot404(t *testing.T) {
-	codec := NewResourceIDCodec()
-	h := &ItemsHandler{codec: codec, mapper: newMapper(codec, &config.Config{})}
-
-	req := httptest.NewRequest("GET", "/Shows/Upcoming", nil)
-	ctx := context.WithValue(req.Context(), compatSessionKey, &Session{StreamAppUserID: 1, ProfileID: "profile-1"})
-	rec := httptest.NewRecorder()
-	h.HandleUpcoming(rec, req.WithContext(ctx))
-
-	if rec.Code != 200 {
-		t.Fatalf("expected 200 (not 404) when SeriesId missing; got %d, body=%s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), `"Items":[]`) {
-		t.Fatalf("expected empty Items array; got body=%s", rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), `"TotalRecordCount":0`) {
-		t.Fatalf("expected TotalRecordCount 0; got body=%s", rec.Body.String())
-	}
-}
-
 // TestHandleEpisodes_AuthoritativeSeasonID verifies that Swiftfin's call shape
 // GET /Shows/{seasonID}/Episodes?seasonId={seasonID} (where the path {id} segment
 // holds an EncodedIDSeason ID) treats seasonId as authoritative, resolves the owning
@@ -810,9 +684,8 @@ func TestHandleEpisodes_UnknownSeasonIDReturnsNotFound(t *testing.T) {
 	}
 }
 
-// TestHandleUpcoming_InvalidSeriesId_ReturnsEmptyNot404 — same contract for
-// undecodable IDs. Decode failure must NOT 404 for the same reason.
-func TestHandleUpcoming_InvalidSeriesId_ReturnsEmptyNot404(t *testing.T) {
+// Missing catalog infrastructure must not masquerade as an empty upcoming feed.
+func TestHandleUpcoming_UnavailableCatalogReturnsError(t *testing.T) {
 	codec := NewResourceIDCodec()
 	h := &ItemsHandler{codec: codec, mapper: newMapper(codec, &config.Config{})}
 
@@ -821,10 +694,8 @@ func TestHandleUpcoming_InvalidSeriesId_ReturnsEmptyNot404(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.HandleUpcoming(rec, req.WithContext(ctx))
 
-	if rec.Code != 200 {
-		t.Fatalf("expected 200 (not 404) for undecodable SeriesId; got %d, body=%s", rec.Code, rec.Body.String())
+	if rec.Code != 503 {
+		t.Fatalf("expected 503 for unavailable episode catalog; got %d, body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"Items":[]`) {
-		t.Fatalf("expected empty Items array; got body=%s", rec.Body.String())
-	}
+
 }

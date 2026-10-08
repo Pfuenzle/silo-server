@@ -4,6 +4,7 @@ import type { ItemVideo } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { useCarouselEmbla } from "@/hooks/useCarouselEmbla";
 import { extraKindLabel } from "@/lib/extraKinds";
+import { THEME_MUSIC_INTERRUPT_EVENT } from "@/lib/themeMusic";
 import TrailerModal from "./TrailerModal";
 
 interface TrailersSectionProps {
@@ -42,7 +43,13 @@ export default function TrailersSection({ videos }: TrailersSectionProps) {
           <ul role="list" className="embla__container flex cursor-grab list-none gap-3">
             {playable.map((video) => (
               <li key={`${video.site}-${video.site_key}`} className="embla__slide shrink-0">
-                <TrailerCard video={video} onPlay={() => setActiveVideo(video)} />
+                <TrailerCard
+                  video={video}
+                  onPlay={() => {
+                    document.dispatchEvent(new Event(THEME_MUSIC_INTERRUPT_EVENT));
+                    setActiveVideo(video);
+                  }}
+                />
               </li>
             ))}
           </ul>
@@ -89,11 +96,11 @@ function TrailerCard({ video, onPlay }: { video: ItemVideo; onPlay: () => void }
         </div>
       </div>
       <div className="px-0.5">
-        <div className="text-foreground truncate text-[13px] font-medium">{label}</div>
-        <div className="text-muted-foreground mt-0.5 flex items-center gap-1.5 text-[11px]">
+        <div className="text-foreground truncate text-[0.8125rem] font-medium">{label}</div>
+        <div className="text-muted-foreground mt-0.5 flex items-center gap-1.5 text-[0.6875rem]">
           <span>{extraKindLabel(video.kind)}</span>
           {video.is_official && (
-            <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+            <Badge variant="outline" className="px-1.5 py-0 text-[0.625rem]">
               Official
             </Badge>
           )}

@@ -1,69 +1,50 @@
-import { useCallback } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { fetchAdminItemOrderSnapshot } from "@/api/adminCollections";
 import {
-  api,
-  apiWithProfileRequestContext,
   isCapturedProfileAuthorityActive,
   isProfileRequestContextCurrent,
   type ProfileRequestContextSnapshot,
 } from "@/api/client";
+import {
+  collectionsFromV2,
+  fetchCollectionEditSnapshot,
+  fetchItemOrderSnapshot,
+  serverCollectionsFromV2,
+} from "@/api/personalCollections";
 import type {
-  Collection,
   CollectionCapabilitiesResponse,
-  CollectionGroup,
-  CollectionItem,
-  CollectionSortConfig,
   CollectionsListResponse,
-  CreateCollectionRequest,
-  ServerCollectionsResponse,
-  UpdateCollectionRequest,
+  CollectionSortConfig,
 } from "@/api/types";
-import { catalogKeys, collectionKeys } from "./keys";
+import { requiredETag } from "@/api/v2/etag";
+import { v2, V2ProblemError } from "@/api/v2/request";
+import { PERSONAL_SCOPE } from "@/lib/collections/scope";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback } from "react";
 import { toast } from "sonner";
-import { invalidateUserCollectionQueries } from "./collectionSurfaceRefresh";
+import { putCollectionItem, useScopeDelete } from "./collectionScope";
+import { invalidateAdminCollectionQueries } from "./collectionSurfaceRefresh";
+import { catalogKeys, collectionKeys } from "./keys";
 
-// Single fetcher for /collections — both useCollections and useCollectionGroups
-// share the cache so the page makes one network round-trip.
-function fetchCollectionsList(): Promise<CollectionsListResponse> {
-  return api<CollectionsListResponse>("/collections").then((d) => ({
-    collections: d.collections ?? [],
-    groups: d.groups ?? [],
-  }));
-}
-
-function buildUserCollectionPayload(
-  data: Record<string, unknown>,
-  poster?: File | null,
-): FormData | string {
-  if (!poster) {
-    return JSON.stringify(data);
-  }
-  const formData = new FormData();
-  formData.append("data", JSON.stringify(data));
-  formData.append("poster", poster);
-  return formData;
-}
+const collectionMutationMessage = PERSONAL_SCOPE.errorMessage;
 
 export function useCollections() {
   return useQuery({
-    queryKey: collectionKeys.list(),
-    queryFn: fetchCollectionsList,
+    queryKey: PERSONAL_SCOPE.keys.list,
+    queryFn: PERSONAL_SCOPE.fetchList,
     select: (data) => data.collections,
   });
 }
 
-export function useCollectionGroups() {
+export function useCollectionCapabilities(enabled = true) {
   return useQuery({
-    queryKey: collectionKeys.list(),
-    queryFn: fetchCollectionsList,
-    select: (data) => data.groups,
-  });
-}
-
-export function useCollectionCapabilities() {
-  return useQuery({
-    queryKey: ["collections", "capabilities"],
-    queryFn: () => api<CollectionCapabilitiesResponse>("/collections/capabilities"),
+    queryKey: PERSONAL_SCOPE.keys.capabilities,
+    queryFn: () =>
+      v2("GET /api/v2/collections/capabilities").then((value) => ({
+        ...value,
+        display_filter_presets:
+          value.display_filter_presets as CollectionCapabilitiesResponse["display_filter_presets"],
+      })),
+    enabled,
     staleTime: Number.POSITIVE_INFINITY,
   });
 }
@@ -75,129 +56,128 @@ export function useCollectionCapabilities() {
 export function useServerCollections() {
   return useQuery({
     queryKey: collectionKeys.server(),
-    queryFn: () =>
-      api<ServerCollectionsResponse>("/collections/server").then((d) => d.libraries ?? []),
+    queryFn: () => v2("GET /api/v2/collections/server").then(serverCollectionsFromV2),
   });
 }
 
-export function useCollectionItems(collectionId: string) {
+/** Titles per page of a collection's item list; the editor lists one page. */
+export const COLLECTION_ITEMS_PAGE = 200;
+
+export function useCollectionItems(
+  collectionId: string,
+  cursor = "",
+  source: "user" | "library" = "user",
+  enabled = true,
+) {
   return useQuery({
-    queryKey: collectionKeys.items(collectionId),
+    enabled,
+    queryKey:
+      source === "user"
+        ? [...collectionKeys.items(collectionId), "page", cursor]
+        : ["libraryCollections", "items", collectionId, "page", cursor],
     queryFn: () =>
-      api<{ items: CollectionItem[] }>(`/collections/${collectionId}/items`).then(
-        (d) => d.items ?? [],
+      v2(
+        source === "user"
+          ? "GET /api/v2/collections/{id}/items"
+          : "GET /api/v2/admin/collections/{id}/items",
+        {
+          path: { id: collectionId },
+          query: { limit: COLLECTION_ITEMS_PAGE, ...(cursor ? { cursor } : {}) },
+        },
       ),
+    // Keep only the visible edit window; old pages are inexpensive to refetch.
+    gcTime: 0,
   });
 }
 
-export function useCreateCollection() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ body, poster }: { body: CreateCollectionRequest; poster?: File | null }) =>
-      api("/collections", {
-        method: "POST",
-        body: buildUserCollectionPayload(body as unknown as Record<string, unknown>, poster),
-      }),
-    onSuccess: () => {
-      toast.success("Collection created");
-      return invalidateUserCollectionQueries(queryClient);
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed to save");
-    },
+export function useCollectionItemOrderSnapshot(
+  id: string,
+  enabled = true,
+  source: "user" | "library" = "user",
+) {
+  return useQuery({
+    queryKey: [source === "user" ? "collections" : "libraryCollections", "items", id, "order"],
+    queryFn: () =>
+      source === "user" ? fetchItemOrderSnapshot(id) : fetchAdminItemOrderSnapshot(id),
+    enabled,
   });
 }
 
-export function useUpdateCollection() {
+/**
+ * Turns sharing on or off from a list (#1615). The collection is read first,
+ * so the write carries its current ETag even when the list is old.
+ */
+export function useSetCollectionShared() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      id,
-      body,
-      poster,
-    }: {
-      id: string;
-      body: UpdateCollectionRequest;
-      poster?: File | null;
-    }) =>
-      api(`/collections/${id}`, {
-        method: "PUT",
-        body: buildUserCollectionPayload(body as unknown as Record<string, unknown>, poster),
-      }),
-    onSuccess: (_data, { id }) => {
-      toast.success("Collection updated");
-      return invalidateUserCollectionQueries(queryClient, id);
+    retry: false,
+    mutationFn: async ({ id, shared }: { id: string; shared: boolean }) => {
+      const { etag } = await fetchCollectionEditSnapshot(id);
+      return v2("PATCH /api/v2/collections/{id}", {
+        path: { id },
+        headers: { "If-Match": requiredETag(etag) },
+        body: { is_shared: shared },
+      });
+    },
+    onSuccess: (_collection, { id, shared }) => {
+      toast.success(shared ? "Shown to other profiles" : "Only you see it now");
+      return PERSONAL_SCOPE.invalidate(queryClient, id);
     },
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed to save");
+      toast.error(collectionMutationMessage(err, "Couldn't change sharing"));
+      if (err instanceof V2ProblemError && err.status === 412)
+        void PERSONAL_SCOPE.invalidate(queryClient);
     },
   });
 }
 
 export function useDeleteCollection() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => api(`/collections/${id}`, { method: "DELETE" }),
-    onSuccess: (_data, id) => {
-      toast.success("Collection deleted");
-      return invalidateUserCollectionQueries(queryClient, id);
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed to delete");
-    },
+  return useScopeDelete(PERSONAL_SCOPE);
+}
+
+/** The profile's collections, each own manual one marked with whether it holds `contentId`. */
+export function useCollectionsContaining(contentId: string) {
+  return useQuery({
+    queryKey: collectionKeys.containing(contentId),
+    queryFn: () =>
+      v2("GET /api/v2/collections", { query: { contains_item: contentId } }).then(
+        collectionsFromV2,
+      ),
+    select: (data) => data.collections,
   });
 }
 
-// useAddItemToCollection adds a single media item to either a personal user
-// collection (PUT /collections/{id}/items/{itemId}) or an admin library
-// collection (PUT /admin/collections/{id}/items/{itemId}). Source determines
-// the route; manual collections are the only ones that meaningfully accept
-// hand-curated items — synced collections will overwrite on the next sync.
+/** Adds one title to one of the profile's own manual collections. */
 export function useAddItemToCollection() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      collectionId,
-      mediaItemId,
-      source,
-      position,
-    }: {
-      collectionId: string;
-      mediaItemId: string;
-      source: "user" | "library";
-      position?: number;
-    }) => {
-      const path =
-        source === "user"
-          ? `/collections/${collectionId}/items/${mediaItemId}`
-          : `/admin/collections/${collectionId}/items/${mediaItemId}`;
-      return api<void>(path, {
-        method: "PUT",
-        body: JSON.stringify({ position: position ?? 0 }),
-      });
-    },
-    onSuccess: (_data, vars) => {
-      toast.success("Added to collection");
-      if (vars.source === "user") {
-        return invalidateUserCollectionQueries(queryClient, vars.collectionId);
-      }
-      // Library collection: invalidate its items query.
-      queryClient.invalidateQueries({
-        queryKey: ["libraryCollections", "items", vars.collectionId],
-      });
-    },
+    retry: false,
+    mutationFn: ({ collectionId, mediaItemId }: { collectionId: string; mediaItemId: string }) =>
+      putCollectionItem(PERSONAL_SCOPE, collectionId, mediaItemId, 0),
+    onSuccess: (_data, vars) => PERSONAL_SCOPE.invalidate(queryClient, vars.collectionId),
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to add to collection");
     },
   });
 }
 
-export function useRemoveCollectionItem(collectionId: string) {
+export function useRemoveCollectionItem(collectionId: string, source: "user" | "library" = "user") {
   const queryClient = useQueryClient();
   return useMutation({
+    retry: false,
     mutationFn: (mediaItemId: string) =>
-      api<void>(`/collections/${collectionId}/items/${mediaItemId}`, { method: "DELETE" }),
-    onSuccess: () => invalidateUserCollectionQueries(queryClient, collectionId),
+      v2(
+        source === "user"
+          ? "DELETE /api/v2/collections/{id}/items/{item_id}"
+          : "DELETE /api/v2/admin/collections/{id}/items/{item_id}",
+        {
+          path: { id: collectionId, item_id: mediaItemId },
+        },
+      ),
+    onSuccess: () =>
+      source === "user"
+        ? PERSONAL_SCOPE.invalidate(queryClient, collectionId)
+        : invalidateAdminCollectionQueries(queryClient),
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Failed to remove item");
     },
@@ -215,172 +195,82 @@ function reorderByIds<T>(items: T[], getId: (item: T) => string, orderedIds: str
 }
 
 export interface ReorderCollectionsArgs {
+  /** Each of the acting profile's own collections, in the new order. */
   orderedIds: string[];
-  groupId?: string | null;
+  etag: string;
 }
 
 export function useReorderCollections() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ orderedIds, groupId }: ReorderCollectionsArgs) =>
-      api<void>("/collections/order", {
-        method: "PUT",
-        body: JSON.stringify({
-          ordered_ids: orderedIds,
-          ...(groupId !== undefined ? { group_id: groupId } : {}),
-        }),
+    retry: false,
+    mutationFn: ({ orderedIds, etag }: ReorderCollectionsArgs) =>
+      v2("PUT /api/v2/collections/order", {
+        headers: { "If-Match": requiredETag(etag) },
+        body: { ordered_ids: orderedIds },
       }),
-    onMutate: async ({ orderedIds, groupId }) => {
+    onMutate: async ({ orderedIds }) => {
       await queryClient.cancelQueries({ queryKey: collectionKeys.list() });
       const snapshot = queryClient.getQueryData<CollectionsListResponse>(collectionKeys.list());
       if (snapshot) {
-        const inScope = (c: Collection) =>
-          groupId === undefined ? true : (c.group_id ?? null) === groupId;
-        // Clone before stamping sort_order so the snapshot retained for
-        // rollback (ctx.snapshot) keeps its original values when onError
-        // restores the cache.
+        // Only the reordered (own) collections move, within the slots they
+        // already hold; other profiles' shared collections stay in place.
+        // Clone before stamping sort_order so the snapshot kept for rollback
+        // retains its original values.
+        const moved = new Set(orderedIds);
         const reordered = reorderByIds(
-          snapshot.collections.filter(inScope),
+          snapshot.collections.filter((c) => moved.has(c.id)),
           (c) => c.id,
           orderedIds,
         ).map((c, i) => ({ ...c, sort_order: i }));
-        const next = [...snapshot.collections];
         let cursor = 0;
-        for (let i = 0; i < next.length; i++) {
-          const current = next[i];
-          if (current && inScope(current)) {
-            next[i] = reordered[cursor++] ?? current;
-          }
-        }
+        const collections = snapshot.collections.map((c) =>
+          moved.has(c.id) ? (reordered[cursor++] ?? c) : c,
+        );
         queryClient.setQueryData<CollectionsListResponse>(collectionKeys.list(), {
           ...snapshot,
-          collections: next,
+          collections,
         });
       }
       return { snapshot };
     },
     onError: (err, _vars, ctx) => {
       if (ctx?.snapshot) queryClient.setQueryData(collectionKeys.list(), ctx.snapshot);
-      toast.error(err instanceof Error ? err.message : "Failed to reorder");
+      toast.error(collectionMutationMessage(err, "Failed to reorder"));
+      if (err instanceof V2ProblemError && err.status === 412)
+        void PERSONAL_SCOPE.invalidate(queryClient);
     },
-    onSettled: () => invalidateUserCollectionQueries(queryClient),
+    onSettled: () => PERSONAL_SCOPE.invalidate(queryClient),
   });
 }
 
-export function useCreateCollectionGroup() {
+export function useReorderCollectionItems(
+  collectionId: string,
+  source: "user" | "library" = "user",
+) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ name, slug }: { name: string; slug?: string }) =>
-      api<CollectionGroup>("/collections/groups", {
-        method: "POST",
-        body: JSON.stringify({ name, slug }),
-      }),
-    onSuccess: () => invalidateUserCollectionQueries(queryClient),
+    retry: false,
+    mutationFn: ({ orderedIds, etag }: { orderedIds: string[]; etag: string }) =>
+      v2(
+        source === "user"
+          ? "PUT /api/v2/collections/{id}/items/order"
+          : "PUT /api/v2/admin/collections/{id}/items/order",
+        {
+          headers: { "If-Match": requiredETag(etag) },
+          path: { id: collectionId },
+          body: { ordered_ids: orderedIds },
+        },
+      ),
     onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed to add group");
+      toast.error(collectionMutationMessage(err, "Failed to reorder items"));
+      if (source === "user" && err instanceof V2ProblemError && err.status === 412)
+        void PERSONAL_SCOPE.invalidate(queryClient);
     },
-  });
-}
-
-export function useUpdateCollectionGroup() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, name }: { id: string; name: string }) =>
-      api<CollectionGroup>(`/collections/groups/${encodeURIComponent(id)}`, {
-        method: "PUT",
-        body: JSON.stringify({ name }),
-      }),
-    onSuccess: () => invalidateUserCollectionQueries(queryClient),
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed to rename group");
-    },
-  });
-}
-
-export function useDeleteCollectionGroup() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) =>
-      api<void>(`/collections/groups/${encodeURIComponent(id)}`, { method: "DELETE" }),
-    onSuccess: () => invalidateUserCollectionQueries(queryClient),
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed to delete group");
-    },
-  });
-}
-
-export function useReorderCollectionGroups() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (orderedIds: string[]) =>
-      api<void>("/collections/groups/order", {
-        method: "PUT",
-        body: JSON.stringify({ ordered_ids: orderedIds }),
-      }),
-    onMutate: async (orderedIds) => {
-      await queryClient.cancelQueries({ queryKey: collectionKeys.list() });
-      const snapshot = queryClient.getQueryData<CollectionsListResponse>(collectionKeys.list());
-      if (snapshot) {
-        const groups = reorderByIds(snapshot.groups, (g: CollectionGroup) => g.id, orderedIds).map(
-          (g, i) => ({ ...g, sort_order: i }),
-        );
-        queryClient.setQueryData<CollectionsListResponse>(collectionKeys.list(), {
-          ...snapshot,
-          groups,
-        });
-      }
-      return { snapshot };
-    },
-    onError: (err, _vars, ctx) => {
-      if (ctx?.snapshot) queryClient.setQueryData(collectionKeys.list(), ctx.snapshot);
-      toast.error(err instanceof Error ? err.message : "Failed to reorder groups");
-    },
-    onSettled: () => invalidateUserCollectionQueries(queryClient),
-  });
-}
-
-export function useReorderCollectionItems(collectionId: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (orderedIds: string[]) =>
-      api<void>(`/collections/${collectionId}/items/order`, {
-        method: "PUT",
-        body: JSON.stringify({ ordered_ids: orderedIds }),
-      }),
-    onMutate: async (orderedIds) => {
-      const key = collectionKeys.items(collectionId);
-      await queryClient.cancelQueries({ queryKey: key });
-      const snapshot = queryClient.getQueryData<CollectionItem[]>(key);
-      if (snapshot) {
-        queryClient.setQueryData(
-          key,
-          reorderByIds(snapshot, (item) => item.media_item_id, orderedIds),
-        );
-      }
-      return { snapshot };
-    },
-    onError: (err, _vars, ctx) => {
-      if (ctx?.snapshot) {
-        queryClient.setQueryData(collectionKeys.items(collectionId), ctx.snapshot);
-      }
-      toast.error(err instanceof Error ? err.message : "Failed to reorder items");
-    },
-    onSettled: () => invalidateUserCollectionQueries(queryClient, collectionId),
-  });
-}
-
-export function useDeleteUserCollectionImage() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id }: { id: string; type: "poster" }) =>
-      api<void>(`/collections/${id}/image?type=poster`, { method: "DELETE" }).then(() => id),
-    onSuccess: (id) => {
-      toast.success("Poster removed");
-      return invalidateUserCollectionQueries(queryClient, id);
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Failed to remove poster");
-    },
+    onSettled: () =>
+      source === "user"
+        ? PERSONAL_SCOPE.invalidate(queryClient, collectionId)
+        : invalidateAdminCollectionQueries(queryClient),
   });
 }
 
@@ -436,9 +326,9 @@ export function useSetCollectionSortPreference() {
         .then(async () => {
           if (!isProfileRequestContextCurrent(profileAuth)) return;
           try {
-            await apiWithProfileRequestContext("/collections/sort-preference", profileAuth, {
-              method: "PUT",
-              body: JSON.stringify(body),
+            await v2("PUT /api/v2/collections/sort-preference", {
+              profileContext: profileAuth,
+              body,
             });
           } catch {
             return;

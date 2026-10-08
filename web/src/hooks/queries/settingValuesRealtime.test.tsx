@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, waitFor } from "@testing-library/react";
 
 import { SETTING_KEYS } from "@/lib/settingsContract";
+import { libraryKeys, mediaSurfaceKeys, sectionKeys } from "./keys";
 import { storage } from "@/utils/storage";
 import {
   effectiveSettingsQueryKey,
@@ -13,10 +14,10 @@ import {
 } from "./settingValues";
 import type { EventChannelHandlers } from "@/components/realtimeEventsContext";
 
-const apiMock = vi.hoisted(() => vi.fn());
-vi.mock("@/api/client", async () => {
-  const actual = await vi.importActual<typeof import("@/api/client")>("@/api/client");
-  return { ...actual, api: apiMock };
+const v2Mock = vi.hoisted(() => vi.fn());
+vi.mock("@/api/v2/request", async () => {
+  const actual = await vi.importActual<typeof import("@/api/v2/request")>("@/api/v2/request");
+  return { ...actual, v2: v2Mock };
 });
 
 // The provider owns the websocket; the hook under test only cares that it
@@ -78,24 +79,63 @@ function seedEffective(queryClient: QueryClient, value: string) {
 
 describe("useSettingValuesRealtime", () => {
   beforeEach(() => {
-    apiMock.mockReset();
+    v2Mock.mockReset();
     subscriptions.length = 0;
     storage.set(storage.KEYS.PROFILE_ID, "profile-1");
   });
 
-  it("subscribes the user_settings channel", () => {
-    const { wrapper } = createHarness();
+  it.each(["profile-1", "profile-2"])(
+    "refreshes Home only for its active profile (%s)",
+    async (profileId) => {
+      const { queryClient, wrapper } = createHarness();
+      const homeKey = sectionKeys.homeItems("recent");
+      queryClient.setQueryData(homeKey, { section: { items: [{ content_id: "watched" }] } });
+      queryClient.setQueryData(mediaSurfaceKeys.refreshSignal(), 0);
+      render(<Subscriber />, { wrapper });
+      subscriptions
+        .find((entry) => entry.channel === "user_settings")
+        ?.handlers?.onEvent?.(
+          changedFrame({
+            key: SETTING_KEYS.HOME_HIDE_WATCHED_ITEMS,
+            scope: "profile",
+            profile_id: profileId,
+          }),
+        );
+      await waitFor(() => {
+        expect(queryClient.getQueryState(homeKey)?.isInvalidated).toBe(profileId === "profile-1");
+        expect(queryClient.getQueryData(mediaSurfaceKeys.refreshSignal())).toBe(
+          profileId === "profile-1" ? 1 : 0,
+        );
+      });
+    },
+  );
+
+  it("refetches the library list when another device hides or shows a library", async () => {
+    const { queryClient, wrapper } = createHarness();
+    const librariesKey = libraryKeys.user("profile-1");
+    queryClient.setQueryData(librariesKey, [{ id: 1 }]);
     render(<Subscriber />, { wrapper });
-    expect(subscriptions.map((entry) => entry.channel)).toContain("user_settings");
+    subscriptions
+      .find((entry) => entry.channel === "user_settings")
+      ?.handlers?.onEvent?.(
+        changedFrame({
+          key: SETTING_KEYS.UI_DISABLED_LIBRARY_IDS,
+          scope: "profile",
+          profile_id: "profile-1",
+        }),
+      );
+    await waitFor(() => expect(queryClient.getQueryState(librariesKey)?.isInvalidated).toBe(true));
   });
 
   it("refetches a mounted reader when another device changes this profile", async () => {
     const { wrapper } = createHarness();
     let served = "dark";
-    apiMock.mockImplementation(() =>
+    v2Mock.mockImplementation(() =>
       Promise.resolve({
         revision: 1,
-        settings: [{ key: SETTING_KEYS.UI_THEME, value: served, source: "profile" }],
+        items: [
+          { key: SETTING_KEYS.UI_THEME, value: served, source: "profile", definition_revision: 1 },
+        ],
       }),
     );
 
@@ -165,7 +205,8 @@ describe("useSettingValuesRealtime", () => {
 
   it("costs one invalidation pass per event without a manual refetch", () => {
     const { queryClient, wrapper } = createHarness();
-    seedEffective(queryClient, "dark");
+    const effectiveKey = seedEffective(queryClient, "dark");
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     render(<Subscriber />, { wrapper });
     const handlers = subscriptions.find((entry) => entry.channel === "user_settings")?.handlers;
 
@@ -176,6 +217,8 @@ describe("useSettingValuesRealtime", () => {
       handlers?.onEvent?.(changedFrame({ key, scope: "profile", profile_id: "profile-1" }));
     }
 
-    expect(apiMock).not.toHaveBeenCalled();
+    expect(invalidate.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(queryClient.getQueryState(effectiveKey)?.isInvalidated).toBe(true);
+    expect(v2Mock).not.toHaveBeenCalled();
   });
 });

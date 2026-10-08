@@ -1,10 +1,8 @@
 package userdb
 
 import (
-	"context"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/Silo-Server/silo-server/internal/userstore"
 	"github.com/Silo-Server/silo-server/internal/userstore/storetest"
@@ -54,26 +52,48 @@ func TestSQLiteCollectionSortPreferences(t *testing.T) {
 	storetest.RunCollectionSortPreferences(t, newConformanceStore)
 }
 
-func TestSQLiteAddFavoriteAtReportsInsertion(t *testing.T) {
-	ctx := context.Background()
-	store := newConformanceStore(t)
-	if err := store.CreateProfile(ctx, userstore.Profile{ID: "p1", Name: "Test"}); err != nil {
-		t.Fatalf("CreateProfile: %v", err)
-	}
+// TestSQLiteProgressPage runs the keyset progress paging conformance test
+// against the real SQLite backend; the Postgres backend runs the same suite in
+// internal/userstore/pgstore.
+func TestSQLiteProgressPage(t *testing.T) {
+	storetest.RunProgressPage(t, newConformanceStore)
+}
 
-	addedAt := time.Date(2026, time.July, 16, 12, 0, 0, 0, time.UTC)
-	inserted, err := store.AddFavoriteAt(ctx, "p1", "movie-1", addedAt)
-	if err != nil {
-		t.Fatalf("first AddFavoriteAt: %v", err)
+// TestSQLitePersonalListPage runs the keyset favorites/watchlist paging
+// conformance test against the real SQLite backend, which is what pins the
+// text comparison of added_at to the RFC 3339 form AddFavoriteAt writes.
+func TestSQLitePersonalListPage(t *testing.T) {
+	storetest.RunPersonalListPage(t, newConformanceStore)
+}
+
+func TestSQLiteHistoryEntryOnce(t *testing.T) {
+	storetest.RunHistoryEntryOnce(t, newConformanceStore(t))
+}
+
+func TestSQLiteDatedMarkWatchedBatchAtomic(t *testing.T) {
+	storetest.RunDatedMarkWatchedBatch(t, newConformanceStore(t))
+}
+
+func TestSQLiteAtomicJellycompatProgressHistoryRollback(t *testing.T) {
+	store, ok := newConformanceStore(t).(*SQLiteUserStore)
+	if !ok {
+		t.Fatal("SQLite fixture unavailable")
 	}
-	if !inserted {
-		t.Fatal("first AddFavoriteAt reported no insertion")
+	for _, operation := range []string{"INSERT", "UPDATE"} {
+		if _, err := store.db.Exec("CREATE TRIGGER fail_progress_" + operation + " BEFORE " + operation + " ON watch_progress WHEN NEW.position_seconds = 321 BEGIN SELECT RAISE(ABORT, 'forced progress failure'); END"); err != nil {
+			t.Fatal(err)
+		}
 	}
-	inserted, err = store.AddFavoriteAt(ctx, "p1", "movie-1", addedAt)
-	if err != nil {
-		t.Fatalf("duplicate AddFavoriteAt: %v", err)
-	}
-	if inserted {
-		t.Fatal("duplicate AddFavoriteAt reported an insertion")
-	}
+	storetest.RunAtomicJellycompatProgress(t, store)
+}
+
+func TestSQLiteCollectionSharing(t *testing.T) {
+	storetest.RunCollectionSharing(t, newConformanceStore)
+}
+
+// TestSQLiteProfilePINRevision runs the profile PIN revision conformance test
+// against the per-user SQLite backend; the Postgres backend runs the same suite
+// in internal/userstore/pgstore.
+func TestSQLiteProfilePINRevision(t *testing.T) {
+	storetest.RunProfilePINRevision(t, newConformanceStore)
 }

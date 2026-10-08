@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -52,21 +53,27 @@ type devicePollRequest struct {
 }
 
 type devicePollResponse struct {
-	Status           string        `json:"status"`
-	PollAfter        int           `json:"poll_after"`
-	AccessToken      string        `json:"access_token,omitempty"`
-	RefreshToken     string        `json:"refresh_token,omitempty"`
-	ExpiresIn        int           `json:"expires_in,omitempty"`
-	User             *userResponse `json:"user,omitempty"`
-	ProfileID        string        `json:"profile_id,omitempty"`
-	ProfileToken     string        `json:"profile_token,omitempty"`
-	Temporary        bool          `json:"temporary,omitempty"`
-	SessionExpiresAt string        `json:"session_expires_at,omitempty"`
+	Status           string    `json:"status"`
+	PollAfter        int       `json:"poll_after"`
+	AccessToken      string    `json:"access_token,omitempty"`
+	RefreshToken     string    `json:"refresh_token,omitempty"`
+	ExpiresIn        int       `json:"expires_in,omitempty"`
+	User             *UserView `json:"user,omitempty"`
+	ProfileID        string    `json:"profile_id,omitempty"`
+	ProfileToken     string    `json:"profile_token,omitempty"`
+	Temporary        bool      `json:"temporary,omitempty"`
+	SessionExpiresAt string    `json:"session_expires_at,omitempty"`
 }
 
 type deviceDecisionRequest struct {
 	Token string `json:"token,omitempty"`
 	Code  string `json:"code,omitempty"`
+}
+
+// deviceDecisionResponse is the {status} answer of approve, approve-handoff
+// and deny; it serializes exactly as the former map[string]string did.
+type deviceDecisionResponse struct {
+	Status string `json:"status"`
 }
 
 type deviceLoginCapabilityResponse struct {
@@ -93,7 +100,7 @@ func (h *AuthHandler) HandleDeviceStart(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	result, err := h.device.Start(r.Context(), auth.DeviceLoginStartInput{
+	result, err := h.StartDeviceLogin(r.Context(), auth.DeviceLoginStartInput{
 		DeviceName:     req.DeviceName,
 		DevicePlatform: req.DevicePlatform,
 		IPAddress:      clientip.FromContext(r.Context()),
@@ -101,13 +108,12 @@ func (h *AuthHandler) HandleDeviceStart(w http.ResponseWriter, r *http.Request) 
 		BaseURL:        requestBaseURL(r),
 		ClientPurpose:  req.ClientPurpose,
 		Temporary:      req.Temporary,
+		// v1 keeps its frozen answer: the request origin, not public_url,
+		// and a 10-minute request linked by browser code.
+		Legacy: true,
 	})
 	if err != nil {
-		if errors.Is(err, auth.ErrDeviceLoginBadPurpose) {
-			writeError(w, http.StatusBadRequest, "bad_request", "Invalid device login purpose")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to start device login")
+		writeAPIError(w, err)
 		return
 	}
 
@@ -133,21 +139,17 @@ func (h *AuthHandler) HandleDeviceLookup(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	info, err := h.device.Lookup(r.Context(), auth.DeviceLoginLookupInput{
+	info, err := h.LookupDeviceLogin(r.Context(), auth.DeviceLoginLookupInput{
 		BrowserCode: r.URL.Query().Get("token"),
 		UserCode:    r.URL.Query().Get("code"),
 	})
 	if err != nil {
-		if errors.Is(err, auth.ErrDeviceLoginNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", "Device login request not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to load device login")
+		writeAPIError(w, err)
 		return
 	}
 
 	response := deviceLookupResponse{
-		Status:         info.Status,
+		Status:         v1DeviceStatus(info.Status),
 		UserCode:       info.UserCode,
 		MatchCode:      info.MatchCode,
 		DeviceName:     info.DeviceName,
@@ -178,25 +180,21 @@ func (h *AuthHandler) HandleDevicePoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.device.Poll(r.Context(), req.DeviceCode)
+	result, err := h.PollDeviceLogin(auth.WithClientDevice(r.Context(), r.Header), req.DeviceCode)
 	if err != nil {
-		if errors.Is(err, auth.ErrDeviceLoginNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", "Device login request not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to poll device login")
+		writeAPIError(w, err)
 		return
 	}
 
 	resp := devicePollResponse{
-		Status:    result.Status,
+		Status:    v1DeviceStatus(result.Status),
 		PollAfter: result.PollAfter,
 	}
-	if result.TokenPair != nil && result.User != nil {
-		resp.AccessToken = result.TokenPair.AccessToken
-		resp.RefreshToken = result.TokenPair.RefreshToken
-		resp.ExpiresIn = result.TokenPair.ExpiresIn
-		user := buildUserResponse(result.User, effectiveDownloadAllowed(r.Context(), result.User, h.accessGroups), nil, nil)
+	if result.Tokens != nil {
+		resp.AccessToken = result.Tokens.AccessToken
+		resp.RefreshToken = result.Tokens.RefreshToken
+		resp.ExpiresIn = result.Tokens.ExpiresIn
+		user := result.Tokens.User
 		resp.User = &user
 		if result.Temporary {
 			resp.ProfileID = result.ProfileID
@@ -208,6 +206,243 @@ func (h *AuthHandler) HandleDevicePoll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// v1DeviceStatus keeps the frozen /api/v1 status values: a request the
+// device canceled through /api/v2 reads as denied there.
+func v1DeviceStatus(status string) string {
+	if status == auth.DeviceLoginStatusCanceled {
+		return auth.DeviceLoginStatusDenied
+	}
+	return status
+}
+
+// DeviceLoginPollView is the poll outcome the v1 and v2 handlers both render.
+// Tokens is set only once the request was approved and this poll consumed it.
+type DeviceLoginPollView struct {
+	Status    string
+	PollAfter int
+	// Opened: an approver has looked the pending request up (v2 only).
+	Opened bool
+	// ExpiresAt: the pending request's current expiry (v2 only).
+	ExpiresAt        time.Time
+	Tokens           *TokenPairView
+	ProfileID        string
+	ProfileToken     string
+	Temporary        bool
+	SessionExpiresAt time.Time
+}
+
+// TokenPairView is the credential response shape login, setup, signup and
+// device poll share: the token pair plus the account it authenticates.
+type TokenPairView struct {
+	AccessToken  string
+	RefreshToken string
+	ExpiresIn    int
+	User         UserView
+}
+
+// DeviceLoginConfigured reports whether device pairing is wired; the v2
+// capability document reports not_configured otherwise.
+func (h *AuthHandler) DeviceLoginConfigured() bool { return h.device != nil }
+
+// StartDeviceLogin opens a pairing request. v1 POST /auth/device/start and
+// v2 startDeviceLogin both call it; a failure is an *APIError.
+func (h *AuthHandler) StartDeviceLogin(ctx context.Context, input auth.DeviceLoginStartInput) (*auth.DeviceLoginStartResult, error) {
+	if h.device == nil {
+		return nil, apiError(http.StatusServiceUnavailable, "unavailable", "Device login is not configured")
+	}
+	result, err := h.device.Start(ctx, input)
+	if err != nil {
+		if errors.Is(err, auth.ErrDeviceLoginBadPurpose) {
+			return nil, fieldError("client_purpose", "Invalid device login purpose")
+		}
+		return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to start device login")
+	}
+	return result, nil
+}
+
+// LookupDeviceLogin describes a pairing request to the approving browser.
+// v1 GET /auth/device and v2 getDeviceLogin both call it.
+func (h *AuthHandler) LookupDeviceLogin(ctx context.Context, input auth.DeviceLoginLookupInput) (*auth.DeviceLoginInfo, error) {
+	if h.device == nil {
+		return nil, apiError(http.StatusServiceUnavailable, "unavailable", "Device login is not configured")
+	}
+	info, err := h.device.Lookup(ctx, input)
+	if err != nil {
+		if errors.Is(err, auth.ErrDeviceLoginNotFound) {
+			return nil, apiError(http.StatusNotFound, "not_found", "Device login request not found")
+		}
+		return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to load device login")
+	}
+	return info, nil
+}
+
+// PollDeviceLogin advances the pairing state machine for the waiting device.
+// v1 POST /auth/device/poll and v2 pollDeviceLogin both call it.
+func (h *AuthHandler) PollDeviceLogin(ctx context.Context, deviceCode string) (*DeviceLoginPollView, error) {
+	if h.device == nil {
+		return nil, apiError(http.StatusServiceUnavailable, "unavailable", "Device login is not configured")
+	}
+	result, err := h.device.Poll(ctx, deviceCode)
+	if err != nil {
+		if errors.Is(err, auth.ErrDeviceLoginNotFound) {
+			return nil, apiError(http.StatusNotFound, "not_found", "Device login request not found")
+		}
+		return nil, apiError(http.StatusInternalServerError, "internal_error", "Failed to poll device login")
+	}
+	view := &DeviceLoginPollView{Status: result.Status, PollAfter: result.PollAfter, Opened: result.Opened, ExpiresAt: result.ExpiresAt}
+	if result.TokenPair != nil && result.User != nil {
+		view.Tokens = &TokenPairView{
+			AccessToken:  result.TokenPair.AccessToken,
+			RefreshToken: result.TokenPair.RefreshToken,
+			ExpiresIn:    result.TokenPair.ExpiresIn,
+			User:         buildUserResponse(result.User, effectiveDownloadAllowed(ctx, result.User, h.accessGroups), nil, nil),
+		}
+		if result.Temporary {
+			view.ProfileID = result.ProfileID
+			view.ProfileToken = result.ProfileToken
+			view.Temporary = true
+			view.SessionExpiresAt = result.SessionExpiresAt
+		}
+	}
+	return view, nil
+}
+
+// CancelDeviceLogin withdraws the device's own request by its device code
+// and returns the resulting status. Only v2 cancelDeviceLogin calls it; the
+// frozen v1 surface has no cancel route.
+func (h *AuthHandler) CancelDeviceLogin(ctx context.Context, deviceCode string) (string, error) {
+	if h.device == nil {
+		return "", apiError(http.StatusServiceUnavailable, "unavailable", "Device login is not configured")
+	}
+	status, err := h.device.Cancel(ctx, deviceCode)
+	if err != nil {
+		if errors.Is(err, auth.ErrDeviceLoginNotFound) {
+			return "", apiError(http.StatusNotFound, "not_found", "Device login request not found")
+		}
+		return "", apiError(http.StatusInternalServerError, "internal_error", "Failed to cancel device login")
+	}
+	return status, nil
+}
+
+// DeviceLoginDecision is the shared outcome of approve, approve-handoff and
+// deny: the state the request is now in.
+type DeviceLoginDecision struct {
+	Status string
+}
+
+// deviceDecisionSessionError refuses a device decision that does not come
+// from a login session. An approval gives the device a login session of
+// the account, so an API key must not mint one (it would turn a key into a
+// refreshable session), and neither may an impersonation session (the
+// device session would carry no trace of the impersonator). Deny follows
+// the same rule so that only the people who can approve decide. The frozen
+// v1 routes answer with v1's existing 403 forbidden code.
+func deviceDecisionSessionError(ctx context.Context) *APIError {
+	claims := apimw.GetClaims(ctx)
+	if claims != nil && !claims.IsOwnLoginSession() {
+		return apiError(http.StatusForbidden, "forbidden", "Approving or denying a device needs a signed-in session; API keys and impersonation sessions cannot")
+	}
+	return nil
+}
+
+// ApproveDeviceLogin approves a login-purpose pairing request as the caller's
+// account. v1 POST /auth/device/approve and v2 approveDeviceLogin both call it.
+func (h *AuthHandler) ApproveDeviceLogin(ctx context.Context, input auth.DeviceLoginLookupInput, userID int) (DeviceLoginDecision, error) {
+	if h.device == nil {
+		return DeviceLoginDecision{}, apiError(http.StatusServiceUnavailable, "unavailable", "Device login is not configured")
+	}
+	if userID == 0 {
+		return DeviceLoginDecision{}, apiError(http.StatusUnauthorized, "unauthorized", "Authentication required")
+	}
+	if err := deviceDecisionSessionError(ctx); err != nil {
+		return DeviceLoginDecision{}, err
+	}
+	// The approving session is passed on so that a device approved from a
+	// session opened through an external provider inherits its identity.
+	if claims := apimw.GetClaims(ctx); claims != nil {
+		ctx = auth.WithClaims(ctx, claims)
+	}
+	if err := h.device.Approve(ctx, input, userID); err != nil {
+		return DeviceLoginDecision{}, deviceDecisionError(err)
+	}
+	return DeviceLoginDecision{Status: auth.DeviceLoginStatusApproved}, nil
+}
+
+// ApproveDeviceHandoff approves a remote-playback pairing request for the
+// caller's verified profile. v1 POST /auth/device/approve-handoff and v2
+// approveDeviceHandoff both call it.
+func (h *AuthHandler) ApproveDeviceHandoff(ctx context.Context, input auth.DeviceLoginLookupInput, userID int, profileID string) (DeviceLoginDecision, error) {
+	if h.device == nil {
+		return DeviceLoginDecision{}, apiError(http.StatusServiceUnavailable, "unavailable", "Device login is not configured")
+	}
+	if userID == 0 || profileID == "" {
+		return DeviceLoginDecision{}, apiError(http.StatusForbidden, "profile_required", "An active verified profile is required")
+	}
+	if err := deviceDecisionSessionError(ctx); err != nil {
+		return DeviceLoginDecision{}, err
+	}
+	// As for ApproveDeviceLogin: the device session inherits the approving
+	// session's provider chain.
+	if claims := apimw.GetClaims(ctx); claims != nil {
+		ctx = auth.WithClaims(ctx, claims)
+	}
+	if err := h.device.ApproveRemotePlayback(ctx, input, userID, profileID); err != nil {
+		return DeviceLoginDecision{}, deviceDecisionError(err)
+	}
+	return DeviceLoginDecision{Status: auth.DeviceLoginStatusApproved}, nil
+}
+
+// DenyDeviceLogin refuses a pairing request. v1 POST /auth/device/deny and
+// v2 denyDeviceLogin both call it.
+func (h *AuthHandler) DenyDeviceLogin(ctx context.Context, input auth.DeviceLoginLookupInput, userID int) (DeviceLoginDecision, error) {
+	if h.device == nil {
+		return DeviceLoginDecision{}, apiError(http.StatusServiceUnavailable, "unavailable", "Device login is not configured")
+	}
+	if userID == 0 {
+		return DeviceLoginDecision{}, apiError(http.StatusUnauthorized, "unauthorized", "Authentication required")
+	}
+	if err := deviceDecisionSessionError(ctx); err != nil {
+		return DeviceLoginDecision{}, err
+	}
+	if err := h.device.Deny(ctx, input); err != nil {
+		return DeviceLoginDecision{}, deviceDecisionError(err)
+	}
+	return DeviceLoginDecision{Status: auth.DeviceLoginStatusDenied}, nil
+}
+
+// deviceDecisionError maps a device-login service failure onto the v1
+// status and code; the cause is kept so a caller can still branch on it.
+func deviceDecisionError(err error) *APIError {
+	var out *APIError
+	switch {
+	case errors.Is(err, auth.ErrDeviceLoginNotFound):
+		out = apiError(http.StatusNotFound, "not_found", "Device login request not found")
+	case errors.Is(err, auth.ErrDeviceLoginExpired):
+		out = apiError(http.StatusGone, "expired", "Device login request has expired")
+	case errors.Is(err, auth.ErrDeviceLoginConsumed):
+		out = apiError(http.StatusConflict, "consumed", "Device login request has already been used")
+	case errors.Is(err, auth.ErrDeviceLoginDenied):
+		out = apiError(http.StatusConflict, "denied", "Device login request has already been denied")
+	case errors.Is(err, auth.ErrDeviceLoginCanceled):
+		// v1 keeps its code set: a canceled request answers as denied.
+		out = apiError(http.StatusConflict, "denied", "Device login request was canceled on the device")
+	case errors.Is(err, auth.ErrUserDisabled):
+		out = apiError(http.StatusForbidden, "user_disabled", "User account is disabled")
+	case errors.Is(err, auth.ErrSessionRevoked):
+		out = apiError(http.StatusUnauthorized, "unauthorized", "Login session is no longer valid")
+	case errors.Is(err, auth.ErrDeviceLoginPurpose):
+		out = apiError(http.StatusConflict, "purpose_mismatch", "Device login purpose does not match this approval route")
+	case errors.Is(err, auth.ErrDeviceLoginConflict):
+		out = apiError(http.StatusConflict, "approval_conflict", "Device login request was approved by another identity")
+	case errors.Is(err, auth.ErrDeviceLoginNoProfile):
+		out = apiError(http.StatusNotFound, "profile_not_found", "Profile not found")
+	default:
+		out = apiError(http.StatusInternalServerError, "internal_error", "Device login request failed")
+	}
+	out.cause = err
+	return out
 }
 
 func (h *AuthHandler) HandleDeviceApprove(w http.ResponseWriter, r *http.Request) {
@@ -228,16 +463,16 @@ func (h *AuthHandler) HandleDeviceApprove(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	err := h.device.Approve(r.Context(), auth.DeviceLoginLookupInput{
+	decision, err := h.ApproveDeviceLogin(r.Context(), auth.DeviceLoginLookupInput{
 		BrowserCode: req.Token,
 		UserCode:    req.Code,
 	}, userID)
 	if err != nil {
-		h.writeDeviceDecisionError(w, err)
+		writeAPIError(w, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "approved"})
+	writeJSON(w, http.StatusOK, deviceDecisionResponse(decision))
 }
 
 func (h *AuthHandler) HandleDeviceApproveHandoff(w http.ResponseWriter, r *http.Request) {
@@ -258,16 +493,16 @@ func (h *AuthHandler) HandleDeviceApproveHandoff(w http.ResponseWriter, r *http.
 		return
 	}
 
-	err := h.device.ApproveRemotePlayback(r.Context(), auth.DeviceLoginLookupInput{
+	decision, err := h.ApproveDeviceHandoff(r.Context(), auth.DeviceLoginLookupInput{
 		BrowserCode: req.Token,
 		UserCode:    req.Code,
 	}, scope.UserID, scope.ProfileID)
 	if err != nil {
-		h.writeDeviceDecisionError(w, err)
+		writeAPIError(w, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "approved"})
+	writeJSON(w, http.StatusOK, deviceDecisionResponse(decision))
 }
 
 func (h *AuthHandler) HandleDeviceDeny(w http.ResponseWriter, r *http.Request) {
@@ -288,37 +523,14 @@ func (h *AuthHandler) HandleDeviceDeny(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := h.device.Deny(r.Context(), auth.DeviceLoginLookupInput{
+	decision, err := h.DenyDeviceLogin(r.Context(), auth.DeviceLoginLookupInput{
 		BrowserCode: req.Token,
 		UserCode:    req.Code,
-	})
+	}, userID)
 	if err != nil {
-		h.writeDeviceDecisionError(w, err)
+		writeAPIError(w, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "denied"})
-}
-
-func (h *AuthHandler) writeDeviceDecisionError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, auth.ErrDeviceLoginNotFound):
-		writeError(w, http.StatusNotFound, "not_found", "Device login request not found")
-	case errors.Is(err, auth.ErrDeviceLoginExpired):
-		writeError(w, http.StatusGone, "expired", "Device login request has expired")
-	case errors.Is(err, auth.ErrDeviceLoginConsumed):
-		writeError(w, http.StatusConflict, "consumed", "Device login request has already been used")
-	case errors.Is(err, auth.ErrDeviceLoginDenied):
-		writeError(w, http.StatusConflict, "denied", "Device login request has already been denied")
-	case errors.Is(err, auth.ErrUserDisabled):
-		writeError(w, http.StatusForbidden, "user_disabled", "User account is disabled")
-	case errors.Is(err, auth.ErrDeviceLoginPurpose):
-		writeError(w, http.StatusConflict, "purpose_mismatch", "Device login purpose does not match this approval route")
-	case errors.Is(err, auth.ErrDeviceLoginConflict):
-		writeError(w, http.StatusConflict, "approval_conflict", "Device login request was approved by another identity")
-	case errors.Is(err, auth.ErrDeviceLoginNoProfile):
-		writeError(w, http.StatusNotFound, "profile_not_found", "Profile not found")
-	default:
-		writeError(w, http.StatusInternalServerError, "internal_error", "Device login request failed")
-	}
+	writeJSON(w, http.StatusOK, deviceDecisionResponse(decision))
 }

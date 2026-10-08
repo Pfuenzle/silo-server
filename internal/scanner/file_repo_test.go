@@ -120,60 +120,6 @@ func TestRecomputeSharedMarkerAttributionUsesLegacyAttributionForUnattributedSeg
 	}
 }
 
-func TestApplySegmentPatchSkipsSemanticNoop(t *testing.T) {
-	manual := models.MarkerSourceManual
-	confidence := 1.0
-	algorithm := "manual:v1"
-	detectedAt := time.Unix(100, 0).UTC()
-	state := segmentState{
-		start:      floatPtr(0),
-		end:        floatPtr(60),
-		source:     &manual,
-		confidence: &confidence,
-		algorithm:  &algorithm,
-		detectedAt: &detectedAt,
-	}
-
-	changed, err := applySegmentPatch(
-		&state,
-		nil,
-		manual,
-		nil,
-		&confidence,
-		algorithm,
-		floatPtr(0),
-		floatPtr(60),
-		1800,
-		"intro",
-		time.Unix(200, 0).UTC(),
-	)
-	if err != nil {
-		t.Fatalf("applySegmentPatch returned error: %v", err)
-	}
-	if changed {
-		t.Fatal("identical marker patch should be a semantic no-op")
-	}
-	if state.detectedAt == nil || !state.detectedAt.Equal(detectedAt) {
-		t.Fatalf("detected_at changed on no-op: %v", state.detectedAt)
-	}
-}
-
-func TestClearSegmentStateSkipsSemanticNoop(t *testing.T) {
-	empty := segmentState{}
-	if clearSegmentState(&empty) {
-		t.Fatal("clearing an empty segment should be a no-op")
-	}
-
-	manual := models.MarkerSourceManual
-	state := segmentState{start: floatPtr(0), end: floatPtr(60), source: &manual}
-	if !clearSegmentState(&state) {
-		t.Fatal("clearing a populated segment should report a change")
-	}
-	if state.start != nil || state.end != nil || state.source != nil {
-		t.Fatalf("segment was not cleared: %+v", state)
-	}
-}
-
 func TestMarkerAuditSegmentForStatePreservesBeforeAfterShape(t *testing.T) {
 	manual := models.MarkerSourceManual
 	algorithm := "manual:v1"
@@ -239,3 +185,27 @@ func TestRecomputeSharedMarkerAttributionClearsWhenNoSegmentsRemain(t *testing.T
 }
 
 func floatPtr(v float64) *float64 { return &v }
+
+// Multipart ordering must survive rows written before the part-index column:
+// SQL orders those legacy rows by file path, which puts part10 before part2.
+func TestSortPresentationFilesOrdersLegacyRowsNaturally(t *testing.T) {
+	files := []*models.MediaFile{
+		{ID: 1, FilePath: "/book/part10.m4b"},
+		{ID: 2, FilePath: "/book/part2.m4b", PresentationPartIndex: 2, PresentationPartTotal: 3},
+		{ID: 3, FilePath: "/book/part1.m4b"},
+		{ID: 4, FilePath: "/book/part1.m4b", PresentationPartIndex: 1, PresentationPartTotal: 3},
+		{ID: 5, FilePath: "/book/part3.m4b", PresentationPartIndex: 3, PresentationPartTotal: 3},
+	}
+	sortPresentationFiles(files)
+
+	got := make([]int, 0, len(files))
+	for _, f := range files {
+		got = append(got, f.ID)
+	}
+	want := []int{4, 2, 5, 3, 1}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("presentation order = %v, want %v", got, want)
+		}
+	}
+}

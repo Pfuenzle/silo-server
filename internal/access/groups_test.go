@@ -10,6 +10,46 @@ import (
 
 func ptr[T any](value T) *T { return &value }
 
+func TestRemoteStreamBitratePolicyInheritanceAndOverride(t *testing.T) {
+	group := &GroupPolicy{MaxRemoteStreamBitrateKbps: 4_000}
+	user := &models.User{}
+	if got := ApplyGroupPolicy(user, group).MaxRemoteStreamBitrateKbps; got != 4_000 {
+		t.Fatalf("inherited bitrate = %d, want 4000", got)
+	}
+	user.MaxRemoteStreamBitrateKbps = ptr(2_000)
+	if got := ApplyGroupPolicy(user, group).MaxRemoteStreamBitrateKbps; got != 2_000 {
+		t.Fatalf("tighter override = %d, want 2000", got)
+	}
+	user.MaxRemoteStreamBitrateKbps = ptr(0)
+	if got := ApplyGroupPolicy(user, group).MaxRemoteStreamBitrateKbps; got != 0 {
+		t.Fatalf("explicit unlimited override = %d, want 0", got)
+	}
+	user.MaxRemoteStreamBitrateKbps = nil
+	if got := ApplyGroupPolicy(user, nil).MaxRemoteStreamBitrateKbps; got != 0 {
+		t.Fatalf("no-group default = %d, want 0", got)
+	}
+}
+
+func TestLocalStreamBitratePolicyInheritanceAndOverride(t *testing.T) {
+	group := &GroupPolicy{MaxLocalStreamBitrateKbps: 12_000}
+	user := &models.User{}
+	if got := ApplyGroupPolicy(user, group).MaxLocalStreamBitrateKbps; got != 12_000 {
+		t.Fatalf("inherited local bitrate = %d, want 12000", got)
+	}
+	user.MaxLocalStreamBitrateKbps = ptr(6_000)
+	if got := ApplyGroupPolicy(user, group).MaxLocalStreamBitrateKbps; got != 6_000 {
+		t.Fatalf("local override = %d, want 6000", got)
+	}
+	user.MaxLocalStreamBitrateKbps = ptr(0)
+	if got := ApplyGroupPolicy(user, group).MaxLocalStreamBitrateKbps; got != 0 {
+		t.Fatalf("explicit local unlimited = %d, want 0", got)
+	}
+	user.MaxLocalStreamBitrateKbps = nil
+	if got := ApplyGroupPolicy(user, nil).MaxLocalStreamBitrateKbps; got != 0 {
+		t.Fatalf("no-group local default = %d, want 0", got)
+	}
+}
+
 func TestApplyGroupPolicyNoGroupUsesOverridesOverPermissiveDefault(t *testing.T) {
 	user := &models.User{
 		ID:                       7,
@@ -334,21 +374,8 @@ func TestEffectivePolicyForUserSkipsProviderWhenUngrouped(t *testing.T) {
 	}
 }
 
-func TestEffectivePolicyForUserQueriesProviderWhenGrouped(t *testing.T) {
-	groupID := int64(11)
-	user := &models.User{ID: 3, AccessGroupID: &groupID}
-	group := &GroupPolicy{ID: groupID, MaxStreams: 2, RequestsAllowed: true}
-	got, err := EffectivePolicyForUser(context.Background(), user, stubGroupProvider{group: group})
-	if err != nil {
-		t.Fatalf("EffectivePolicyForUser() error = %v", err)
-	}
-	if got.MaxStreams != 2 {
-		t.Fatalf("EffectivePolicyForUser(grouped).MaxStreams = %d, want 2", got.MaxStreams)
-	}
-}
-
 // An admin row that still carries a group (written before admins were kept
-// ungrouped) resolves as ungrouped without consulting the provider.
+// ungrouped) resolves to the admin defaults without consulting the provider.
 func TestEffectivePolicyForUserIgnoresGroupOnAdmin(t *testing.T) {
 	groupID := int64(7)
 	user := &models.User{ID: 3, Role: models.RoleAdmin, AccessGroupID: &groupID}
@@ -356,7 +383,51 @@ func TestEffectivePolicyForUserIgnoresGroupOnAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EffectivePolicyForUser() error = %v", err)
 	}
-	if !reflect.DeepEqual(got, ApplyGroupPolicy(user, nil)) {
-		t.Fatalf("EffectivePolicyForUser(admin) = %#v, want the no-group policy %#v", got, ApplyGroupPolicy(user, nil))
+	if want := adminFullAccess(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("EffectivePolicyForUser(admin) = %#v, want full access %#v", got, want)
+	}
+}
+
+func adminFullAccess() EffectiveUserPolicy {
+	return EffectiveUserPolicy{
+		DownloadAllowed:          true,
+		DownloadTranscodeAllowed: true,
+		TranscodeAllowed:         true,
+		AudioTranscodeAllowed:    true,
+		RequestsAllowed:          true,
+	}
+}
+
+// An admin with no overrides has full access, including server-prepared
+// downloads, which the no-group defaults for a regular account deny (#1403).
+func TestApplyGroupPolicyAdminDefaultsToFullAccess(t *testing.T) {
+	admin := &models.User{ID: 1, Role: models.RoleAdmin}
+	if got, want := ApplyGroupPolicy(admin, nil), adminFullAccess(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ApplyGroupPolicy(admin) = %#v, want %#v", got, want)
+	}
+	regular := &models.User{ID: 2, Role: models.RoleUser}
+	if ApplyGroupPolicy(regular, nil).DownloadTranscodeAllowed {
+		t.Fatal("ApplyGroupPolicy(ungrouped regular).DownloadTranscodeAllowed = true, want the no-group default false")
+	}
+}
+
+func TestApplyGroupPolicyAdminOverridesStillRestrict(t *testing.T) {
+	admin := &models.User{ID: 1, Role: models.RoleAdmin, DownloadTranscodeAllowed: ptr(false), MaxStreams: ptr(2)}
+	got := ApplyGroupPolicy(admin, nil)
+	if got.DownloadTranscodeAllowed || got.MaxStreams != 2 {
+		t.Fatalf("ApplyGroupPolicy(restricted admin) = %#v, want the overrides to win", got)
+	}
+}
+
+// The resolver itself keeps a group off an admin, not only GroupApplies at
+// each call site.
+func TestApplyGroupPolicyIgnoresGroupOnAdmin(t *testing.T) {
+	admin := &models.User{ID: 1, Role: models.RoleAdmin, Permissions: []string{"marker_edit"}}
+	group := &GroupPolicy{ID: 4, LibraryIDs: []int{1}, MaxStreams: 1, AllowedPermissions: []string{}}
+	got := ApplyGroupPolicy(admin, group)
+	want := adminFullAccess()
+	want.Permissions = []string{"marker_edit"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ApplyGroupPolicy(admin, group) = %#v, want %#v", got, want)
 	}
 }

@@ -1,13 +1,41 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 
-	"github.com/Silo-Server/silo-server/internal/models"
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/Silo-Server/silo-server/internal/models"
 )
+
+type passwordHashCapture struct {
+	hash string
+}
+
+func (db *passwordHashCapture) QueryRow(_ context.Context, _ string, args ...any) pgx.Row {
+	db.hash = args[2].(string)
+	return passwordHashRow{}
+}
+
+type passwordHashRow struct{}
+
+func (passwordHashRow) Scan(...any) error { return pgx.ErrNoRows }
+
+func TestCreateUserPasswordHashCost(t *testing.T) {
+	db := &passwordHashCapture{}
+	const password = "test account password"
+	_, err := createUser(t.Context(), db, models.CreateUserInput{
+		Username: "cost-test", Email: "cost@example.test", Password: password, Role: models.RoleUser,
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("createUser() error = %v, want %v", err, ErrNotFound)
+	}
+	assertTestPasswordHash(t, db.hash, password)
+}
 
 func passwordUser(t *testing.T, password string) *models.User {
 	t.Helper()
@@ -48,5 +76,43 @@ func TestValidatePasswordChange(t *testing.T) {
 				t.Fatalf("validatePasswordChange() error = %v, want %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateNewPasswordBoundaries(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name     string
+		password string
+		want     error
+	}{
+		{"seven characters", "1234567", ErrPasswordTooShort},
+		{"eight characters", "12345678", nil},
+		{"seven unicode characters", strings.Repeat("界", 7), ErrPasswordTooShort},
+		{"eight unicode characters", strings.Repeat("界", 8), nil},
+		{"72 bytes", strings.Repeat("界", 24), nil},
+		{"73 bytes", strings.Repeat("界", 24) + "a", ErrPasswordTooLong},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidateNewPassword(tt.password); !errors.Is(err, tt.want) {
+				t.Fatalf("error = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRegistrationRejectsPasswordBeforeDependencies(t *testing.T) {
+	t.Parallel()
+	// No stores are wired: rejection must precede setup checks, invite redemption,
+	// account creation, or any other storage access.
+	s := &Service{}
+	for _, password := range []string{"short", strings.Repeat("界", 25)} {
+		want := ValidateNewPassword(password)
+		if _, _, err := s.SetupInitialUser(t.Context(), "user", "user@example.test", password, true, "Home", "", ""); !errors.Is(err, want) {
+			t.Fatalf("setup error = %v, want %v", err, want)
+		}
+		if _, _, err := s.Signup(t.Context(), "user", "user@example.test", password, "invite", true, "Home", "", ""); !errors.Is(err, want) {
+			t.Fatalf("signup error = %v, want %v", err, want)
+		}
 	}
 }

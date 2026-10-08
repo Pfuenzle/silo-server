@@ -18,7 +18,6 @@ type BootstrapConfig struct {
 	RedisURL    string // optional override; empty means use DB setting
 	Listen      string
 	JFListen    string
-	ABSListen   string
 	Mode        string
 	// SecretKey is the master key (raw SECRET_KEY env value) from which the
 	// at-rest credential cipher derives its data key. It lives outside Postgres
@@ -26,16 +25,26 @@ type BootstrapConfig struct {
 	SecretKey []byte
 }
 
-// LoadBootstrap loads bootstrap configuration from a .env file (if it exists)
-// and environment variables. Only DATABASE_URL is required.
-func LoadBootstrap(envFile string) (*BootstrapConfig, error) {
+// LoadDatabaseURL loads DATABASE_URL from a .env file (if it exists) and
+// environment variables, for maintenance commands that only reach the
+// database and must not need the server's other bootstrap secrets.
+func LoadDatabaseURL(envFile string) (string, error) {
 	if envFile != "" {
 		_ = godotenv.Load(envFile)
 	}
-
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		return nil, fmt.Errorf("DATABASE_URL is required (set in .env or environment)")
+		return "", fmt.Errorf("DATABASE_URL is required (set in .env or environment)")
+	}
+	return dbURL, nil
+}
+
+// LoadBootstrap loads bootstrap configuration from a .env file (if it exists)
+// and environment variables. Only DATABASE_URL is required.
+func LoadBootstrap(envFile string) (*BootstrapConfig, error) {
+	dbURL, err := LoadDatabaseURL(envFile)
+	if err != nil {
+		return nil, err
 	}
 
 	// SECRET_KEY is the at-rest encryption master key. It is required: the server
@@ -56,10 +65,6 @@ func LoadBootstrap(envFile string) (*BootstrapConfig, error) {
 	if jfPort == "" {
 		jfPort = "8096"
 	}
-	absPort := os.Getenv("ABS_PORT")
-	if absPort == "" {
-		absPort = "13378"
-	}
 
 	mode := os.Getenv("MODE")
 	if mode == "" {
@@ -73,7 +78,6 @@ func LoadBootstrap(envFile string) (*BootstrapConfig, error) {
 		RedisURL:    redisURL,
 		Listen:      ":" + port,
 		JFListen:    ":" + jfPort,
-		ABSListen:   ":" + absPort,
 		Mode:        mode,
 		SecretKey:   []byte(secretKey),
 	}, nil

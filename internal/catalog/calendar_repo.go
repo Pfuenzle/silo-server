@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Silo-Server/silo-server/internal/access"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -35,7 +36,8 @@ type CalendarFilter struct {
 	LibraryID          *int
 	AllowedLibraryIDs  []int
 	DisabledLibraryIDs []int
-	MaxContentRating   string
+	// MaturityLimits mirrors AccessFilter.MaturityLimits.
+	access.MaturityLimits
 
 	// RestrictByIDs limits results to items whose movie content_id (movies) or
 	// series_id (episodes / season premieres) is in RestrictToIDs. When
@@ -232,10 +234,11 @@ LEFT JOIN episode_one_with_air_date e1
 WHERE e1.series_id IS NULL`
 }
 
-// appendContentRatingClause adds content rating ceiling enforcement.
+// appendContentRatingClause adds the viewer's maturity limits: the content
+// rating ceiling and the advisory-age limit.
 func (r *CalendarRepository) appendContentRatingClause(miAlias string, f CalendarFilter, conditions *[]string, args *[]any, argIdx *int) {
-	if f.MaxContentRating != "" {
-		applyAccessFilter(miAlias, AccessFilter{MaxContentRating: f.MaxContentRating}, conditions, args, argIdx)
+	if f.Active() {
+		applyAccessFilter(miAlias, AccessFilter{MaturityLimits: f.MaturityLimits}, conditions, args, argIdx)
 	}
 }
 
@@ -244,18 +247,10 @@ func (r *CalendarRepository) appendContentRatingClause(miAlias string, f Calenda
 // belongs to multiple libraries, eliminating the need for DISTINCT.
 func (r *CalendarRepository) appendLibraryExistsClauses(contentIDExpr string, f CalendarFilter, conditions *[]string, args *[]any, argIdx *int) {
 	if f.LibraryID != nil {
-		if f.AllowedLibraryIDs != nil {
-			allowed := false
-			for _, id := range f.AllowedLibraryIDs {
-				if id == *f.LibraryID {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				*conditions = append(*conditions, "1 = 0")
-				return
-			}
+		libraryAccess := AccessFilter{AllowedLibraryIDs: f.AllowedLibraryIDs, DisabledLibraryIDs: f.DisabledLibraryIDs}
+		if _, none := libraryAccess.LibraryScope([]int{*f.LibraryID}); none {
+			*conditions = append(*conditions, "1 = 0")
+			return
 		}
 
 		*conditions = append(*conditions, fmt.Sprintf(

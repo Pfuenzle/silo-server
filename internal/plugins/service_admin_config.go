@@ -47,26 +47,6 @@ func (s *Service) SetGlobalConfigWithClears(
 	value map[string]any,
 	clearSecrets []string,
 ) error {
-	return s.SetGlobalConfigWithFieldClears(
-		ctx,
-		installationID,
-		key,
-		value,
-		clearSecrets,
-		nil,
-	)
-}
-
-// SetGlobalConfigWithFieldClears saves one config entry while explicitly
-// removing manifest-declared public fields that an admin cleared in the form.
-func (s *Service) SetGlobalConfigWithFieldClears(
-	ctx context.Context,
-	installationID int,
-	key string,
-	value map[string]any,
-	clearSecrets []string,
-	clearFields []string,
-) error {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return &ConfigValidationError{Message: "config key is required"}
@@ -75,7 +55,7 @@ func (s *Service) SetGlobalConfigWithFieldClears(
 		return fmt.Errorf("plugin config store not configured")
 	}
 
-	_, manifest, err := s.ensureInstallationCache(ctx, installationID, false)
+	_, manifest, err := s.loadForManifestRead(ctx, installationID, false)
 	if err != nil {
 		return err
 	}
@@ -83,13 +63,9 @@ func (s *Service) SetGlobalConfigWithFieldClears(
 	if value == nil {
 		value = map[string]any{}
 	}
-	publicFields, secretFields := GlobalConfigFieldSets(manifest, key)
+	secretFields := GlobalConfigSecretFields(manifest, key)
 	secretPaths := GlobalConfigSecretPaths(manifest, key)
 	clearSet, err := validatedSecretClearSet(key, secretFields, clearSecrets)
-	if err != nil {
-		return &ConfigValidationError{Message: err.Error(), Cause: err}
-	}
-	clearFieldSet, err := validatedPublicClearSet(key, publicFields, clearFields)
 	if err != nil {
 		return &ConfigValidationError{Message: err.Error(), Cause: err}
 	}
@@ -106,14 +82,7 @@ func (s *Service) SetGlobalConfigWithFieldClears(
 		if err != nil {
 			return err
 		}
-		for field := range clearSet {
-			delete(merged, field)
-		}
-		for field := range clearFieldSet {
-			delete(merged, field)
-		}
-		projection := globalConfigValidationProjection(manifest, key, merged, value)
-		if err := ValidateGlobalConfigValue(manifest, key, projection); err != nil {
+		if err := applyGlobalConfigClears(manifest, key, merged, value, clearSet); err != nil {
 			return &ConfigValidationError{Message: err.Error(), Cause: err}
 		}
 
@@ -135,18 +104,28 @@ func (s *Service) SetGlobalConfigWithFieldClears(
 	if !saved {
 		return fmt.Errorf("persist plugin config: concurrent updates did not settle")
 	}
+	return s.afterGlobalConfigSaved(ctx, installationID)
+}
 
+// afterGlobalConfigSaved restarts the plugin on its new configuration and
+// notifies lifecycle hooks.
+func (s *Service) afterGlobalConfigSaved(ctx context.Context, installationID int) error {
 	var stopErr error
 	if s.host != nil {
 		if err := s.host.Stop(installationID); err != nil && !errors.Is(err, pluginhost.ErrClientNotFound) {
 			stopErr = fmt.Errorf("reload plugin after config update: %w", err)
 		}
 	}
+	// A reconfigured resident gets a fresh failure budget; the lifecycle
+	// reconcile below starts it again.
+	s.resident.Reset(installationID)
 	// Configuration is part of metadata match input identity. Notify hooks
 	// after the old process has been stopped so resolver reloads observe the new
 	// runtime. The durable config changed even when stopping failed, so hooks
 	// still run before returning that error and parked rows are not left asleep.
 	s.OnLifecycleChange(ctx)
+	// The config save advanced runtime_generation in the same transaction;
+	// both the lifecycle event above and a proxy's poll replace stale processes.
 	return stopErr
 }
 
@@ -160,21 +139,6 @@ func validatedSecretClearSet(
 	for field := range clearSet {
 		if _, ok := allowedSecrets[field]; !ok {
 			return nil, fmt.Errorf("%s is not a secret field in config %s", field, configKey)
-		}
-	}
-	return clearSet, nil
-}
-
-func validatedPublicClearSet(
-	configKey string,
-	publicFields []string,
-	clearFields []string,
-) (map[string]struct{}, error) {
-	clearSet := secretFieldSet(clearFields)
-	allowedFields := secretFieldSet(publicFields)
-	for field := range clearSet {
-		if _, ok := allowedFields[field]; !ok {
-			return nil, fmt.Errorf("%s is not a public field in config %s", field, configKey)
 		}
 	}
 	return clearSet, nil
@@ -260,6 +224,57 @@ func (s *Service) mergeStoredConfig(
 		}
 	}
 	return merged, expectedUpdatedAt, nil
+}
+
+// applyGlobalConfigClears finishes a merged config entry and validates it:
+// it removes the secrets in clearSet, drops the fields the admin cleared
+// (dropClearedConfigFields) and checks the declared projection against the
+// schema. Both a save and a staged connection test use it.
+func applyGlobalConfigClears(
+	manifest *pluginv1.PluginManifest,
+	key string,
+	merged map[string]any,
+	value map[string]any,
+	clearSet map[string]struct{},
+) error {
+	for field := range clearSet {
+		delete(merged, field)
+	}
+	dropClearedConfigFields(manifest, key, merged, value)
+	projection := globalConfigValidationProjection(manifest, key, merged, value)
+	return ValidateGlobalConfigValue(manifest, key, projection)
+}
+
+// dropClearedConfigFields removes from merged every declared, non-secret
+// top-level field the admin sent as an explicit empty string or null, so
+// the plugin's default applies: a save merges into the stored value, so an
+// emptied field must clear what was stored rather than keep it (or store an
+// empty value that fails its schema). A field holding a secret, or secrets
+// nested inside it, is left to the secret merge: a blank secret keeps the
+// stored one and only clear_secrets removes it. Fields the schema and admin
+// form do not declare (plugin-owned state) are never cleared this way.
+func dropClearedConfigFields(
+	manifest *pluginv1.PluginManifest,
+	key string,
+	merged map[string]any,
+	value map[string]any,
+) {
+	public, _ := GlobalConfigFieldSets(manifest, key)
+	for _, field := range public {
+		if incoming, sent := value[field]; sent && isClearedConfigValue(incoming) {
+			delete(merged, field)
+		}
+	}
+}
+
+// isClearedConfigValue reports whether a submitted config value asks to
+// clear its field: null or a blank string.
+func isClearedConfigValue(value any) bool {
+	if value == nil {
+		return true
+	}
+	text, isString := value.(string)
+	return isString && strings.TrimSpace(text) == ""
 }
 
 func globalConfigValidationProjection(

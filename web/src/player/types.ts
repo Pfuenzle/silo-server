@@ -6,6 +6,9 @@
 /** Subtitle display mode. */
 export type SubtitleMode = "off" | "auto" | "always";
 
+/** How the video frame is sized within the player viewport. */
+export type VideoFitMode = "contain" | "cover";
+
 /** What the player does when it enters a detected intro. */
 export type IntroSkipMode = "never" | "ask" | "always";
 
@@ -35,6 +38,9 @@ export interface PlayerFileVersion {
   credits?: PlayerTimeRange | null;
   recap?: PlayerTimeRange | null;
   preview?: PlayerTimeRange | null;
+  marker_segments?: PlayerMarkerSegment[];
+  /** Seek-bar previews are published for this file. */
+  trickplay_available?: boolean;
 }
 
 export interface PlayerPlaybackVariantPart {
@@ -125,6 +131,8 @@ export interface PlayerSubtitleInfo {
   source?: "external" | "embedded" | "downloaded";
   forced?: boolean;
   hearing_impaired?: boolean;
+  /** Names the track to the subtitle sync operations; absent when it can't be synced. */
+  sync_key?: string;
   url: string;
   /**
    * Optional endpoint returning base64-encoded container font attachments for
@@ -173,6 +181,13 @@ export interface PlayerTimeRange {
  * Jellyfin-compatible API exposes as "Outro" — there is no separate outro kind.
  */
 export type MarkerKind = "intro" | "recap" | "credits" | "preview";
+
+/** Every occurrence in the v2 marker inventory. An empty array means no markers. */
+export interface PlayerMarkerSegment {
+  kind: MarkerKind;
+  start_seconds: number;
+  end_seconds: number;
+}
 
 /** A full set of editable marker ranges for one file (null = no marker). */
 export interface MarkerDraft {
@@ -226,9 +241,20 @@ export interface PlayerPlaybackStateChange {
 export interface PlayerPlaybackTransport {
   playPause: () => void | Promise<void>;
   seekBy: (secondsDelta: number) => void;
+  skipBack: () => void;
+  skipForward: () => void;
   seekTo: (seconds: number) => void;
   togglePictureInPicture: () => void | Promise<void>;
 }
+
+/**
+ * What started a playback. `viewer`: the viewer asked for it here, with a Play
+ * button, a card, an episode pick or the next-episode prompt's Play Now.
+ * `automatic`: the app started it on its own, for a Watch Party selection, an
+ * autoplay countdown or the next part of a multi-part file. Only a viewer's
+ * start times `first_frame_ms`; an automatic one still reports `first_frame`.
+ */
+export type PlaybackStartTrigger = "viewer" | "automatic";
 
 /** Props for the top-level WatchPage component. */
 export interface WatchPageProps {
@@ -269,7 +295,7 @@ export interface WatchPageProps {
   autoPlayNextPreview?: boolean;
   canEditMarkers?: boolean;
   seriesContext?: SeriesContext;
-  onNavigateEpisode?: (contentId: string) => void;
+  onNavigateEpisode?: (contentId: string, trigger: PlaybackStartTrigger) => void;
   onEnded?: (state?: PlaybackExitState) => void | Promise<void>;
   onExit: (state?: PlaybackExitState) => void | Promise<void>;
   onMinimize?: (state?: PlaybackExitState) => void | Promise<void>;
@@ -277,6 +303,8 @@ export interface WatchPageProps {
   playbackRequestKey?: string;
   watchTogetherRoomId?: string | null;
   watchTogetherRoomToken?: string | null;
+  /** Resolved profile intervals; the contract defaults on servers without shared seek settings. */
+  seekIntervals: { back: number; forward: number };
   displayMode?: PlayerDisplayMode;
   onPictureInPictureChange?: (change: PlayerPictureInPictureChange) => void;
   autoEnterPictureInPicture?: boolean;

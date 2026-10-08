@@ -1,17 +1,11 @@
-import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router";
 import ItemCard from "@/components/ItemCard";
-
-const mocks = vi.hoisted(() => ({
-  mediaItemMenu: vi.fn(),
-}));
+import { fireEvent, render, screen } from "@testing-library/react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router";
+import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/components/MediaItemMenu", () => ({
-  default: (props: unknown) => {
-    mocks.mediaItemMenu(props);
-    return null;
-  },
+  default: () => null,
 }));
 
 vi.mock("@/components/CardPlayOverlay", () => ({
@@ -48,10 +42,6 @@ const baseItem = {
   backdrop_thumbhash: "",
 };
 
-beforeEach(() => {
-  mocks.mediaItemMenu.mockReset();
-});
-
 describe("ItemCard SortMeta", () => {
   it("encodes item links while preserving library context", () => {
     const markup = renderCard({
@@ -65,49 +55,6 @@ describe("ItemCard SortMeta", () => {
     });
 
     expect(markup).toContain('href="/item/ebook%201%2Fisbn%3A978?libraryId=12"');
-  });
-
-  it("passes root watched state to the poster action menu", () => {
-    const userState = {
-      played: true,
-      is_favorite: true,
-      in_watchlist: false,
-    };
-
-    renderCard({
-      item: { ...baseItem, content_id: "movie-1", type: "movie", user_state: userState },
-    });
-
-    expect(mocks.mediaItemMenu).toHaveBeenCalledWith(
-      expect.objectContaining({
-        contentId: "movie-1",
-        mediaType: "movie",
-        userState,
-        variant: "poster",
-      }),
-    );
-  });
-
-  it("passes narrow poster actions through to the menu", () => {
-    renderCard({
-      item: { ...baseItem, content_id: "movie-1", type: "movie" },
-      narrowPosterActions: true,
-    });
-
-    expect(mocks.mediaItemMenu).toHaveBeenCalledWith(
-      expect.objectContaining({ narrowPosterActions: true }),
-    );
-  });
-
-  it("passes the resolved profile quick-action mode to the menu", () => {
-    renderCard({
-      item: { ...baseItem, content_id: "movie-1", type: "movie" },
-      quickActionMode: "favorites",
-    });
-
-    expect(mocks.mediaItemMenu).toHaveBeenCalledWith(
-      expect.objectContaining({ quickActionMode: "favorites" }),
-    );
   });
 
   it("renders the series last air date when sorted by last_air_date", () => {
@@ -172,8 +119,8 @@ describe("ItemCard SortMeta", () => {
       },
     });
 
-    expect(tmdbMarkup).toContain("8.2 / 10");
-    expect(criticMarkup).toContain("96%");
+    expect(tmdbMarkup).toContain('<span class="not-uppercase">TMDB</span> 8.2');
+    expect(criticMarkup).toContain('<span class="not-uppercase">RT</span> 96%');
   });
 
   it("renders resolution when sorted by resolution", () => {
@@ -310,21 +257,6 @@ describe("ItemCard SortMeta", () => {
     expect(markup).toContain("12 Vol · 3 Ch");
   });
 
-  it("uses singular labels for single counts", () => {
-    const markup = renderCard({
-      item: {
-        ...baseItem,
-        content_id: "manga-5",
-        type: "manga",
-        title: "One Shot",
-        manga_chapter_count: 1,
-        manga_volume_count: 1,
-      },
-    });
-
-    expect(markup).toContain("1 Vol · 1 Ch");
-  });
-
   it("renders a color-coded publication status chip on manga cards", () => {
     const markup = renderCard({
       item: {
@@ -357,38 +289,6 @@ describe("ItemCard SortMeta", () => {
     expect(ebook).not.toContain("Completed");
   });
 
-  it("does not render a manga count chip on non-manga cards", () => {
-    const markup = renderCard({
-      item: {
-        ...baseItem,
-        content_id: "ebook-9",
-        type: "ebook",
-        title: "Not Manga",
-        // Even if these stray fields were present, gating is on type.
-        manga_chapter_count: 99,
-        manga_volume_count: 99,
-      },
-    });
-
-    expect(markup).not.toContain("Volume");
-    expect(markup).not.toContain("Chapter");
-  });
-
-  it("does not render a manga count chip when both counts are missing or zero", () => {
-    const markup = renderCard({
-      item: {
-        ...baseItem,
-        content_id: "manga-3",
-        type: "manga",
-        title: "Empty Manga",
-        manga_chapter_count: 0,
-      },
-    });
-
-    expect(markup).not.toContain("Volume");
-    expect(markup).not.toContain("Chapter");
-  });
-
   it("renders episode cards with series context when available", () => {
     const markup = renderCard({
       item: {
@@ -405,5 +305,29 @@ describe("ItemCard SortMeta", () => {
     expect(markup).toContain("The Last of Us");
     expect(markup).toContain("S01E01");
     expect(markup).toContain("When You&#x27;re Lost in the Darkness");
+  });
+});
+
+describe("ItemCard poster loading", () => {
+  const rev = "3f9a".repeat(16);
+  const signed = (exp: number, sig: string) =>
+    `/api/v2/artwork/tmdb/tv/100088/poster/w300.${rev}.webp?exp=${exp}&sig=${sig}`;
+  const card = (posterUrl: string) => (
+    <MemoryRouter>
+      <ItemCard item={{ ...baseItem, poster_url: posterUrl }} />
+    </MemoryRouter>
+  );
+
+  it("keeps the poster visible across a re-sign and hides it if that request fails", () => {
+    const { rerender } = render(card(signed(1758621600, "aaaa")));
+    const poster = screen.getByRole("img", { name: "The Last of Us" });
+    fireEvent.load(poster);
+
+    rerender(card(signed(1758622500, "bbbb")));
+    expect(screen.getByRole("img", { name: "The Last of Us" })).toBe(poster);
+    expect(poster).toHaveClass("opacity-100");
+
+    fireEvent.error(poster);
+    expect(poster).toHaveClass("opacity-0");
   });
 });

@@ -552,6 +552,40 @@ func setScopedAudioLanguage(
 	setScopedAudioLanguageForDevice(t, store, scope, seriesID, libraryID, "", language)
 }
 
+func TestEffectiveSubtitleDefaults_ResolvesDeviceScope(t *testing.T) {
+	store := newDetailTestStore(t)
+	seed := func(key string, scope settingscontract.Scope, deviceID string, value any) {
+		t.Helper()
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.UpsertSettingValue(context.Background(), userstore.SettingIdentity{
+			Key: key, Scope: scope, ProfileID: "profile-1", DeviceID: deviceID,
+		}, encoded); err != nil {
+			t.Fatalf("seeding %s: %v", key, err)
+		}
+	}
+	seed(settingskeys.PlaybackSubtitleMode, settingscontract.ScopeProfile, "", "auto")
+	seed(settingskeys.PlaybackSubtitleMode, settingscontract.ScopeProfileDevice, "apple-tv", "always")
+	seed(settingskeys.PlaybackShowForcedSubtitles, settingscontract.ScopeProfileDevice, "apple-tv", false)
+
+	service := &DetailService{}
+	service.SetUserStoreProvider(testDetailUserStoreProvider{store: store})
+	resolve := func(deviceID string) subtitleDefaults {
+		return service.effectiveSubtitleDefaults(context.Background(), AccessFilter{
+			UserID: 1, ProfileID: "profile-1", DeviceID: deviceID,
+		}, "", nil)
+	}
+
+	if got := resolve("apple-tv"); got.Mode != "always" || !got.HasShowForced || got.ShowForced {
+		t.Fatalf("device apple-tv: mode=%q showForced=%v (set=%v), want always/false", got.Mode, got.ShowForced, got.HasShowForced)
+	}
+	if got := resolve("iphone"); got.Mode != "auto" || got.HasShowForced {
+		t.Fatalf("device iphone: mode=%q showForced set=%v, want the profile's auto and no forced override", got.Mode, got.HasShowForced)
+	}
+}
+
 func setScopedAudioLanguageForDevice(
 	t *testing.T,
 	store userstore.UserStore,
@@ -575,5 +609,40 @@ func setScopedAudioLanguageForDevice(
 		DeviceID:  deviceID,
 	}, encoded); err != nil {
 		t.Fatalf("seeding %s: %v", settingskeys.PlaybackAudioLanguage, err)
+	}
+}
+
+// The settings contract stores the original-language audio choice as the
+// private-use tag playback.OriginalLanguageTag; it selects the item's original
+// language like the legacy sentinel.
+func TestBuildPlaybackInfo_OriginalLanguageTagSelectsOriginalAudio(t *testing.T) {
+	store := newDetailTestStore(t)
+	setProfileAudioLanguage(t, store, playback.OriginalLanguageTag)
+
+	service := &DetailService{
+		originalLangFn: func(context.Context, string) string {
+			return "ja"
+		},
+	}
+	service.SetUserStoreProvider(testDetailUserStoreProvider{store: store})
+
+	versions, _, _, _, _, _, _ := service.buildPlaybackInfo(context.Background(), []*models.MediaFile{
+		{
+			ID:            7,
+			ContentID:     "movie-1",
+			FilePath:      "/media/movie.mkv",
+			MediaFolderID: 12,
+			AudioTracks: []models.AudioTrack{
+				{Language: "en", Default: true},
+				{Language: "ja"},
+			},
+		},
+	}, AccessFilter{UserID: 1, ProfileID: "profile-1"}, "movie-1")
+
+	if len(versions) != 1 || versions[0].EffectiveAudioTrackIndex == nil || *versions[0].EffectiveAudioTrackIndex != 1 {
+		t.Fatalf("EffectiveAudioTrackIndex = %v, want the Japanese track", versions[0].EffectiveAudioTrackIndex)
+	}
+	if versions[0].EffectiveAudioLanguage != "ja" {
+		t.Fatalf("EffectiveAudioLanguage = %q, want ja", versions[0].EffectiveAudioLanguage)
 	}
 }

@@ -1,0 +1,8 @@
+{
+  "revision": "03f880d6f06bd0e346a5f68463218f5476dc82046f69ed857446345aa5980c24",
+  "state": "available",
+  "allowed": true,
+  "default_profile": true,
+  "profileless": true,
+  "email_delivery": false
+}

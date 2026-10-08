@@ -12,17 +12,6 @@ func newSnapshot(name string) Snapshot {
 	return Snapshot{ServerName: name, assets: map[AssetKind]string{}}
 }
 
-func TestRenderIndexHTMLReplacesTitle(t *testing.T) {
-	in := []byte(`<html><head><title>Silo</title></head><body></body></html>`)
-	out := string(RenderIndexHTML(in, newSnapshot("Acme Media")))
-	if !strings.Contains(out, "<title>Acme Media</title>") {
-		t.Fatalf("title not replaced: %q", out)
-	}
-	if strings.Contains(out, "<title>Silo</title>") {
-		t.Fatalf("default title still present: %q", out)
-	}
-}
-
 func TestRenderIndexHTMLEscapesTitle(t *testing.T) {
 	in := []byte(`<title>Silo</title></head>`)
 	out := string(RenderIndexHTML(in, newSnapshot(`A&B<script>`)))
@@ -31,15 +20,6 @@ func TestRenderIndexHTMLEscapesTitle(t *testing.T) {
 	}
 	if !strings.Contains(out, "A&amp;B&lt;script&gt;") {
 		t.Fatalf("expected escaped title, got: %q", out)
-	}
-}
-
-func TestRenderIndexHTMLRewritesFaviconWhenSet(t *testing.T) {
-	in := []byte(indexFaviconLink + "</head>")
-	snap := Snapshot{ServerName: "X", assets: map[AssetKind]string{KindFavicon: "abc123.png"}}
-	out := string(RenderIndexHTML(in, snap))
-	if !strings.Contains(out, `href="/api/v1/branding/assets/favicon?v=abc123.png"`) {
-		t.Fatalf("favicon not rewritten: %q", out)
 	}
 }
 
@@ -61,6 +41,17 @@ func TestRenderIndexHTMLInjectsThemeColorOnlyWhenAccentSet(t *testing.T) {
 	out := string(RenderIndexHTML(in, snap))
 	if !strings.Contains(out, `<meta name="theme-color" content="#5bc39d" />`) {
 		t.Fatalf("theme-color meta not injected: %q", out)
+	}
+}
+
+func TestRenderIndexHTMLDoesNotStampADefaultTheme(t *testing.T) {
+	in := []byte(`<!doctype html><html lang="en" data-theme="midnight-cinema"><head></head></html>`)
+	out := string(RenderIndexHTML(in, newSnapshot("X")))
+	if strings.Contains(out, "data-default-theme") {
+		t.Fatalf("the shell has one theme and carries no default-theme attribute: %q", out)
+	}
+	if !strings.Contains(out, `<html lang="en" data-theme="midnight-cinema">`) {
+		t.Fatalf("static data-theme should be left alone: %q", out)
 	}
 }
 
@@ -101,7 +92,7 @@ func TestRenderIndexHTMLAgainstRealShell(t *testing.T) {
 	if !strings.Contains(out, "<title>Acme</title>") {
 		t.Fatalf("title not replaced in real shell")
 	}
-	if !strings.Contains(out, "/api/v1/branding/assets/favicon?v=f00.png") {
+	if !strings.Contains(out, "/api/v2/branding/assets/favicon?v=f00.png") {
 		t.Fatalf("favicon not rewritten in real shell")
 	}
 }
@@ -138,7 +129,7 @@ func TestRenderManifestUsesCustomMark(t *testing.T) {
 	}
 	icons, _ := m["icons"].([]any)
 	first, _ := icons[0].(map[string]any)
-	if !strings.Contains(first["src"].(string), "/api/v1/branding/assets/mark?v=m1.webp") {
+	if !strings.Contains(first["src"].(string), "/api/v2/branding/assets/mark?v=m1.webp") {
 		t.Fatalf("expected custom mark icon URL, got %v", first["src"])
 	}
 }

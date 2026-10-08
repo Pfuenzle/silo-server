@@ -15,7 +15,13 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
-import { AdvancedFields, FolderFields, GeneralFields, MetadataFields } from "./LibraryFormSections";
+import {
+  AdvancedFields,
+  FolderFields,
+  GeneralFields,
+  MetadataFields,
+  RealtimeMonitoringFields,
+} from "./LibraryFormSections";
 import { libraryTypeMeta } from "./libraryTypes";
 import { LibraryPosterSection } from "./LibraryPosterSection";
 import { useLibraryForm } from "./useLibraryForm";
@@ -71,6 +77,8 @@ export interface LibraryEditorDialogProps {
   onOpenChange: (open: boolean) => void;
   library: Library | null;
   chapterThumbnailsSupported: boolean;
+  /** Undefined when the server does not offer seek previews. */
+  trickplaySupported?: boolean;
 }
 
 export function LibraryEditorDialog({
@@ -78,6 +86,7 @@ export function LibraryEditorDialog({
   onOpenChange,
   library,
   chapterThumbnailsSupported,
+  trickplaySupported,
 }: LibraryEditorDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -86,6 +95,7 @@ export function LibraryEditorDialog({
           key={library?.id ?? "new"}
           library={library}
           chapterThumbnailsSupported={chapterThumbnailsSupported}
+          trickplaySupported={trickplaySupported}
           onClose={() => onOpenChange(false)}
         />
       </DialogContent>
@@ -96,14 +106,24 @@ export function LibraryEditorDialog({
 function LibraryEditorBody({
   library,
   chapterThumbnailsSupported,
+  trickplaySupported,
   onClose,
 }: {
   library: Library | null;
   chapterThumbnailsSupported: boolean;
+  trickplaySupported?: boolean;
   onClose: () => void;
 }) {
   const [section, setSection] = useState<SectionId>("general");
   const form = useLibraryForm({ library, onClose });
+
+  const sections = SECTIONS.filter(
+    ({ id }) =>
+      id !== "advanced" ||
+      form.settingSupport.chapterThumbnails ||
+      form.settingSupport.introDetection,
+  );
+  const activeSection = sections.some(({ id }) => id === section) ? section : "general";
 
   const typeMeta = libraryTypeMeta(form.type);
   const folderCount = form.paths.filter((p) => p.trim()).length;
@@ -139,14 +159,14 @@ function LibraryEditorBody({
       </DialogHeader>
 
       <Tabs
-        value={section}
+        value={activeSection}
         onValueChange={(value) => setSection(value as SectionId)}
         orientation="vertical"
         className="min-h-0 flex-1 gap-0"
       >
         <div className="border-border shrink-0 overflow-y-auto border-r">
           <TabsList className="w-13 flex-col items-stretch justify-start gap-1 rounded-none bg-transparent p-2 sm:w-44 sm:p-3">
-            {SECTIONS.map(({ id, label, icon: Icon }) => (
+            {sections.map(({ id, label, icon: Icon }) => (
               <TabsTrigger
                 key={id}
                 value={id}
@@ -171,7 +191,7 @@ function LibraryEditorBody({
           </TabsList>
         </div>
         <div className="overlay-scroll min-h-0 flex-1 overflow-y-auto">
-          {SECTIONS.map(({ id, title, description }) => (
+          {sections.map(({ id, title, description }) => (
             <TabsContent
               key={id}
               value={id}
@@ -187,12 +207,18 @@ function LibraryEditorBody({
                   posterSlot={library ? <LibraryPosterSection library={library} /> : null}
                 />
               )}
-              {id === "folders" && <FolderFields form={form} />}
+              {id === "folders" && (
+                <div className="space-y-5">
+                  <FolderFields form={form} />
+                  <RealtimeMonitoringFields form={form} />
+                </div>
+              )}
               {id === "metadata" && <MetadataFields form={form} />}
               {id === "advanced" && (
                 <AdvancedFields
                   form={form}
                   chapterThumbnailsSupported={chapterThumbnailsSupported}
+                  trickplaySupported={trickplaySupported}
                 />
               )}
             </TabsContent>
