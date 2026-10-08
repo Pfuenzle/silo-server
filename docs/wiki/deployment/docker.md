@@ -542,6 +542,181 @@ curl -fsS http://localhost:8090/api/v1/ready
 `health` reports process liveness. `ready` also checks required dependencies,
 including PostgreSQL and configured S3 storage.
 
+### Deploying a locally built image
+
+Use this workflow when the image is built from a server checkout and must be
+transferred without a registry. Run the build from the server repository. The
+normal local SDK checkout is the sibling `../silo-plugin-sdk` directory, and
+`Dockerfile.dev` expects it as the BuildKit named context
+`silo_plugin_sdk`:
+
+```sh
+docker buildx build --platform linux/amd64 \
+  --build-context silo_plugin_sdk=../silo-plugin-sdk \
+  --tag <IMAGE_TAG> \
+  --load -f Dockerfile.dev .
+```
+
+Use the platform required by the deployment host. If Docker, Buildx, gzip,
+OpenSSH, or a validation tool is missing, Nix may provide that tool for the
+command or shell session. Nix does not provide Docker daemon access; the
+command still needs access to the appropriate local or remote Docker daemon.
+For example:
+
+```sh
+nix-shell -p docker docker-buildx gzip openssh jq --run 'docker buildx build --platform linux/amd64 --build-context silo_plugin_sdk=../silo-plugin-sdk --tag <IMAGE_TAG> --load -f Dockerfile.dev .'
+```
+
+Choose an immutable tag for this build. Do not use `latest`. `--load` imports
+the result into the local Docker image store so `docker save` can transfer the
+exact image that was built.
+
+Before changing the remote deployment, define the reusable `<COMPOSE_ARGS>`
+placeholder as the complete Compose invocation arguments: every `-f` file in
+the deployment's order, followed by `--env-file <ENV_FILE>` when the
+deployment uses an environment file. For example, it may represent
+`-f <COMPOSE_FILE> -f <COMPOSE_OVERRIDE> --env-file <ENV_FILE>`. Operators must
+include every override and deployment environment file used by the deployment;
+do not paste expanded Compose config into a report or backup because it exposes
+secrets. Use the same `<COMPOSE_ARGS>` for config, image inspection, `up`,
+logs, and rollback commands below.
+
+Before changing the remote deployment, record the running container's
+immutable image ID and its current Compose image reference separately, back up
+every Compose input, and preserve a copy of the prior image. This includes all
+Compose and override files, any `--env-file` passed through `<COMPOSE_ARGS>`, and
+the Compose interpolation env file `.env` whenever the deployment uses it.
+Store those backups in restricted remote storage. Keep the prior image backup
+until the new image and its migrations have been accepted. Do not put resolved
+Compose output in a backup or report unless it is protected and redacted,
+because it can contain database credentials and `SECRET_KEY`.
+
+Run the following on the remote host before changing the Compose image. The
+container image ID is captured from the running `silo` container, not derived
+from prospective merged config. Verify that immutable ID exists locally before
+saving it:
+
+```sh
+SILO_CONTAINER_ID="$(docker compose <COMPOSE_ARGS> ps -q silo)"
+test -n "$SILO_CONTAINER_ID"
+PRIOR_IMAGE_ID="$(docker inspect --format '{{.Image}}' "$SILO_CONTAINER_ID")"
+PRIOR_IMAGE_REF="$(docker inspect --format '{{.Config.Image}}' "$SILO_CONTAINER_ID")"
+test -n "$PRIOR_IMAGE_ID" && test -n "$PRIOR_IMAGE_REF"
+docker image inspect "$PRIOR_IMAGE_ID" >/dev/null
+docker compose <COMPOSE_ARGS> config --quiet
+docker compose <COMPOSE_ARGS> images silo
+
+COMPOSE_FILES=("<COMPOSE_FILE>" "<COMPOSE_OVERRIDE>")
+ENV_FILE="<ENV_FILE>" # Set when <COMPOSE_ARGS> includes --env-file.
+COMPOSE_INTERPOLATION_ENV_FILE=".env" # Set when Compose uses its interpolation env file.
+BACKUP_DIR="<RESTRICTED_BACKUP_DIR>"
+install -d -m 700 "$BACKUP_DIR"
+for file in "${COMPOSE_FILES[@]}"; do
+  install -m 600 "$file" "$BACKUP_DIR/$(basename "$file")"
+done
+if test -n "$ENV_FILE"; then
+  install -m 600 "$ENV_FILE" "$BACKUP_DIR/$(basename "$ENV_FILE")"
+fi
+if test -n "$COMPOSE_INTERPOLATION_ENV_FILE"; then
+  install -m 600 "$COMPOSE_INTERPOLATION_ENV_FILE" "$BACKUP_DIR/compose-interpolation.env"
+fi
+
+docker save "$PRIOR_IMAGE_ID" | gzip > "$BACKUP_DIR/silo-prior-image.tar.gz"
+chmod 600 "$BACKUP_DIR/silo-prior-image.tar.gz"
+printf '%s\n' "$PRIOR_IMAGE_ID" > "$BACKUP_DIR/silo-prior-image.id"
+printf '%s\n' "$PRIOR_IMAGE_REF" > "$BACKUP_DIR/silo-prior-image.ref"
+chmod 600 "$BACKUP_DIR/silo-prior-image.id" "$BACKUP_DIR/silo-prior-image.ref"
+```
+
+Repeat the `COMPOSE_FILES` entries for every Compose file and override in the
+deployment, in the same order used by `<COMPOSE_ARGS>`. Set
+`COMPOSE_INTERPOLATION_ENV_FILE` to empty only when the deployment does not use
+Compose's `.env` interpolation file. Both environment file types are
+secret-bearing, so keep their backups and the image metadata in the restricted
+directory with mode `600`. The saved `PRIOR_IMAGE_ID`, `PRIOR_IMAGE_REF`, and
+`silo-prior-image.tar.gz` are the image rollback artifacts. Do not replace them
+with the new image or delete them before the rollback window ends.
+
+Transfer the loaded image to the remote Docker host:
+
+```sh
+docker save <IMAGE_TAG> | gzip | \
+  ssh <DEPLOYMENT_HOST> 'gunzip | docker load'
+```
+
+On the remote host, change only the `silo` service image reference to
+`<IMAGE_TAG>`, preserving every other Compose setting. Then validate the
+merged configuration without printing its resolved values and confirm that
+the `silo` service resolves to the exact loaded tag. Use the same
+`<COMPOSE_ARGS>` that the deployment normally uses:
+
+```sh
+docker compose <COMPOSE_ARGS> config --quiet
+docker compose <COMPOSE_ARGS> \
+  config --format json | jq -r '.services.silo.image'
+```
+
+The second command must print exactly `<IMAGE_TAG>`. Recreate only the `silo`
+service after both checks pass. `--no-deps` prevents Compose from restarting
+PostgreSQL or Redis, and `--force-recreate` ensures the container uses the
+selected image:
+
+```sh
+docker compose <COMPOSE_ARGS> \
+  up -d --no-deps --force-recreate silo
+docker compose <COMPOSE_ARGS> logs -f silo
+```
+
+Silo runs pending migrations during startup, under a database lock, before it
+opens the HTTP listener. An extended migration can make the container appear
+unhealthy while it is still working. Follow the logs and do not restart `silo`
+while the migration is running. The default migration timeout is 20 minutes;
+set `SILO_MIGRATE_TIMEOUT` to a longer Go duration, or `0` for no limit, when
+the library requires it.
+
+After startup, check both endpoints through the deployment URL:
+
+```sh
+curl -fsS <SILO_URL>/api/v1/health
+curl -fsS <SILO_URL>/api/v1/ready
+```
+
+`/api/v1/health` is a liveness check for the Silo process. A successful
+`/api/v1/ready` additionally means the required dependencies, including
+PostgreSQL and configured S3 storage, are ready. Record the two results
+separately.
+
+An image rollback and a database rollback are different operations. To roll
+back only the application image, restore the saved `PRIOR_IMAGE_REF` in the
+Compose configuration. If the prior image is not available locally, load the
+archive with `gunzip -c silo-prior-image.tar.gz | docker load`, then retag the
+loaded immutable image ID to the saved prior Compose image reference with
+`docker tag <PRIOR_IMAGE_ID> <PRIOR_IMAGE_REF>` before Compose recreation.
+Verify that the tag resolves to the intended prior image, then verify the
+resolved Compose image is exactly `PRIOR_IMAGE_REF` before repeating the same
+`docker compose <COMPOSE_ARGS> up -d --no-deps --force-recreate silo` command:
+
+```sh
+docker image inspect "$PRIOR_IMAGE_ID" >/dev/null
+docker tag "$PRIOR_IMAGE_ID" "$PRIOR_IMAGE_REF"
+docker compose <COMPOSE_ARGS> config --quiet
+test "$(docker compose <COMPOSE_ARGS> config --format json | jq -r '.services.silo.image')" = "$PRIOR_IMAGE_REF"
+docker compose <COMPOSE_ARGS> up -d --no-deps --force-recreate silo
+```
+
+Use `<COMPOSE_ARGS>` for the rollback's config and image inspection commands as
+well. An image rollback does not reverse migrations. Check migration status
+with the selected Silo image first.
+Only use `migrate-down-to` after reviewing every migration in the range and
+confirming that its down path is safe. Otherwise restore the pre-update
+PostgreSQL dump, understanding that this discards writes made after that
+backup. Recheck both health endpoints after either rollback.
+
+After acceptance, remove only temporary transfer files and other disposable
+build artifacts. Do not run `docker system prune` as part of this procedure,
+and do not delete the prior image, Compose backups, overrides, or database
+backup until the rollback window has ended.
+
 ## Migrating from Continuum
 
 Follow [Continuum to Silo Docker Migration](../../continuum-to-silo-docker-migration.md).
