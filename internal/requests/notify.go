@@ -87,7 +87,7 @@ func (s *Service) notifyFulfilledPending(ctx context.Context) {
 				"request_id", req.ID, "err", err)
 			continue
 		}
-		if err := s.store.MarkFulfilledNotified(ctx, req.ID); err != nil {
+		if _, err := s.store.MarkFulfilledNotified(ctx, req.ID); err != nil {
 			slog.WarnContext(ctx, "request fulfill-notify: mark failed", "component", "requests",
 				"request_id", req.ID, "err", err)
 		}

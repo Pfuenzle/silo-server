@@ -1,79 +1,190 @@
 import { describe, expect, it } from "vitest";
-import type { MediaRequest } from "@/api/types";
-import { audiobookRequestDisplay } from "./mediaRequests";
+import type { MediaRequest, RequestMediaResult, RequestMediaSeason } from "@/api/types";
+import {
+  canCancelOwnRequest,
+  defaultRequestSeasons,
+  flattenResultPages,
+  pendingPageSize,
+  formatRequestDisplayState,
+  formatRequestSeasonMeta,
+  formatSeasonList,
+  formatSeasonProgress,
+  parseRequestMediaType,
+  requestDetailHref,
+  requestDiscoverSectionHref,
+  requestDisplayState,
+  requestSearchHref,
+  requestSearchTypeForScope,
+} from "./mediaRequests";
 
-const request = (overrides: Partial<MediaRequest> = {}): MediaRequest => ({
-  id: "request-1",
-  provider: "audiobook-metadata",
-  media_type: "audiobook",
-  tmdb_id: 0,
-  title: "A Book",
-  status: "completed",
-  outcome: "active",
-  created_at: "2026-09-09T00:00:00Z",
-  updated_at: "2026-09-09T00:00:00Z",
-  ...overrides,
+describe("flattenResultPages", () => {
+  it("keeps page order and drops a title an earlier page already showed", () => {
+    const title = (tmdbID: number, mediaType: "movie" | "series" = "movie") =>
+      ({ media_type: mediaType, tmdb_id: tmdbID }) as RequestMediaResult;
+    const pages = [
+      { results: [title(1), title(2)] },
+      { results: [title(2), title(3), title(1, "series")] },
+    ];
+
+    expect(flattenResultPages(pages).map((item) => `${item.media_type}-${item.tmdb_id}`)).toEqual([
+      "movie-1",
+      "movie-2",
+      "movie-3",
+      "series-1",
+    ]);
+    expect(flattenResultPages(undefined)).toEqual([]);
+  });
 });
 
-describe("audiobookRequestDisplay", () => {
-  it("prefers fresh external progress over a stale cached Silo status", () => {
-    // Given a cached completed status and a current external download state.
-    const audiobook = request({ status: "completed", external_status: "downloading" });
+describe("pendingPageSize", () => {
+  it("expects a page the size of the last one, or TMDB's page size before any", () => {
+    const results = (count: number) => Array.from({ length: count }) as RequestMediaResult[];
+    expect(pendingPageSize([{ results: results(20) }, { results: results(17) }])).toBe(17);
+    expect(pendingPageSize([{ results: [] }])).toBe(20);
+    expect(pendingPageSize(undefined)).toBe(20);
+  });
+});
 
-    // When the display state is derived.
-    const display = audiobookRequestDisplay(audiobook);
-
-    // Then the user sees the current external state, not the stale cache.
-    expect(display).toMatchObject({ label: "Downloading", isCompleted: false, isFailed: false });
+describe("requestSearchHref", () => {
+  it("opens the app's search page on movies and series", () => {
+    expect(requestSearchHref(" the bear ")).toBe("/catalog?source=query&q=the+bear&type=video");
   });
 
-  it("rejects malformed or external completion links", () => {
-    // Given malformed payloads that claim completion without a local Silo route.
-    const malformed = request({
-      external_status: "completed",
-      silo_audiobook_link: "https://attacker.example/items/book-1",
-    });
+  it("keeps a movie or series type and drops anything else", () => {
+    expect(requestSearchHref("dune", "movie")).toBe("/catalog?source=query&q=dune&type=movie");
+    expect(requestSearchHref("dune", "series")).toBe("/catalog?source=query&q=dune&type=series");
+    expect(requestSearchHref("dune", "all")).toBe("/catalog?source=query&q=dune&type=video");
+  });
+});
 
-    // When the display state is derived.
-    const display = audiobookRequestDisplay(malformed);
-
-    // Then completion is withheld and the failure is actionable.
-    expect(display.isCompleted).toBe(false);
-    expect(display.isFailed).toBe(true);
-    expect(display.detail).toContain("Silo library link is not available yet");
-    expect(display.href).toBeNull();
+describe("requestSearchTypeForScope", () => {
+  it("searches TMDB for what the catalog scope holds", () => {
+    expect(requestSearchTypeForScope(undefined)).toBe("all");
+    expect(requestSearchTypeForScope("video")).toBe("all");
+    expect(requestSearchTypeForScope("movie")).toBe("movie");
+    expect(requestSearchTypeForScope("series")).toBe("series");
+    expect(requestSearchTypeForScope("episode")).toBe("series");
   });
 
-  it.each([
-    ["declined", "Declined"],
-    ["cancelled", "Cancelled"],
-  ] as const)("keeps %s requests terminal despite external completion", (outcome, label) => {
-    const display = audiobookRequestDisplay(
-      request({
-        outcome,
-        external_status: "completed",
-        silo_audiobook_link: "/api/v1/items/book-1",
-      }),
+  it("skips TMDB for books", () => {
+    expect(requestSearchTypeForScope("audiobook")).toBeNull();
+    expect(requestSearchTypeForScope("ebook")).toBeNull();
+    expect(requestSearchTypeForScope("manga")).toBeNull();
+  });
+});
+
+describe("requestDiscoverSectionHref", () => {
+  it("builds a Discover row's page", () => {
+    expect(requestDiscoverSectionHref("trending_movies")).toBe(
+      "/requests/discover/trending_movies",
     );
+  });
+});
 
-    expect(display).toMatchObject({ label, isCompleted: false, isFailed: true, href: null });
+type CancelFields = Pick<MediaRequest, "status" | "outcome" | "targets">;
+
+describe("canCancelOwnRequest", () => {
+  const pending: CancelFields = { status: "pending", outcome: "active" };
+
+  it("allows an active pending request", () => {
+    expect(canCancelOwnRequest(pending)).toBe(true);
   });
 
-  it("provides actionable guidance when a failed payload has no detail", () => {
-    // Given the exact failed API payload with both diagnostic fields null.
-    const failed = request({
-      outcome: "failed",
-      external_status: null,
-      external_detail: null,
-      last_error: null,
-    });
+  it("allows an approved request nothing has been sent for", () => {
+    expect(canCancelOwnRequest({ ...pending, status: "approved", targets: [] })).toBe(true);
+  });
 
-    // When the display state is derived.
-    const display = audiobookRequestDisplay(failed);
+  it.each<[string, CancelFields]>([
+    [
+      "approved and sent",
+      {
+        ...pending,
+        status: "approved",
+        targets: [{ quality: "1080p", status: "queued" }] as MediaRequest["targets"],
+      },
+    ],
+    ["queued", { ...pending, status: "queued" }],
+    ["downloading", { ...pending, status: "downloading" }],
+    ["completed", { ...pending, status: "completed" }],
+    ["already cancelled", { ...pending, outcome: "cancelled" }],
+    ["declined", { ...pending, outcome: "declined" }],
+  ])("refuses a request that is %s, as the server does", (_label, request) => {
+    expect(canCancelOwnRequest(request)).toBe(false);
+  });
+});
 
-    // Then the failure still has actionable guidance.
-    expect(display.detail).toBe(
-      "Listenarr reported a failure. Retry the request or contact an administrator.",
+describe("requestDisplayState", () => {
+  it("prefers the state the server derived", () => {
+    expect(requestDisplayState("completed", "active", "processing")).toBe("processing");
+  });
+
+  it("derives a state for a server that sends none", () => {
+    expect(requestDisplayState("downloading", "active")).toBe("processing");
+    expect(requestDisplayState("queued", "failed")).toBe("failed");
+  });
+});
+
+describe("requestDetailHref", () => {
+  it("builds the title detail route", () => {
+    expect(requestDetailHref("movie", 603)).toBe("/title/movie/603");
+    expect(requestDetailHref("series", 1399)).toBe("/title/series/1399");
+  });
+});
+
+describe("parseRequestMediaType", () => {
+  it("accepts the two title media types", () => {
+    expect(parseRequestMediaType("movie")).toBe("movie");
+    expect(parseRequestMediaType("series")).toBe("series");
+  });
+
+  it.each([undefined, "", "tv", "Movie", "browse"])("rejects %j", (value) => {
+    expect(parseRequestMediaType(value)).toBeUndefined();
+  });
+});
+
+describe("season requests", () => {
+  const now = new Date(Date.UTC(2026, 4, 24, 12));
+  const season = (overrides: Partial<RequestMediaSeason>): RequestMediaSeason => ({
+    season_number: 1,
+    episode_count: 10,
+    air_date: "2022-01-01",
+    availability: "missing",
+    requested: false,
+    ...overrides,
+  });
+
+  it("names seasons compactly", () => {
+    expect(formatSeasonList([2])).toBe("Season 2");
+    expect(formatSeasonList([5, 1, 2, 3, 3])).toBe("Seasons 1–3, 5");
+  });
+
+  it("picks the aired seasons the library lacks and nobody requested", () => {
+    const seasons = [
+      season({ season_number: 1, availability: "available" }),
+      season({ season_number: 2, availability: "partial" }),
+      season({ season_number: 3, requested: true }),
+      season({ season_number: 4 }),
+      season({ season_number: 5, air_date: "2026-05-24" }),
+      season({ season_number: 6, air_date: "2026-09-01" }),
+      season({ season_number: 7, air_date: undefined, episode_count: 0 }),
+    ];
+    expect(defaultRequestSeasons(seasons, now)).toEqual([2, 4, 5]);
+  });
+
+  it("describes a season and a request's progress", () => {
+    expect(formatRequestSeasonMeta(season({ episode_count: 1 }))).toBe("2022 · 1 episode");
+    expect(formatRequestSeasonMeta(season({ air_date: undefined, episode_count: 0 }))).toBe(
+      "Not announced",
     );
+    expect(
+      formatSeasonProgress([
+        { season_number: 1, episodes_aired: 9, episodes_available: 9 },
+        { season_number: 2, episodes_aired: 10, episodes_available: 4 },
+      ]),
+    ).toBe("13 of 19 episodes in the library");
+    expect(
+      formatSeasonProgress([{ season_number: 1, episodes_aired: 0, episodes_available: 3 }]),
+    ).toBe("");
+    expect(formatRequestDisplayState("partially_available")).toBe("Partially available");
   });
 });

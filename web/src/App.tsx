@@ -64,6 +64,7 @@ import {
   buildUserCollectionCatalogHref,
 } from "@/pages/catalogSearchParams";
 import { buildLegacyAutoscanRedirectTarget } from "@/pages/autoscanSearchParams";
+import LegacyRequestDetailRedirect from "@/pages/LegacyRequestDetailRedirect";
 import { buildLegacyWebhookSyncRedirectTarget } from "@/lib/webhookSync";
 import { toast } from "sonner";
 import { prewarmCodecDetection } from "@/player/hooks/useCodecDetection";
@@ -94,7 +95,8 @@ const PlaybackSettings = lazy(() => import("@/pages/settings/PlaybackSettings"))
 const NotificationsSettings = lazy(() => import("@/pages/settings/NotificationsSettings"));
 const Requests = lazy(() => import("@/pages/Requests"));
 const RequestBrowse = lazy(() => import("@/pages/RequestBrowse"));
-const RequestDetail = lazy(() => import("@/pages/RequestDetail"));
+const RequestDiscoverSection = lazy(() => import("@/pages/RequestDiscoverSection"));
+const TitleDetail = lazy(() => import("@/pages/TitleDetail"));
 const AdminDashboard = lazy(() => import("@/pages/AdminDashboard"));
 const AdminActivity = lazy(() => import("@/pages/AdminActivity"));
 const AdminLogs = lazy(() => import("@/pages/AdminLogs"));
@@ -653,9 +655,21 @@ function AppRoutes() {
                           />
                           <Route
                             path="/requests/:mediaType/:tmdbId"
+                            element={<LegacyRequestDetailRedirect />}
+                          />
+                          <Route
+                            path="/title/:mediaType/:tmdbId"
                             element={
                               <RequireRequestsEnabled>
-                                <RequestDetail />
+                                <TitleDetail />
+                              </RequireRequestsEnabled>
+                            }
+                          />
+                          <Route
+                            path="/requests/discover/:section"
+                            element={
+                              <RequireRequestsEnabled>
+                                <RequestDiscoverSection />
                               </RequireRequestsEnabled>
                             }
                           />
