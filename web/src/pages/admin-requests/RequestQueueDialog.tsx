@@ -301,11 +301,16 @@ function TargetRows({ target }: { target: NonNullable<MediaRequest["targets"]>[n
 }
 
 function RoutePreviewSection({ request }: { request: MediaRequest }) {
-  const preview = useAdminRequestRoutePreview({
-    mediaType: request.media_type,
-    tmdbId: request.tmdb_id,
-    requesterUserId: request.requested_by_user_id,
-  });
+  const preview = useAdminRequestRoutePreview(
+    request.media_type === "audiobook"
+      ? null
+      : {
+          mediaType: request.media_type,
+          tmdbId: request.tmdb_id,
+          requesterUserId: request.requested_by_user_id,
+        },
+  );
+  if (request.media_type === "audiobook") return null;
   // Server and plugin names turn override IDs into the names the settings use.
   const servers = useRequestIntegrations();
   // The routes and accounts turn the explanation's rule and account IDs into names.
