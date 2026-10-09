@@ -374,12 +374,9 @@ func backfillEncryptedConfigs(
 	return updated, nil
 }
 
-// ErrAuthProviderAlreadyEnabled refuses enabling an auth binding while
-// another one of the same kind, or of the same installation, is enabled: a
-// server has at most one primary external sign-in provider (OIDC, LDAP) and
-// at most one network identity provider, plus the built-in local accounts.
-// Identities and account rechecks are keyed by installation, so the two must
-// come from different installations.
+// ErrAuthProviderAlreadyEnabled refuses enabling a second network identity
+// provider or a second binding on the same installation. Multiple primary
+// providers, such as OIDC and LDAP, may be enabled together.
 var ErrAuthProviderAlreadyEnabled = errors.New("another external sign-in provider is already enabled")
 
 // authBindingsLock serializes auth binding writes so two concurrent enables
@@ -396,9 +393,8 @@ func AuthBindingIsNetworkSQL(installation, capability string) string {
 			AND c.capability_id = ` + capability + `), false)`
 }
 
-// UpsertAuthBinding writes one binding row. Enabling it is refused with
-// ErrAuthProviderAlreadyEnabled while a different binding of the same kind
-// (network identity or not), or of the same installation, is enabled.
+// UpsertAuthBinding writes one binding row. Multiple primary providers may be
+// enabled; default_login selects the preferred interactive provider.
 func (s *RuntimeConfigStore) UpsertAuthBinding(ctx context.Context, binding AuthBinding) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, authBindingsLock); err != nil {
@@ -410,13 +406,19 @@ func (s *RuntimeConfigStore) UpsertAuthBinding(ctx context.Context, binding Auth
 				SELECT 1 FROM plugin_auth_bindings b
 				WHERE b.enabled AND NOT (b.plugin_installation_id = $1 AND b.capability_id = $2)
 					AND (b.plugin_installation_id = $1
-						OR `+AuthBindingIsNetworkSQL("b.plugin_installation_id", "b.capability_id")+` =
-							`+AuthBindingIsNetworkSQL("$1::bigint", "$2::text")+`))`,
+						OR (`+AuthBindingIsNetworkSQL("b.plugin_installation_id", "b.capability_id")+` AND
+							`+AuthBindingIsNetworkSQL("$1::bigint", "$2::text")+`)))`,
 				binding.InstallationID, binding.CapabilityID).Scan(&other); err != nil {
 				return fmt.Errorf("checking enabled plugin auth bindings: %w", err)
 			}
 			if other {
 				return ErrAuthProviderAlreadyEnabled
+			}
+			if binding.DefaultLogin {
+				if _, err := tx.Exec(ctx, `UPDATE plugin_auth_bindings SET default_login = false
+					WHERE default_login AND NOT (plugin_installation_id = $1 AND capability_id = $2)`, binding.InstallationID, binding.CapabilityID); err != nil {
+					return fmt.Errorf("clearing previous default auth provider: %w", err)
+				}
 			}
 		}
 		if _, err := tx.Exec(ctx, `

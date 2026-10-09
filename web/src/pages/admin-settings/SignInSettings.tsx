@@ -55,7 +55,7 @@ function intervalOptions(current: string) {
 }
 
 /**
- * Settings → Sign-in: the server's one external sign-in provider (OIDC or
+ * Settings → Sign-in: the server's external sign-in providers (OIDC and
  * LDAP) as guided setup, whether Silo passwords still sign in, how first
  * sign-ins match accounts, and how often Silo asks the provider again. Every
  * edit, the provider's configuration included, saves through the save bar;
@@ -163,7 +163,7 @@ export default function SignInSettings() {
 
         <FieldGroup
           label="Single sign-on"
-          description="Let people sign in with your identity provider. A server uses one provider at a time."
+           description="Let people sign in with OIDC and LDAP. OIDC is preferred for interactive sign-in; LDAP remains available to compatible clients."
           dirty={drafts.changeCount > 0}
         >
           <div className="settings-field-note">

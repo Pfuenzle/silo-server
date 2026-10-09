@@ -108,7 +108,7 @@ export function signInBindingWrite(
     enabled: binding?.enabled ?? false,
     display_order: binding?.display_order ?? 1,
     auto_provision: savedAutoProvision(installation),
-    default_login: binding?.default_login ?? false,
+    default_login: binding?.default_login ?? signInModeOf(installation) === "oauth",
     ...change,
   };
 }

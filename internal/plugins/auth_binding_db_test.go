@@ -8,9 +8,8 @@ import (
 	"time"
 )
 
-// TestUpsertAuthBindingAllowsOneEnabledProvider: a server has at most one
-// enabled external sign-in binding; turning one off and another on works,
-// and concurrent enables cannot both win.
+// TestUpsertAuthBindingAllowsMultiplePrimaryProviders: OIDC and LDAP may be
+// enabled together, while concurrent primary enables both succeed.
 func TestUpsertAuthBindingAllowsOneEnabledProvider(t *testing.T) {
 	pool := builtinGuardTestPool(t)
 	ctx := context.Background()
@@ -33,8 +32,8 @@ func TestUpsertAuthBindingAllowsOneEnabledProvider(t *testing.T) {
 	if err := configs.UpsertAuthBinding(ctx, AuthBinding{InstallationID: first, CapabilityID: "oidc", Enabled: true, DisplayOrder: 2}); err != nil {
 		t.Fatal(err)
 	}
-	if err := configs.UpsertAuthBinding(ctx, AuthBinding{InstallationID: second, CapabilityID: "ldap", Enabled: true}); !errors.Is(err, ErrAuthProviderAlreadyEnabled) {
-		t.Fatalf("second enable = %v, want ErrAuthProviderAlreadyEnabled", err)
+	if err := configs.UpsertAuthBinding(ctx, AuthBinding{InstallationID: second, CapabilityID: "ldap", Enabled: true}); err != nil {
+		t.Fatalf("second primary enable = %v, want nil", err)
 	}
 	// A disabled binding may be stored next to the enabled one.
 	if err := configs.UpsertAuthBinding(ctx, AuthBinding{InstallationID: second, CapabilityID: "ldap"}); err != nil {
@@ -44,7 +43,7 @@ func TestUpsertAuthBindingAllowsOneEnabledProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Both now off: two concurrent enables, exactly one wins.
+	// Both now off: two concurrent primary enables may both win.
 	var wg sync.WaitGroup
 	results := make([]error, 2)
 	for i, id := range []int{first, second} {
@@ -68,8 +67,8 @@ func TestUpsertAuthBindingAllowsOneEnabledProvider(t *testing.T) {
 			t.Fatalf("enable err = %v", err)
 		}
 	}
-	if won != 1 {
-		t.Fatalf("%d concurrent enables won, want 1", won)
+	if won != 2 {
+		t.Fatalf("%d concurrent enables won, want 2", won)
 	}
 	// New bindings default to account creation on.
 	var autoProvision bool
@@ -116,8 +115,8 @@ func TestUpsertAuthBindingAllowsNetworkProviderBesidePrimary(t *testing.T) {
 	if err := configs.UpsertAuthBinding(ctx, AuthBinding{InstallationID: otherNetwork, CapabilityID: "main", Enabled: true}); !errors.Is(err, ErrAuthProviderAlreadyEnabled) {
 		t.Fatalf("second network enable = %v, want ErrAuthProviderAlreadyEnabled", err)
 	}
-	if err := configs.UpsertAuthBinding(ctx, AuthBinding{InstallationID: ldap, CapabilityID: "main", Enabled: true}); !errors.Is(err, ErrAuthProviderAlreadyEnabled) {
-		t.Fatalf("second primary enable beside a network provider = %v, want ErrAuthProviderAlreadyEnabled", err)
+	if err := configs.UpsertAuthBinding(ctx, AuthBinding{InstallationID: ldap, CapabilityID: "main", Enabled: true}); err != nil {
+		t.Fatalf("second primary enable beside a network provider = %v, want nil", err)
 	}
 }
 

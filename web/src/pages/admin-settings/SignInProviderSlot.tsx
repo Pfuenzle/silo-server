@@ -350,8 +350,6 @@ interface ProviderPanelProps {
   localLoginOn: boolean;
   publicUrlSet: boolean;
   connectionTestServed: boolean;
-  /** Another installation's binding is on, so this one cannot be turned on. */
-  otherActive: string | null;
 }
 
 /**
@@ -368,7 +366,6 @@ function ProviderPanel({
   localLoginOn,
   publicUrlSet,
   connectionTestServed,
-  otherActive,
 }: ProviderPanelProps) {
   const capability = authCapabilityOf(installation)!;
   const binding = authBindingOf(installation);
@@ -414,8 +411,7 @@ function ProviderPanel({
   });
 
   const offersTest = connectionTestServed && capability.metadata?.connection_test === true;
-  const turnOnBlocked =
-    !installation.enabled || otherActive !== null || missing.length > 0 || unsaved > 0;
+  const turnOnBlocked = !installation.enabled || missing.length > 0 || unsaved > 0;
 
   function runTest() {
     setTestResult(null);
@@ -674,8 +670,6 @@ function ProviderPanel({
           first.
         </>
       );
-    } else if (otherActive !== null) {
-      blockedReason = `${otherActive} is the sign-in provider now. A server has one at a time: turn it off to use ${title} instead.`;
     } else if (unsaved > 0) {
       blockedReason = "Save your changes to turn it on.";
     }
@@ -991,8 +985,8 @@ export function SignInProviderSlot({
       </div>
       {active && candidates.length > 1 ? (
         <p className="text-muted-foreground pt-2 text-xs">
-          A server uses one provider at a time. To switch, turn off{" "}
-          {providerTitle(active, candidates)} first.
+          Multiple providers may be enabled. The provider marked as default is used for the
+          interactive sign-in button; credential providers remain available to compatible clients.
         </p>
       ) : null}
 
@@ -1006,9 +1000,6 @@ export function SignInProviderSlot({
           localLoginOn={localLoginOn}
           publicUrlSet={publicUrlSet}
           connectionTestServed={connectionTestServed}
-          otherActive={
-            active && active.id !== selected.id ? providerTitle(active, candidates) : null
-          }
         />
       ) : (
         <NoProviderPanel active={active} localLoginOn={localLoginOn} pageSaving={drafts.saving} />
