@@ -13,7 +13,9 @@ import type {
 import { formatDate } from "@/lib/datetime";
 
 export function formatMediaType(mediaType: RequestMediaType): string {
-  return mediaType === "series" ? "Series" : "Movie";
+  if (mediaType === "series") return "Series";
+  if (mediaType === "audiobook") return "Audiobook";
+  return "Movie";
 }
 
 export function formatRequestStatus(status?: MediaRequestStatus): string {
@@ -348,7 +350,9 @@ export function tmdbImageURL(path?: string, size = "w342"): string | null {
 export function requestInputFromMediaResult(item: RequestMediaResult): CreateMediaRequestInput {
   return {
     media_type: item.media_type,
-    tmdb_id: item.tmdb_id,
+    ...(item.tmdb_id > 0 ? { tmdb_id: item.tmdb_id } : {}),
+    ...(item.provider ? { provider: item.provider } : {}),
+    ...(item.provider_item_id ? { provider_item_id: item.provider_item_id } : {}),
     title: item.title,
     year: item.year || undefined,
     overview: item.overview || undefined,

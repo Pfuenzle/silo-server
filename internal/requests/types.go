@@ -7,9 +7,10 @@ import (
 type MediaType string
 
 const (
-	MediaTypeMovie  MediaType = "movie"
-	MediaTypeSeries MediaType = "series"
-	MediaTypeAll    MediaType = "all"
+	MediaTypeMovie     MediaType = "movie"
+	MediaTypeSeries    MediaType = "series"
+	MediaTypeAudiobook MediaType = "audiobook"
+	MediaTypeAll       MediaType = "all"
 )
 
 // Source is what created a request.
@@ -439,6 +440,8 @@ type RequestState struct {
 
 type MediaResult struct {
 	MediaType        MediaType    `json:"media_type"`
+	Provider         string       `json:"provider,omitempty"`
+	ProviderItemID   string       `json:"provider_item_id,omitempty"`
 	TMDBID           int          `json:"tmdb_id"`
 	Title            string       `json:"title"`
 	Year             int          `json:"year,omitempty"`
@@ -507,6 +510,8 @@ type MediaDetail struct {
 
 type CreateRequestInput struct {
 	MediaType    MediaType `json:"media_type"`
+	Provider     string    `json:"provider,omitempty"`
+	ProviderItemID string   `json:"provider_item_id,omitempty"`
 	TMDBID       int       `json:"tmdb_id"`
 	TVDBID       *int      `json:"tvdb_id,omitempty"`
 	IMDbID       string    `json:"imdb_id,omitempty"`
