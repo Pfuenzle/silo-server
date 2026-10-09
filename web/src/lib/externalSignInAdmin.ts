@@ -11,7 +11,7 @@ export const BREAK_GLASS_REQUIRED_TEXT =
 
 const PROBLEM_TEXT: Record<string, string> = {
   provider_already_enabled:
-    "Another sign-in provider is already on. A server has one sign-in provider at a time, plus one network sign-in such as Tailscale: turn the other one off first.",
+    "Another network sign-in provider is already on, or this installation already has a sign-in binding.",
   break_glass_required: BREAK_GLASS_REQUIRED_TEXT,
   identity_linked_elsewhere:
     "That provider account is already connected to another Silo account. Unlink it there first.",
@@ -108,7 +108,7 @@ export function signInBindingWrite(
     enabled: binding?.enabled ?? false,
     display_order: binding?.display_order ?? 1,
     auto_provision: savedAutoProvision(installation),
-    default_login: binding?.default_login ?? signInModeOf(installation) === "oauth",
+    default_login: binding?.default_login ?? authCapabilityOf(installation)?.sign_in_mode === "oauth",
     ...change,
   };
 }
