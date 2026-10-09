@@ -65,7 +65,7 @@ export function addWatchlistTitleV2(
   tmdbID: number,
 ): Promise<WatchlistTitleEntry> {
   return v2("PUT /api/v2/watchlist/titles/{media_type}/{tmdb_id}", {
-    path: { media_type: mediaType, tmdb_id: tmdbID },
+     path: { media_type: mediaType as "movie" | "series", tmdb_id: tmdbID },
   }).then((entry) => entry as WatchlistTitleEntry);
 }
 
@@ -75,6 +75,6 @@ export async function deleteWatchlistTitleV2(
   tmdbID: number,
 ): Promise<void> {
   await v2("DELETE /api/v2/watchlist/titles/{media_type}/{tmdb_id}", {
-    path: { media_type: mediaType, tmdb_id: tmdbID },
+   path: { media_type: mediaType as "movie" | "series", tmdb_id: tmdbID },
   });
 }

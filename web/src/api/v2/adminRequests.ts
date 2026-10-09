@@ -316,7 +316,7 @@ export async function listAdminRequestQueuePageV2(
     query: {
       view: filter.view,
       q: q || undefined,
-      media_type: filter.mediaType,
+       media_type: filter.mediaType as "movie" | "series" | undefined,
       requested_by_user_id:
         filter.requestedByUserId === undefined ? undefined : String(filter.requestedByUserId),
       limit: options.limit,

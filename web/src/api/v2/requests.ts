@@ -2,6 +2,7 @@ import type {
   DiscoverBrandCard,
   DiscoverBrowseKind,
   DiscoverBrowseResponse,
+  CreateMediaRequestInput,
   MediaRequest,
   MediaRequestOutcome,
   MediaRequestStatus,
@@ -49,8 +50,10 @@ export function mediaRequestFromV2(r: Schemas["MediaRequest"]): MediaRequest {
   };
 }
 
-export function createMediaRequestV2(body: V2Body<"POST /api/v2/requests">): Promise<MediaRequest> {
-  return v2("POST /api/v2/requests", { body }).then(mediaRequestFromV2);
+export function createMediaRequestV2(body: CreateMediaRequestInput): Promise<MediaRequest> {
+  return v2("POST /api/v2/requests", {
+    body: body as V2Body<"POST /api/v2/requests">,
+  }).then(mediaRequestFromV2);
 }
 
 // The server lets an owner cancel only while the request is still pending.
@@ -64,13 +67,13 @@ export function cancelMediaRequestV2(id: string, reason?: string): Promise<Media
 // already requested becomes available.
 export function followRequestMediaV2(mediaType: RequestMediaType, tmdbID: number) {
   return v2("PUT /api/v2/requests/follows/{media_type}/{tmdb_id}", {
-    path: { media_type: mediaType, tmdb_id: tmdbID },
+    path: { media_type: mediaType as "movie" | "series", tmdb_id: tmdbID },
   });
 }
 
 export function unfollowRequestMediaV2(mediaType: RequestMediaType, tmdbID: number) {
   return v2("DELETE /api/v2/requests/follows/{media_type}/{tmdb_id}", {
-    path: { media_type: mediaType, tmdb_id: tmdbID },
+    path: { media_type: mediaType as "movie" | "series", tmdb_id: tmdbID },
   });
 }
 
@@ -109,7 +112,7 @@ export function searchRequestMediaV2(
   signal?: AbortSignal,
 ): Promise<RequestMediaPage> {
   return v2("GET /api/v2/requests/search", {
-    query: { q, media_type: mediaType, page },
+    query: { q, media_type: mediaType as "movie" | "series" | "all", page },
     signal,
   }).then((p) => ({ ...p, results: p.results.map(mediaResultFromV2) }));
 }
@@ -119,7 +122,7 @@ export function getRequestMediaDetailV2(
   tmdbID: number,
 ): Promise<RequestMediaDetail> {
   return v2("GET /api/v2/requests/detail/{media_type}/{tmdb_id}", {
-    path: { media_type: mediaType, tmdb_id: tmdbID },
+    path: { media_type: mediaType as "movie" | "series", tmdb_id: tmdbID },
   }).then(
     (d) =>
       ({
@@ -176,7 +179,7 @@ export function browseDiscoverV2(args: {
     kind === "genre"
       ? v2("GET /api/v2/requests/discover/browse/genre/{slug}", {
           path: { slug },
-          query: { ...query, media_type: mediaType ?? "movie" },
+          query: { ...query, media_type: (mediaType ?? "movie") as "movie" | "series" },
         })
       : kind === "network"
         ? v2("GET /api/v2/requests/discover/browse/network/{slug}", { path: { slug }, query })
