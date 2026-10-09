@@ -627,7 +627,7 @@ func (h *LibraryCollectionHandler) SetAdminCollectionArtworkSource(ctx context.C
 	if _, err := h.repo.GetByID(ctx, id); err != nil {
 		return err
 	}
-	data, err := downloadCollectionImageURL(ctx, h.httpClient, url)
+	data, err := downloadCollectionImageURL(adminCollectionImageContext(ctx), h.httpClient, url)
 	if err != nil {
 		return err
 	}

@@ -97,7 +97,7 @@ func NewLibraryCollectionHandler(
 	httpClient *http.Client,
 ) *LibraryCollectionHandler {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = newCollectionImageClient()
 	}
 
 	return &LibraryCollectionHandler{
@@ -3280,7 +3280,7 @@ func (h *LibraryCollectionHandler) processArtworkInputs(r *http.Request, collect
 			if sourceByType[imageType] == "" {
 				continue
 			}
-			fileData, err = downloadCollectionImageURL(r.Context(), h.httpClient, sourceByType[imageType])
+			fileData, err = downloadCollectionImageURL(adminCollectionImageContext(r.Context()), h.httpClient, sourceByType[imageType])
 			if err != nil {
 				return fmt.Errorf("%s source: %w", imageType, err)
 			}

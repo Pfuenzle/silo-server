@@ -27,7 +27,10 @@ type CollectionHandler struct {
 	ItemReader         collectionMutationItemReader
 	ArtworkStore       blobstore.Store
 	ArtworkResolver    artworkurl.Resolver
-	HTTPClient         *http.Client
+	// HTTPClient fetches poster_source_url images. Any profile supplies those
+	// URLs, so the fetch reaches public addresses only (newCollectionImageClient,
+	// with no netguard.WithPrivateAccess).
+	HTTPClient *http.Client
 	// CollectionOwners resolves the owner's access for another profile's
 	// shared collection; without it those collections cannot be read.
 	CollectionOwners catalog.PersonalCollectionAccess
@@ -48,7 +51,7 @@ type itemPosterSigner interface {
 
 // NewCollectionHandler creates a new CollectionHandler.
 func NewCollectionHandler(provider userstore.UserStoreProvider) *CollectionHandler {
-	return &CollectionHandler{storeProvider: provider}
+	return &CollectionHandler{storeProvider: provider, HTTPClient: newCollectionImageClient()}
 }
 
 // --- Request/Response types ---
