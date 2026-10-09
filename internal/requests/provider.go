@@ -58,8 +58,8 @@ type RouterTargetStatus struct {
 
 type RouterMetadata struct {
 	ExternalCorrelationID string `json:"external_correlation_id,omitempty"`
-	StatusText string `json:"status_text,omitempty"`
-	ImportedPath string `json:"imported_path,omitempty"`
+	StatusText            string `json:"status_text,omitempty"`
+	ImportedPath          string `json:"imported_path,omitempty"`
 }
 
 type RouterOption struct {

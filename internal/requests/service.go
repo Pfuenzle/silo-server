@@ -63,14 +63,14 @@ type ContentRatingResolver interface {
 }
 
 type AudiobookSearchResult struct {
-	Provider string
+	Provider       string
 	ProviderItemID string
-	Available bool
-	Title string
-	OriginalTitle string
-	Year int
-	Overview string
-	ImageURL string
+	Available      bool
+	Title          string
+	OriginalTitle  string
+	Year           int
+	Overview       string
+	ImageURL       string
 }
 
 type AudiobookSearcher interface {
@@ -100,7 +100,7 @@ type Service struct {
 	groupProvider     access.GroupPolicyProvider
 	users             access.UserRepository
 	requesterIdentity RequesterIdentityResolver
-	audiobookSearch AudiobookSearcher
+	audiobookSearch   AudiobookSearcher
 	tvdbResolver      TVDBIDResolver
 	notifier          FulfillmentNotifier
 	lifecycle         LifecycleNotifier
@@ -632,7 +632,9 @@ func (s *Service) Search(ctx context.Context, viewer Viewer, query string, media
 		return nil, err
 	}
 	pageResult, err := s.enrichPage(ctx, viewer, raw)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	if mediaType == MediaTypeAll && page == 1 && s.audiobookSearch != nil {
 		if audiobooks, searchErr := s.searchAudiobookResults(ctx, viewer, query, 1); searchErr == nil {
 			pageResult.Results = append(pageResult.Results, audiobooks.Results...)
@@ -643,19 +645,31 @@ func (s *Service) Search(ctx context.Context, viewer Viewer, query string, media
 }
 
 func (s *Service) searchAudiobookResults(ctx context.Context, viewer Viewer, query string, page int) (*MediaPage, error) {
-	if s.audiobookSearch == nil { return nil, fmt.Errorf("audiobook request search is not configured") }
-	if page != 1 { return &MediaPage{Page: page, TotalPages: 1}, nil }
+	if s.audiobookSearch == nil {
+		return nil, fmt.Errorf("audiobook request search is not configured")
+	}
+	if page != 1 {
+		return &MediaPage{Page: page, TotalPages: 1}, nil
+	}
 	results, err := s.audiobookSearch.SearchAudiobooks(ctx, viewer, query)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	out := make([]MediaResult, 0, len(results))
 	for _, result := range results {
 		provider := result.Provider
-		if provider == "" { provider = "audiobook-metadata" }
+		if provider == "" {
+			provider = "audiobook-metadata"
+		}
 		available := provider == "silo" || result.Available
 		state := RequestState{Requestable: !available}
-		if available { state.Reason = "already_available" }
+		if available {
+			state.Reason = "already_available"
+		}
 		availability := AvailabilityMissing
-		if available { availability = AvailabilityAvailable }
+		if available {
+			availability = AvailabilityAvailable
+		}
 		out = append(out, MediaResult{MediaType: MediaTypeAudiobook, Provider: provider, ProviderItemID: result.ProviderItemID, Title: result.Title, Year: result.Year, Overview: result.Overview, PosterPath: result.ImageURL, Availability: availability, Request: state})
 	}
 	return &MediaPage{Page: 1, TotalPages: 1, TotalResults: len(out), Results: out}, nil
@@ -2663,12 +2677,12 @@ func (s *Service) recordTargets(ctx context.Context, req Request, actor Viewer, 
 		}
 		if req.MediaType == MediaTypeAudiobook && rt.Metadata != nil {
 			if _, err := s.store.UpdateRequestLifecycle(ctx, req.ID, RequestLifecycle{
-				ExternalLibraryID: rt.Metadata.ExternalCorrelationID,
+				ExternalLibraryID:  rt.Metadata.ExternalCorrelationID,
 				ExternalDownloadID: rt.ExternalID,
-				ExternalStatus: rt.ExternalStatus,
-				ExternalDetail: rt.Metadata.StatusText,
-				ImportedPath: rt.Metadata.ImportedPath,
-				Retryable: status == StatusFailed,
+				ExternalStatus:     rt.ExternalStatus,
+				ExternalDetail:     rt.Metadata.StatusText,
+				ImportedPath:       rt.Metadata.ImportedPath,
+				Retryable:          status == StatusFailed,
 			}); err != nil {
 				return nil, err
 			}
@@ -3320,8 +3334,12 @@ func normalizeCreateInput(input CreateRequestInput) (CreateRequestInput, error) 
 		input.TVDBID = nil
 	}
 	if mediaType == MediaTypeAudiobook {
-		if input.Provider == "" { input.Provider = "audiobook-metadata" }
-		if input.Provider != "audiobook-metadata" || input.ProviderItemID == "" { return CreateRequestInput{}, fmt.Errorf("%w: audiobook provider_item_id is required", ErrInvalidInput) }
+		if input.Provider == "" {
+			input.Provider = "audiobook-metadata"
+		}
+		if input.Provider != "audiobook-metadata" || input.ProviderItemID == "" {
+			return CreateRequestInput{}, fmt.Errorf("%w: audiobook provider_item_id is required", ErrInvalidInput)
+		}
 	} else if input.TMDBID <= 0 {
 		return CreateRequestInput{}, fmt.Errorf("%w: tmdb_id is required", ErrInvalidInput)
 	}
