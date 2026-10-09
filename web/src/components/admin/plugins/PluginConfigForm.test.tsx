@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -78,54 +78,6 @@ describe("PluginConfigForm secrets", () => {
     expect(screen.getByLabelText("Api Key")).toHaveAttribute("type", "password");
   });
 
-  it("edits object-array config fields as JSON and submits parsed values", async () => {
-    const onSave = vi.fn();
-    render(
-      <PluginConfigForm
-        schema={{
-          key: "listenarr",
-          title: "Listenarr",
-          json_schema: JSON.stringify({
-            type: "object",
-            properties: {
-              path_mappings: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    source: { type: "string" },
-                    destination: { type: "string" },
-                  },
-                },
-              },
-            },
-            required: ["path_mappings"],
-          }),
-          required: true,
-        }}
-        value={{ path_mappings: [{ source: "/imports", destination: "/library" }] }}
-        onSave={onSave}
-      />,
-    );
-
-    const field = screen.getByLabelText("Path Mappings");
-    expect(field).toHaveValue(`[
-  {
-    "source": "/imports",
-    "destination": "/library"
-  }
-]`);
-    fireEvent.change(field, { target: { value: '[{"source":"/new","destination":"/library"}]' } });
-    await userEvent.click(screen.getByRole("button", { name: "Save config" }));
-
-    expect(onSave).toHaveBeenLastCalledWith(
-      "listenarr",
-      { path_mappings: [{ source: "/new", destination: "/library" }] },
-      [],
-      [],
-    );
-  });
-
   it("shows redacted saved state and only clears through an explicit action", async () => {
     const onSave = vi.fn();
     render(
@@ -148,7 +100,6 @@ describe("PluginConfigForm secrets", () => {
       "account",
       expect.objectContaining({ region: "us-east" }),
       [],
-      [],
     );
 
     await userEvent.click(screen.getByRole("button", { name: "Clear saved secret" }));
@@ -157,7 +108,6 @@ describe("PluginConfigForm secrets", () => {
       "account",
       expect.objectContaining({ region: "us-east" }),
       ["api_key"],
-      [],
     );
   });
 
@@ -236,32 +186,9 @@ describe("PluginConfigForm secrets", () => {
     await userEvent.click(screen.getByRole("button", { name: "Clear saved secret" }));
     await userEvent.click(screen.getByRole("button", { name: "Check Connection" }));
 
-    expect(onTest).toHaveBeenCalledWith(
-      "account",
-      expect.objectContaining({ region: "us-east" }),
-      ["api_key"],
-      [],
-    );
-  });
-
-  it("explicitly clears a saved public field when the form value is emptied", async () => {
-    const onSave = vi.fn();
-    const onTest = vi.fn().mockResolvedValue({ success: true, message: "Connection successful." });
-    render(
-      <PluginConfigForm
-        schema={schema}
-        value={{ region: "us-east" }}
-        onSave={onSave}
-        onTest={onTest}
-      />,
-    );
-
-    await userEvent.clear(screen.getByLabelText("Region"));
-    await userEvent.click(screen.getByRole("button", { name: "Save config" }));
-    expect(onSave).toHaveBeenCalledWith("account", {}, [], ["region"]);
-
-    await userEvent.click(screen.getByRole("button", { name: "Check Connection" }));
-    expect(onTest).toHaveBeenCalledWith("account", {}, [], ["region"]);
+    expect(onTest).toHaveBeenCalledWith("account", expect.objectContaining({ region: "us-east" }), [
+      "api_key",
+    ]);
   });
 
   it("reports each edit and staged secret removal as the entry it would save", async () => {

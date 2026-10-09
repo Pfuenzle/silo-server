@@ -20,7 +20,6 @@ import {
   useConnectWatchProviderAPIKey,
   useDeleteWatchProviderConnection,
   usePollWatchProviderDeviceAuth,
-  useStartWatchProviderAuthorizationCodeAuth,
   useStartWatchProviderDeviceAuth,
   useTriggerWatchProviderSync,
   useUpdateWatchProviderConnection,
@@ -382,7 +381,6 @@ function WatchProviderCard({ providerKey }: { providerKey: string }) {
   const { data: savedConnection, isLoading, isFetching } = useWatchProviderConnection(providerKey);
   const updateConnection = useUpdateWatchProviderConnection(providerKey);
   const startAuth = useStartWatchProviderDeviceAuth(providerKey);
-  const startAuthorizationCodeAuth = useStartWatchProviderAuthorizationCodeAuth(providerKey);
   const pollAuth = usePollWatchProviderDeviceAuth(providerKey);
   const connectAPIKey = useConnectWatchProviderAPIKey(providerKey);
   const deleteConnection = useDeleteWatchProviderConnection(providerKey);
@@ -427,13 +425,11 @@ function WatchProviderCard({ providerKey }: { providerKey: string }) {
     (connection.connected && !connection.etag) ||
     updateConnection.isPending ||
     startAuth.isPending ||
-    startAuthorizationCodeAuth.isPending ||
     pollAuth.isPending ||
     connectAPIKey.isPending ||
     deleteConnection.isPending;
   const displayName = connection.display_name;
   const usesAPIKey = connection.auth_method === WatchProviderAuthMethod.APIKey;
-  const usesAuthorizationCode = connection.auth_method === WatchProviderAuthMethod.AuthorizationCode;
   const showAuth = Boolean(authSession) && !connection.connected;
   const showAPIKey = usesAPIKey && apiKeyPrompt && !connection.connected;
   const runInfo = connection.connected ? deriveRunInfo(connection, latestRun) : null;
@@ -503,10 +499,6 @@ function WatchProviderCard({ providerKey }: { providerKey: string }) {
   const handleStartConnect = () => {
     if (usesAPIKey) {
       setApiKeyPrompt(true);
-      return;
-    }
-    if (usesAuthorizationCode) {
-      startAuthorizationCodeAuth.mutate();
       return;
     }
     startAuth.mutate(undefined, {
@@ -586,7 +578,7 @@ function WatchProviderCard({ providerKey }: { providerKey: string }) {
               onClick={handleStartConnect}
               className="flex-1 sm:flex-none"
             >
-              {startAuth.isPending || startAuthorizationCodeAuth.isPending || connectAPIKey.isPending ? (
+              {startAuth.isPending || connectAPIKey.isPending ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <CheckCircle2 className="h-4 w-4" />

@@ -26,6 +26,7 @@ import { RouterProvider } from "react-router/dom";
 import { QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { queryClient } from "@/lib/query-client";
 import { AuthProvider, useAuth } from "@/hooks/useAuth";
+import { CHANGE_PASSWORD_PATH } from "@/hooks/usePostSignInNavigation";
 import { useCurrentProfile } from "@/hooks/useCurrentProfile";
 import { useIsActingAdmin } from "@/hooks/useIsActingAdmin";
 import { useNavigationDirection } from "@/hooks/useNavigationDirection";
@@ -44,13 +45,9 @@ import { useSettingValuesRealtime } from "@/hooks/queries/settingValues";
 import Layout from "@/components/Layout";
 import Home from "@/pages/Home";
 import Login from "@/pages/Login";
-import Catalog from "@/pages/Catalog";
-import { useFavorites } from "@/hooks/queries/favorites";
 import { useRequestFeatureStatus } from "@/hooks/queries/useRequests";
-import { isTasteSeedDismissed } from "@/lib/tasteSeed";
 import { OnboardingGate } from "@/components/onboarding/OnboardingGate";
-import { useOnboardingState } from "@/hooks/queries/onboarding";
-import SettingsLayout from "@/pages/SettingsLayout";
+import TasteSeedGate from "@/components/TasteSeedGate";
 import {
   WatchPlaybackBar,
   WatchPlaybackHost,
@@ -64,11 +61,14 @@ import {
   buildUserCollectionCatalogHref,
 } from "@/pages/catalogSearchParams";
 import { buildLegacyAutoscanRedirectTarget } from "@/pages/autoscanSearchParams";
+import LegacyAdminHomeRowsRedirect from "@/pages/LegacyAdminHomeRowsRedirect";
 import LegacyRequestDetailRedirect from "@/pages/LegacyRequestDetailRedirect";
 import { buildLegacyWebhookSyncRedirectTarget } from "@/lib/webhookSync";
+import { guardRedirectTarget } from "@/lib/authRedirect";
 import { toast } from "sonner";
 import { prewarmCodecDetection } from "@/player/hooks/useCodecDetection";
 import { prefetchRouteChunks, type RouteChunkImport } from "@/lib/routeChunkPrefetch";
+import { importCatalog } from "@/pages/catalogRoute";
 
 // Hot routes keep their import factory in a named binding so the idle warm-up
 // below can pull the chunk before the user navigates. See HOT_ROUTE_CHUNKS.
@@ -79,16 +79,22 @@ const importCollections = () => import("@/pages/Collections");
 const importRecommendations = () => import("@/pages/Recommendations");
 
 const AdminLayout = lazy(() => import("@/components/AdminLayout"));
+const AdminDownloadPreparationsRefresh = lazy(
+  () => import("@/components/AdminDownloadPreparationsRefresh"),
+);
+const SettingsLayout = lazy(() => import("@/pages/SettingsLayout"));
+const SignedInSessions = lazy(() => import("@/pages/settings/SignedInSessions"));
 const OAuthComplete = lazy(() => import("@/pages/OAuthComplete"));
 const ActivateDevice = lazy(() => import("@/pages/ActivateDevice"));
 const SetupWizard = lazy(() => import("@/pages/SetupWizard"));
 const Profiles = lazy(() => import("@/pages/Profiles"));
+const Catalog = lazy(importCatalog);
 const LibraryPage = lazy(importLibraryPage);
 const ItemDetail = lazy(importItemDetail);
 const EbookReader = lazy(() => import("@/pages/EbookReader"));
 const PersonDetail = lazy(importPersonDetail);
 const Collections = lazy(importCollections);
-const CollectionEditor = lazy(() => import("@/pages/CollectionEditor"));
+const CollectionEditorPage = lazy(() => import("@/pages/CollectionEditorPage"));
 const Notifications = lazy(() => import("@/pages/Notifications"));
 const DeviceSettings = lazy(() => import("@/pages/settings/DeviceSettings"));
 const PlaybackSettings = lazy(() => import("@/pages/settings/PlaybackSettings"));
@@ -108,9 +114,8 @@ const AdminDevices = lazy(() => import("@/pages/AdminDevices"));
 const AdminLibraries = lazy(() => import("@/pages/AdminLibraries"));
 const AdminSettingsLayout = lazy(() => import("@/pages/admin-settings/AdminSettingsLayout"));
 const AdminNodes = lazy(() => import("@/pages/AdminNodes"));
-const AdminSections = lazy(() => import("@/pages/AdminSections"));
+const AdminHomeRows = lazy(() => import("@/pages/AdminHomeRows"));
 const AdminCollections = lazy(() => import("@/pages/AdminCollections"));
-const AdminCollectionEditor = lazy(() => import("@/pages/AdminCollectionEditor"));
 const AdminPlaybackHistory = lazy(() => import("@/pages/AdminPlaybackHistory"));
 const AdminMarkerHistory = lazy(() => import("@/pages/AdminMarkerHistory"));
 const AdminMaintenance = lazy(() => import("@/pages/AdminMaintenance"));
@@ -120,6 +125,7 @@ const AdminUserDetail = lazy(() => import("@/pages/AdminUserDetail"));
 const AdminTasks = lazy(() => import("@/pages/AdminTasks"));
 const AdminTaskDetail = lazy(() => import("@/pages/AdminTaskDetail"));
 const AdminPlugins = lazy(() => import("@/pages/AdminPlugins"));
+const AdminPluginDetail = lazy(() => import("@/pages/AdminPluginDetail"));
 const AdminHistoryImport = lazy(() => import("@/pages/AdminHistoryImport"));
 const AdminRecommendations = lazy(() => import("@/pages/AdminRecommendations"));
 const AdminPolicyLayout = lazy(() => import("@/pages/admin-policy/AdminPolicyLayout"));
@@ -128,12 +134,15 @@ const RecommendationsSection = lazy(() => import("@/pages/RecommendationsSection
 const Calendar = lazy(() => import("@/pages/Calendar"));
 const Signup = lazy(() => import("@/pages/Signup"));
 const InviteClaim = lazy(() => import("@/pages/InviteClaim"));
+const PasswordReset = lazy(() => import("@/pages/PasswordReset"));
+const ForgotPassword = lazy(() => import("@/pages/ForgotPassword"));
+const ChoosePassword = lazy(() => import("@/pages/ChoosePassword"));
 const HouseholdSetup = lazy(() => import("@/pages/HouseholdSetup"));
 const TasteSeed = lazy(() => import("@/pages/TasteSeed"));
-const AppearanceSettings = lazy(() => import("@/pages/settings/AppearanceSettings"));
 const AccessibilitySettings = lazy(() => import("@/pages/settings/AccessibilitySettings"));
 const ProfilesSettings = lazy(() => import("@/pages/settings/ProfilesSettings"));
 const LibrarySettings = lazy(() => import("@/pages/settings/LibrarySettings"));
+const RequestsSettings = lazy(() => import("@/pages/settings/RequestsSettings"));
 const HistoryImportSettings = lazy(() => import("@/pages/settings/HistoryImportSettings"));
 const WebhookSyncSettings = lazy(() => import("@/pages/settings/WebhookSyncSettings"));
 const WatchProvidersSettings = lazy(() => import("@/pages/settings/WatchProvidersSettings"));
@@ -141,25 +150,26 @@ const SubtitleAppearanceSettings = lazy(
   () => import("@/pages/settings/SubtitleAppearanceSettings"),
 );
 const HomeScreenSettings = lazy(() => import("@/pages/settings/HomeScreenSettings"));
-const ThemeEditorSettings = lazy(() => import("@/pages/settings/ThemeEditorSettings"));
 const CardOverlaySettings = lazy(() => import("@/pages/settings/CardOverlaySettings"));
 const PersonalizeSettings = lazy(() => import("@/pages/settings/PersonalizeSettings"));
 const ConnectAppsSettings = lazy(() => import("@/pages/settings/ConnectAppsSettings"));
 const InterfaceSettings = lazy(() => import("@/pages/settings/InterfaceSettings"));
 const AccountSettings = lazy(() => import("@/pages/settings/AccountSettings"));
-const WatchTogetherJoin = lazy(() => import("@/pages/WatchTogetherJoin"));
-const WatchTogetherRoomPage = lazy(() => import("@/pages/WatchTogetherRoomPage"));
+const WatchPartyHub = lazy(() => import("@/pages/watchtogether/WatchPartyHub"));
+const WatchPartyInvite = lazy(() => import("@/pages/watchtogether/WatchPartyInvite"));
+const WatchTogetherRoomPage = lazy(() => import("@/pages/watchtogether/WatchTogetherRoomPage"));
 const WatchRoute = lazy(() => import("@/pages/WatchRoute"));
-const ProfileCustomizeHome = lazy(() => import("@/pages/ProfileCustomizeHome"));
 
 /**
  * Routes a browsing session reaches within the first few interactions. Home
- * links straight into item details, the sidebar into libraries, and item pages
- * into people and recommendations, so paying their chunk cost while the app is
- * idle is cheaper than paying it inside a navigation.
+ * links straight into item details and, through search and "see all", the
+ * catalog; the sidebar leads into libraries, and item pages into people and
+ * recommendations. Paying their chunk cost while the app is idle is cheaper
+ * than paying it inside a navigation.
  */
 const HOT_ROUTE_CHUNKS: readonly RouteChunkImport[] = [
   importItemDetail,
+  importCatalog,
   importLibraryPage,
   importPersonDetail,
   importRecommendations,
@@ -227,22 +237,12 @@ function RouteLoading() {
   );
 }
 
-/**
- * Builds a guard redirect target (e.g. "/login") that preserves the current
- * location so the user returns to it after authenticating.
- */
-function guardRedirectTarget(base: string, location: ReturnType<typeof useLocation>): string {
-  const destination = `${location.pathname}${location.search}`;
-  if (destination === "/" || destination === "") {
-    return base;
-  }
-  return `${base}?redirect=${encodeURIComponent(destination)}`;
-}
-
 function RequireAuth({ children }: { children: ReactNode }) {
-  const { user, loading, setupLoading } = useAuth();
+  const { user, pendingPasswordChange, loading, setupLoading } = useAuth();
   const location = useLocation();
-  if (loading || setupLoading) {
+  // Setup status only decides where a signed-out visitor goes; a restored
+  // session does not wait for it.
+  if (loading || (setupLoading && !user)) {
     return (
       <div className="p-8" role="status" aria-live="polite">
         <span className="sr-only">Loading application</span>
@@ -250,13 +250,17 @@ function RequireAuth({ children }: { children: ReactNode }) {
       </div>
     );
   }
+  // A temporary password confines the session to choosing a new one.
+  if (pendingPasswordChange) {
+    return <Navigate to={guardRedirectTarget(CHANGE_PASSWORD_PATH, location)} replace />;
+  }
   if (!user) return <Navigate to={guardRedirectTarget("/login", location)} replace />;
   return <>{children}</>;
 }
 
 function SetupGate({ children }: { children: ReactNode }) {
   const { user, setupLoading, setupRequired } = useAuth();
-  if (setupLoading) {
+  if (setupLoading && !user) {
     return (
       <div className="p-8" role="status" aria-live="polite">
         <span className="sr-only">Loading application</span>
@@ -275,9 +279,15 @@ function RequireProfile({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-function RequireAdmin({ children }: { children: ReactNode }) {
+export function RequireAdmin({ children }: { children: ReactNode }) {
   const actingAdmin = useIsActingAdmin();
+  const { profile } = useAuth();
+  const location = useLocation();
   if (!actingAdmin) return <Navigate to="/" replace />;
+  // The server keeps admin powers for a session with no profile only while no
+  // profile on the account has a PIN or an access limit, so choose the
+  // profile first rather than open the admin area onto refusals.
+  if (!profile) return <Navigate to={guardRedirectTarget("/profiles", location)} replace />;
   return <>{children}</>;
 }
 
@@ -305,45 +315,26 @@ function RequireRequestsEnabled({ children }: { children: ReactNode }) {
 }
 
 /**
- * Redirects new profiles (no favorites yet, no skip flag) to the taste-seed
- * onboarding screen the first time they land on Home. Only checks on Home so
- * deep-links to other pages aren't blocked. Once the user picks any items
- * (or favorites anything by normal use), or explicitly skips, the gate stops
- * redirecting.
+ * Clears user-scoped query caches on profile switch or sign-out. An account
+ * change clears in AuthProvider, before the new account renders.
  */
-function TasteSeedGate({ children }: { children: ReactNode }) {
-  const { profile } = useAuth();
-  const { data: favorites, isPending, isError } = useFavorites();
-  const onboarding = useOnboardingState({ enabled: profile !== null });
-
-  if (isPending || isError || !profile) return <>{children}</>;
-
-  // While the feature tour is pending (or its state unknown) the tour owns
-  // the first-run moment — it ends by handing off to /taste-seed itself, so
-  // redirecting now would jump the queue.
-  if (onboarding.data === undefined || !onboarding.data.done) return <>{children}</>;
-
-  const hasFavorites = (favorites?.length ?? 0) > 0;
-  const dismissed = isTasteSeedDismissed(profile.id);
-
-  if (!hasFavorites && !dismissed) {
-    return <Navigate to="/taste-seed" replace />;
-  }
-  return <>{children}</>;
-}
-
-/** Clears user-scoped query caches on profile switch or logout. */
-function QueryCacheManager() {
+export function QueryCacheManager() {
   const { user, profile } = useAuth();
   const qc = useQueryClient();
+  const hadUser = useRef(false);
   const prevProfileId = useRef(profile?.id);
 
   useEffect(() => {
     if (!user) {
-      qc.clear();
+      // Only a real sign-out drops the cache. Boot starts with no user while
+      // the session restores, and clearing then would discard the reads the
+      // shell already started and send them again.
+      if (hadUser.current) qc.clear();
+      hadUser.current = false;
       prevProfileId.current = undefined;
       return;
     }
+    hadUser.current = true;
     if (prevProfileId.current && prevProfileId.current !== profile?.id) {
       qc.removeQueries({ queryKey: ["favorites"] });
       qc.removeQueries({ queryKey: ["watchlist"] });
@@ -352,6 +343,8 @@ function QueryCacheManager() {
       qc.removeQueries({ queryKey: ["libraryPlaybackPreferences"] });
       qc.removeQueries({ queryKey: ["progress"] });
       qc.removeQueries({ queryKey: ["sections"] });
+      // Home rows poster peeks (lib/homeRows/peek) show rows as the profile sees them.
+      qc.removeQueries({ queryKey: ["home-row-peek"] });
       qc.removeQueries({ queryKey: ["calendar"] });
       qc.removeQueries({ queryKey: ["requests"] });
       qc.removeQueries({ queryKey: ["notifications"] });
@@ -476,6 +469,11 @@ function AppRoutes() {
       <Route path="/setup" element={<SetupWizard />} />
       <Route path="/signup" element={<Signup />} />
       <Route path="/invite/:token" element={<InviteClaim />} />
+      <Route path="/reset-password/:token" element={<PasswordReset />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path={CHANGE_PASSWORD_PATH} element={<ChoosePassword />} />
+      {/* Shared Watch Party links: offers the native app on phones, else forwards to /rooms. */}
+      <Route path="/rooms/join" element={<WatchPartyInvite />} />
       <Route path="/household-setup" element={<HouseholdSetup />} />
       <Route
         path="/*"
@@ -508,7 +506,7 @@ function AppRoutes() {
                     </RequireProfile>
                   }
                 />
-                {/* Admin area — own layout, no profile required */}
+                {/* Admin area — own layout; RequireAdmin needs a selected profile */}
                 <Route
                   path="/admin/*"
                   element={
@@ -524,8 +522,11 @@ function AppRoutes() {
                   <Route path="libraries" element={<AdminLibraries />} />
                   <Route path="maintenance" element={<AdminMaintenance />} />
                   <Route path="collections" element={<AdminCollections />} />
-                  <Route path="collections/new" element={<AdminCollectionEditor />} />
-                  <Route path="collections/:id/edit" element={<AdminCollectionEditor />} />
+                  {/* One page from /new to /:id/edit, so Create keeps the editor mounted. */}
+                  <Route element={<CollectionEditorPage scope="server" />}>
+                    <Route path="collections/new" />
+                    <Route path="collections/:id/edit" />
+                  </Route>
                   <Route path="requests" element={<AdminRequests />} />
                   {/* Autoscan is a tab on Libraries now; keep old links working. */}
                   <Route path="autoscan" element={<LegacyAutoscanRedirect />} />
@@ -535,11 +536,14 @@ function AppRoutes() {
                   <Route path="users" element={<AdminUsers />} />
                   <Route path="users/:id" element={<AdminUserDetail />} />
                   <Route path="access-groups" element={<AdminAccessGroups />} />
+                  <Route path="access-groups/:id" element={<AdminAccessGroups />} />
                   <Route path="devices" element={<AdminDevices />} />
                   <Route path="devices/:userId/:deviceId" element={<AdminDevices />} />
                   <Route path="nodes" element={<AdminNodes />} />
-                  <Route path="sections" element={<AdminSections />} />
+                  <Route path="sections" element={<AdminHomeRows />} />
+                  <Route path="home-rows" element={<LegacyAdminHomeRowsRedirect />} />
                   <Route path="plugins" element={<AdminPlugins />} />
+                  <Route path="plugins/:pluginId" element={<AdminPluginDetail />} />
                   <Route path="settings/*" element={<AdminSettingsLayout />} />
                   <Route path="policy" element={<AdminPolicyLayout />} />
                   <Route path="recommendations" element={<AdminRecommendations />} />
@@ -563,6 +567,18 @@ function AppRoutes() {
                 >
                   <Route index element={<AccountSettings />} />
                 </Route>
+                <Route
+                  path="/settings/sessions"
+                  element={
+                    <RequirePrimaryOrAdmin>
+                      <UICustomizedLayout>
+                        <SettingsLayout />
+                      </UICustomizedLayout>
+                    </RequirePrimaryOrAdmin>
+                  }
+                >
+                  <Route index element={<SignedInSessions />} />
+                </Route>
                 {/* Remaining settings use profile-scoped values and require a profile. */}
                 <Route
                   path="/settings/*"
@@ -575,9 +591,17 @@ function AppRoutes() {
                   }
                 >
                   <Route index element={null} />
-                  <Route path="appearance" element={<AppearanceSettings />} />
+                  {/* Theme choice moved to the admin; date and time formats live on
+                      Accessibility. Keep the old paths landing somewhere useful. */}
+                  <Route
+                    path="appearance"
+                    element={<Navigate to="/settings/accessibility" replace />}
+                  />
+                  <Route
+                    path="theme-editor"
+                    element={<Navigate to="/settings/accessibility" replace />}
+                  />
                   <Route path="interface" element={<InterfaceSettings />} />
-                  <Route path="theme-editor" element={<ThemeEditorSettings />} />
                   <Route path="accessibility" element={<AccessibilitySettings />} />
                   <Route path="playback" element={<PlaybackSettings />} />
                   <Route
@@ -597,6 +621,7 @@ function AppRoutes() {
                   <Route path="home-screen" element={<HomeScreenSettings />} />
                   <Route path="card-overlays" element={<CardOverlaySettings />} />
                   <Route path="personalize" element={<PersonalizeSettings />} />
+                  <Route path="requests" element={<RequestsSettings />} />
                   <Route path="devices" element={<DeviceSettings />} />
                   <Route path="notifications" element={<NotificationsSettings />} />
                   <Route path="connect-apps" element={<ConnectAppsSettings />} />
@@ -624,8 +649,8 @@ function AppRoutes() {
                           <Route path="/browse" element={<LegacyBrowseRedirect />} />
                           <Route path="/item/:id" element={<ItemDetail />} />
                           <Route path="/person/:id" element={<PersonDetail />} />
+                          <Route path="/rooms" element={<WatchPartyHub />} />
                           <Route path="/rooms/:roomId" element={<WatchTogetherRoomPage />} />
-                          <Route path="/rooms/join" element={<WatchTogetherJoin />} />
                           <Route
                             path="/favorites"
                             element={<LegacyPersonalCatalogRedirect source="favorites" />}
@@ -639,8 +664,10 @@ function AppRoutes() {
                             element={<LegacyPersonalCatalogRedirect source="history" />}
                           />
                           <Route path="/collections" element={<Collections />} />
-                          <Route path="/collections/new" element={<CollectionEditor />} />
-                          <Route path="/collections/:id/edit" element={<CollectionEditor />} />
+                          <Route element={<CollectionEditorPage scope="personal" />}>
+                            <Route path="/collections/new" />
+                            <Route path="/collections/:id/edit" />
+                          </Route>
                           <Route
                             path="/collections/:id"
                             element={<LegacyUserCollectionRedirect />}
@@ -708,9 +735,10 @@ function AppRoutes() {
                           />
                           <Route path="/calendar" element={<Calendar />} />
                           <Route path="/notifications" element={<Notifications />} />
+                          {/* Retired second profile Home editor; keep old links working. */}
                           <Route
                             path="/profile/customize-home"
-                            element={<ProfileCustomizeHome />}
+                            element={<Navigate to="/settings/home-screen" replace />}
                           />
                           <Route path="*" element={<Navigate to="/" replace />} />
                         </Routes>
@@ -748,7 +776,12 @@ function AdminRealtimeEventChannels() {
   useEventChannel("tasks");
   useEventChannel("scans");
   useEventChannel("settings");
-  return null;
+  useEventChannel("download_preparations");
+  return (
+    <Suspense fallback={null}>
+      <AdminDownloadPreparationsRefresh />
+    </Suspense>
+  );
 }
 
 function PlaybackCapabilityPrewarmer() {

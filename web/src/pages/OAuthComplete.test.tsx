@@ -1,167 +1,121 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-import { storage } from "@/utils/storage";
+// @vitest-environment jsdom
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
+import { V2ProblemError } from "@/api/v2/request";
 import OAuthComplete from "./OAuthComplete";
 
-const apiMock = vi.hoisted(() => vi.fn());
-const completeLoginMock = vi.hoisted(() => vi.fn());
-const navigateMock = vi.hoisted(() => vi.fn());
-const resetAuthMock = vi.hoisted(() => vi.fn());
-const setAccessTokenMock = vi.hoisted(() => vi.fn());
-const setRefreshTokenMock = vi.hoisted(() => vi.fn());
+const request = vi.hoisted(() => vi.fn());
+const completeLogin = vi.hoisted(() => vi.fn());
+const tokens = vi.hoisted(() => ({ access: vi.fn(), refresh: vi.fn() }));
 
-vi.mock("react-router", async () => {
-  const actual = await vi.importActual<typeof import("react-router")>("react-router");
-  return { ...actual, useNavigate: () => navigateMock };
-});
-
+vi.mock("@/api/v2/request", async () => ({
+  ...(await vi.importActual<typeof import("@/api/v2/request")>("@/api/v2/request")),
+  v2: request,
+}));
 vi.mock("@/api/client", () => ({
-  api: apiMock,
-  setAccessToken: setAccessTokenMock,
-  setRefreshToken: setRefreshTokenMock,
+  setAccessToken: tokens.access,
+  setRefreshToken: tokens.refresh,
 }));
-
-vi.mock("@/hooks/useAuth", () => ({
-  useAuth: () => ({ completeLogin: completeLoginMock, resetAuth: resetAuthMock }),
+vi.mock("@/api/v2/account", () => ({
+  userFromAccount: (account: { id: string; username: string }) => ({
+    id: account.id,
+    username: account.username,
+  }),
 }));
+vi.mock("@/hooks/useAuth", () => ({ useAuth: () => ({ completeLogin }) }));
 
-vi.mock("@/components/auth/AuthBackground", () => ({ AuthBackground: () => null }));
+const COMPLETION = {
+  access_token: "access",
+  refresh_token: "refresh",
+  expires_in: 900,
+  next: "/activate?code=48217730",
+};
 
-function completionResponse(next = "/") {
-  return new Response(
-    JSON.stringify({
-      access_token: "partial-access-token",
-      refresh_token: "partial-refresh-token",
-      expires_in: 3600,
-      next,
-    }),
-    { status: 200, headers: { "Content-Type": "application/json" } },
-  );
+function Where() {
+  const location = useLocation();
+  return <p data-testid="where">{location.pathname + location.search}</p>;
 }
 
-function renderCompletion(search: string) {
-  window.history.replaceState(null, "", `/login/oauth-complete${search}`);
-  return render(
-    <MemoryRouter initialEntries={[`/login/oauth-complete${search}`]}>
-      <OAuthComplete />
+function mount() {
+  render(
+    <MemoryRouter initialEntries={["/login/oauth-complete"]}>
+      <Routes>
+        <Route path="/login/oauth-complete" element={<OAuthComplete />} />
+        <Route path="*" element={<Where />} />
+      </Routes>
     </MemoryRouter>,
   );
 }
 
-async function expectGenericFailure(upstreamText: string) {
-  const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("We couldn't sign you in");
-  expect(alert).toHaveTextContent("Return to sign in and try again");
-  expect(alert).not.toHaveTextContent(upstreamText);
-  expect(document.body).not.toHaveTextContent("partial-access-token");
-  expect(document.body).not.toHaveTextContent("partial-refresh-token");
-  expect(screen.getByRole("button", { name: "Try again" })).toHaveFocus();
+async function landedOn(path: string) {
+  await waitFor(() => expect(screen.getByTestId("where").textContent).toBe(path));
 }
 
-describe("OAuthComplete failure", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    Object.values(storage.KEYS).forEach((key) => storage.remove(key));
-    for (const key of [
-      storage.KEYS.ACCESS_TOKEN,
-      storage.KEYS.REFRESH_TOKEN,
-      storage.KEYS.PROFILE_ID,
-      storage.KEYS.PROFILE_TOKEN,
-      storage.KEYS.CURRENT_PROFILE,
-    ]) {
-      storage.set(key, `stale-${key}`);
-    }
-    resetAuthMock.mockImplementation(() => {
-      setAccessTokenMock(null);
-      setRefreshTokenMock(null);
-      storage.remove(storage.KEYS.ACCESS_TOKEN);
-      storage.remove(storage.KEYS.REFRESH_TOKEN);
-      storage.remove(storage.KEYS.PROFILE_ID);
-      storage.remove(storage.KEYS.PROFILE_TOKEN);
-      storage.remove(storage.KEYS.CURRENT_PROFILE);
-    });
+beforeEach(() => {
+  window.history.replaceState(null, "", "/login/oauth-complete?code=one-time");
+});
+afterEach(() => {
+  cleanup();
+  request.mockReset();
+  completeLogin.mockReset();
+  tokens.access.mockReset();
+  tokens.refresh.mockReset();
+  window.history.replaceState(null, "", "/");
+});
+
+it("redeems the code once and goes on to where the sign-in started", async () => {
+  request.mockImplementation(async (operation: string) =>
+    operation === "POST /api/v2/auth/oauth/complete" ? COMPLETION : { id: "1", username: "alice" },
+  );
+  mount();
+  await landedOn("/activate?code=48217730");
+  expect(request).toHaveBeenCalledWith("POST /api/v2/auth/oauth/complete", {
+    body: { code: "one-time" },
   });
+  expect(
+    request.mock.calls.filter(([op]) => op === "POST /api/v2/auth/oauth/complete"),
+  ).toHaveLength(1);
+  // The single-use code leaves the address bar.
+  expect(window.location.search).toBe("");
+  expect(completeLogin).toHaveBeenCalledWith(
+    expect.objectContaining({ access_token: "access", user: { id: "1", username: "alice" } }),
+  );
+});
 
-  it("shows a generic retry for an expired completion code and removes it from history", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
-        new Response('{"error":"completion_expired","message":"code 8d7-secret expired"}', {
-          status: 410,
-        }),
-      ),
-    );
+it("sends a refused code back to the login page, which does not restart the provider", async () => {
+  request.mockRejectedValue(
+    new V2ProblemError("completeOAuthLogin", {
+      type: "https://siloserver.org/docs/api/v2/problems/invalid_grant",
+      title: "Invalid grant",
+      status: 400,
+      detail: "raw",
+    } as never),
+  );
+  mount();
+  await landedOn("/login?error=oauth_failed&reason=session_expired");
+  expect(completeLogin).not.toHaveBeenCalled();
+  expect(tokens.access).toHaveBeenLastCalledWith(null);
+});
 
-    const user = userEvent.setup();
-    renderCompletion("?code=8d7-secret&next=%2Fprofiles");
-
-    await expectGenericFailure("completion_expired");
-    expect(window.location.search).toBe("");
-    expect(window.location.href).not.toContain("8d7-secret");
-    expect(resetAuthMock).toHaveBeenCalledTimes(1);
-
-    await user.click(screen.getByRole("button", { name: "Try again" }));
-
-    expect(navigateMock).toHaveBeenCalledWith("/login?redirect=%2Fprofiles", { replace: true });
+it("reports a failure after the code was redeemed as a failed sign-in", async () => {
+  request.mockImplementation(async (operation: string) => {
+    if (operation === "POST /api/v2/auth/oauth/complete") return COMPLETION;
+    throw new V2ProblemError("getAccount", {
+      type: "https://siloserver.org/docs/api/v2/problems/internal_error",
+      title: "Internal error",
+      status: 500,
+    } as never);
   });
+  mount();
+  await landedOn("/login?error=oauth_failed&reason=login_failed");
+  expect(completeLogin).not.toHaveBeenCalled();
+  expect(tokens.refresh).toHaveBeenLastCalledWith(null);
+});
 
-  it("shows the same generic retry for a network failure", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockRejectedValue(new Error("network upstream oauth.exchange_failed at 10.0.0.8")),
-    );
-
-    renderCompletion("?code=network-code");
-
-    await expectGenericFailure("oauth.exchange_failed");
-    expect(document.body).not.toHaveTextContent("10.0.0.8");
-  });
-
-  it("clears partial auth state and preserves safe next when loading the user fails", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(completionResponse("/library?tab=new")));
-    apiMock.mockRejectedValue(new Error("/auth/me failed: signature_invalid token=backend-token"));
-    const user = userEvent.setup();
-
-    renderCompletion("?code=me-code");
-
-    await expectGenericFailure("signature_invalid");
-    expect(document.body).not.toHaveTextContent("backend-token");
-    expect(setAccessTokenMock).toHaveBeenCalledWith("partial-access-token");
-    expect(setRefreshTokenMock).toHaveBeenCalledWith("partial-refresh-token");
-    expect(setAccessTokenMock).toHaveBeenLastCalledWith(null);
-    expect(setRefreshTokenMock).toHaveBeenLastCalledWith(null);
-    for (const key of [
-      storage.KEYS.ACCESS_TOKEN,
-      storage.KEYS.REFRESH_TOKEN,
-      storage.KEYS.PROFILE_ID,
-      storage.KEYS.PROFILE_TOKEN,
-      storage.KEYS.CURRENT_PROFILE,
-    ]) {
-      expect(storage.get(key)).toBeNull();
-    }
-
-    const retry = screen.getByRole("button", { name: "Try again" });
-    await user.dblClick(retry);
-
-    expect(navigateMock).toHaveBeenCalledTimes(1);
-    expect(navigateMock).toHaveBeenCalledWith("/login?redirect=%2Flibrary%3Ftab%3Dnew", {
-      replace: true,
-    });
-    await waitFor(() => expect(retry).toBeDisabled());
-  });
-
-  it("clears persisted tokens when the completion page unmounts before loading the user", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(completionResponse("/library")));
-    apiMock.mockReturnValue(new Promise(() => {}));
-
-    const view = renderCompletion("?code=slow-me-code");
-    await waitFor(() => expect(setAccessTokenMock).toHaveBeenCalledWith("partial-access-token"));
-
-    view.unmount();
-
-    expect(resetAuthMock).toHaveBeenCalledTimes(1);
-  });
+it("sends a visit without a code back to the login page", async () => {
+  window.history.replaceState(null, "", "/login/oauth-complete");
+  mount();
+  await landedOn("/login?error=oauth_failed&reason=state_invalid");
+  expect(request).not.toHaveBeenCalled();
 });

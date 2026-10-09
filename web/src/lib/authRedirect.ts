@@ -2,28 +2,27 @@ export function sanitizeAuthRedirect(value: string | null | undefined): string |
   if (!value) {
     return null;
   }
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(value);
-  } catch {
+  if (!value.startsWith("/")) {
     return null;
   }
-  if (!decoded.startsWith("/")) {
+  if (value.startsWith("//")) {
     return null;
-  }
-  if (decoded.startsWith("//")) {
-    return null;
-  }
-  for (const character of decoded) {
-    const codePoint = character.charCodeAt(0);
-    if (character === "\\" || codePoint <= 31 || codePoint === 127) {
-      return null;
-    }
   }
   return value;
 }
 
-export function buildLoginRetryHref(next: string | null | undefined): string {
-  const safeNext = sanitizeAuthRedirect(next);
-  return safeNext ? `/login?redirect=${encodeURIComponent(safeNext)}` : "/login";
+/**
+ * Builds a guard redirect target (e.g. "/login") that preserves the current
+ * location so the user returns to it after authenticating or choosing a
+ * profile.
+ */
+export function guardRedirectTarget(
+  base: string,
+  location: { pathname: string; search: string },
+): string {
+  const destination = `${location.pathname}${location.search}`;
+  if (destination === "/" || destination === "") {
+    return base;
+  }
+  return `${base}?redirect=${encodeURIComponent(destination)}`;
 }

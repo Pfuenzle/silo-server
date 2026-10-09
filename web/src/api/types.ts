@@ -1,5 +1,6 @@
 import { getDefaultQuerySortOrder, normalizeQuerySortField } from "@/lib/querySortOptions";
 import type { SchemaOption } from "@/components/admin/plugins/schemaFormUtils";
+import type { components as V2Components } from "@/api/v2/schema";
 
 // Auth
 export interface LoginRequest {
@@ -74,14 +75,6 @@ export interface AuthProviderOption {
   installation_id?: number;
 }
 
-export interface CredentialProviderFallbackResponse {
-  readonly provider_ids: readonly string[];
-}
-
-export interface CredentialProviderFallbackRequest {
-  readonly provider_ids: readonly string[];
-}
-
 export interface SetupStatusResponse {
   needs_setup: boolean;
 }
@@ -116,6 +109,8 @@ export interface User {
   role: string;
   permissions: string[];
   download_allowed: boolean;
+  /** The account holds a temporary password: until it is changed, the session may only change it. */
+  password_change_required?: boolean;
   impersonation?: ImpersonationInfo | null;
 }
 
@@ -236,6 +231,16 @@ export interface Profile {
   is_child: boolean;
   is_primary: boolean;
   max_content_rating: string;
+  /**
+   * Advisory-age limit: titles whose advisory age (e.g. Common Sense Media's
+   * "13+") is above it are hidden. Null or absent means no limit.
+   */
+  max_advisory_age?: number | null;
+  /**
+   * Hide titles with no advisory age as well, so only titles rated at or under
+   * max_advisory_age are shown. No effect without a limit.
+   */
+  require_advisory_age?: boolean;
   quality_preference: string;
   language: string;
   preferred_metadata_language?: string;
@@ -253,42 +258,10 @@ export interface Profile {
   updated_at: string;
 }
 
-export interface ProfileListResponse {
-  profiles: Profile[];
-  avatar_upload_enabled: boolean;
-}
-
-export interface CreateProfileRequest {
-  name: string;
-  avatar?: string;
-  pin?: string;
-  is_child?: boolean;
-  max_content_rating?: string;
-  quality_preference?: string;
-  language?: string;
-  preferred_metadata_language?: string;
-  subtitle_language?: string;
-  subtitle_mode?: string;
-  show_forced_subtitles?: boolean;
-  auto_skip_intro?: boolean;
-  auto_skip_credits?: boolean;
-  auto_skip_recap?: boolean;
-  auto_play_next_preview?: boolean;
-  library_restrictions_enabled?: boolean;
-  allowed_library_ids?: number[] | null;
-  max_playback_quality?: string;
-}
-
-export interface UpdateProfileRequest extends Partial<CreateProfileRequest> {}
-
-export interface VerifyPinResponse {
-  valid: boolean;
-  profile_token?: string;
-  expires_at?: string;
-}
-
 // History Import
 export interface HistoryImportSource {
+  needs_reconfiguration?: boolean;
+  etag?: string;
   id: number;
   name: string;
   source_type: string;
@@ -512,6 +485,7 @@ export interface CreateHistoryImportRunRequest {
   plex_session_id?: string;
   plex_server_id?: string;
   plex_base_url?: string;
+  plex_base_urls?: string[];
   plex_token?: string;
   plex_account_token?: string;
 }
@@ -527,6 +501,7 @@ export interface CreateHistoryImportSourceRequest {
 }
 
 export interface UpdateHistoryImportSourceRequest {
+  admin_token?: string;
   name?: string;
   base_url?: string;
   system_id?: string;
@@ -544,6 +519,7 @@ export interface HistoryImportExternalUser {
 }
 
 export interface HistoryImportUserMapping {
+  etag?: string;
   id: number;
   source_id: number;
   external_user_id: string;
@@ -565,17 +541,6 @@ export interface CreateHistoryImportMappingRequest {
   silo_profile_id: string;
 }
 
-export type HistoryRemovalScope = "item" | "show";
-
-export interface HistoryRemovalTargetRequest {
-  content_id: string;
-  scope: HistoryRemovalScope;
-}
-
-export interface RemoveHistoryRequest {
-  targets: HistoryRemovalTargetRequest[];
-}
-
 export interface UpdateHistoryImportMappingRequest {
   silo_user_id?: number;
   silo_profile_id?: string;
@@ -589,7 +554,7 @@ export interface AdminHistoryImportBulkRunResult {
 
 // Person
 export interface Person {
-  id: number;
+  id: string;
   name: string;
   bio?: string;
   birth_date?: string;
@@ -602,11 +567,6 @@ export interface Person {
   imdb_id?: string;
   tvdb_id?: string;
   plex_guid?: string;
-}
-
-export interface PersonRefreshQueuedResponse {
-  status: string;
-  person_id: number;
 }
 
 export interface UpdatePersonRequest {
@@ -836,6 +796,9 @@ export interface BrowseItem {
   studios?: string[];
   networks?: string[];
   content_rating: string;
+  /** Display-only advisory age; see ItemDetail.advisory_age. */
+  advisory_age?: number | null;
+  advisory_source?: string;
   status: "pending" | "matched" | "unmatched" | "ambiguous";
   show_status?: string;
   rating_imdb: number | null;
@@ -923,13 +886,6 @@ export interface AudiobookGroup {
   poster_urls: string[];
 }
 
-export interface AudiobookGroupsResponse {
-  total: number;
-  total_exact: boolean;
-  has_more: boolean;
-  groups: AudiobookGroup[];
-}
-
 // Item Detail
 export interface FileVersion {
   file_id: number;
@@ -962,6 +918,9 @@ export interface FileVersion {
   credits?: TimeRange | null;
   recap?: TimeRange | null;
   preview?: TimeRange | null;
+  marker_segments?: MarkerOccurrence[];
+  /** Seek-bar previews are published for this file (read them with getWatchTrickplay). */
+  trickplay_available?: boolean;
 }
 
 export interface PlaybackVariantPart {
@@ -1074,6 +1033,12 @@ export interface TimeRange {
 /** The four editable marker kinds. "credits" is exposed as Jellyfin's "Outro". */
 export type MarkerKind = "intro" | "credits" | "recap" | "preview";
 
+export interface MarkerOccurrence {
+  kind: MarkerKind;
+  start_seconds: number;
+  end_seconds: number;
+}
+
 /** A marker segment with provenance, as returned by the markers API. */
 export interface MarkerSegment {
   start: number | null;
@@ -1092,11 +1057,12 @@ export interface FileMarkersResponse {
   credits: MarkerSegment;
   recap: MarkerSegment;
   preview: MarkerSegment;
+  marker_segments?: MarkerOccurrence[];
 }
 
 export interface MarkerEditAuditEntry {
-  id: number;
-  media_file_id: number;
+  id: string;
+  media_file_id: string;
   item_id?: string;
   item_type?: string;
   media_title?: string;
@@ -1105,11 +1071,11 @@ export interface MarkerEditAuditEntry {
   action: "set" | "clear";
   before: MarkerSegment | null;
   after: MarkerSegment | null;
-  user_id?: number;
+  user_id?: string;
   username?: string;
-  impersonator_user_id?: number;
+  impersonator_user_id?: string;
   impersonator_username?: string;
-  api_key_id?: number;
+  api_key_id?: string;
   request_id?: string;
   client_ip?: string;
   user_agent?: string;
@@ -1153,9 +1119,22 @@ export interface ItemExtra {
   file_id?: number;
 }
 
+/**
+ * One external rating as the server builds it for a title page: IMDb and
+ * TMDB, plus the sources an administrator turned on. `display` is already
+ * formatted on the source's own scale ("8.5", "93%").
+ */
+export type DisplayRating = V2Components["schemas"]["CatalogRating"];
+
 export interface ItemDetail {
+  themes?: {
+    owner_id: string;
+    items: { id: string; title: string; duration_seconds: number; container: string }[];
+  };
   content_id: string;
   play_content_id?: string;
+  /** The season of `play_content_id` when it is an episode. */
+  play_season_number?: number;
   type: "movie" | "series" | "season" | "episode" | "audiobook" | "ebook" | "manga" | "podcast";
   status?: "pending" | "matched" | "unmatched" | "ambiguous";
 
@@ -1174,11 +1153,22 @@ export interface ItemDetail {
   pending_translation_language?: string;
   runtime: number;
   content_rating: string;
+  /**
+   * Recommended minimum viewer age from an advisory service, with
+   * advisory_source naming who recommended it. It is not the certification:
+   * content_rating still drives the content-rating ceiling, and a profile's
+   * separate max_advisory_age limit compares against this age. Absent means
+   * "no advisory fetched", never "suitable for everyone".
+   */
+  advisory_age?: number | null;
+  advisory_source?: string;
   genres: string[];
   rating_imdb: number | null;
   rating_tmdb: number | null;
   rating_rt_critic: number | null;
   rating_rt_audience: number | null;
+  /** The external ratings the title page shows, chosen and formatted by the server. */
+  ratings: DisplayRating[];
   imdb_id: string;
   tmdb_id: string;
   tvdb_id: string;
@@ -1295,6 +1285,8 @@ export interface EpisodeFile {
   audio_channels: number;
   container: string;
   file_size: number;
+  /** True when the server could not read the file (empty, corrupt, or truncated). */
+  unreadable?: boolean;
 }
 
 export interface EpisodeListItem {
@@ -1338,15 +1330,18 @@ export interface Collection {
   name: string;
   description?: string;
   collection_type: UserCollectionType;
+  /** Every profile on the login sees the collection read-only; otherwise only its creator. */
   is_shared: boolean;
-  allowed_profile_ids: string[];
   query_definition: QueryDefinition;
   sort_config: Record<string, unknown>;
+  /** Position in the creator's own order of collections. */
   sort_order: number;
   group_id?: string | null;
   source_url?: string;
   source_config?: Record<string, unknown>;
   sync_schedule?: string;
+  /** The cadence `sync_schedule` names; "custom" for a schedule no name produces. */
+  sync_cadence?: UserCollectionSyncCadence;
   next_sync_at?: string;
   last_sync_at?: string;
   last_sync_status?: UserCollectionSyncStatus;
@@ -1357,6 +1352,10 @@ export interface Collection {
   include_in_server_collections?: boolean;
   poster_url?: string;
   poster_thumbhash?: string;
+  /** `poster_url` is the collage the server made of its titles, not an uploaded or imported image. */
+  poster_is_collage?: boolean;
+  /** Whether it holds the list's `contains_item` title; only on the profile's own manual collections. */
+  contains?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -1381,17 +1380,9 @@ export interface CollectionItem {
   added_at: string;
 }
 
-export interface CollectionGroup {
-  id: string;
-  name: string;
-  slug: string;
-  default_sort_mode: GroupSortMode;
-  sort_order: number;
-}
-
 export interface CollectionsListResponse {
+  /** The profile's own collections in its order, then other profiles' shared ones. */
   collections: Collection[];
-  groups: CollectionGroup[];
 }
 
 export interface CollectionCapabilitiesResponse {
@@ -1486,11 +1477,6 @@ export interface QueryDefinitionInput {
   limit?: number;
 }
 
-export interface SmartCollectionAccess {
-  is_shared: boolean;
-  allowed_profile_ids: string[];
-}
-
 export interface CollectionPreviewRequest {
   query_definition: QueryDefinition;
   limit?: number;
@@ -1509,9 +1495,10 @@ export interface CollectionPreviewResponse {
 
 export interface CreateCollectionRequest {
   name: string;
+  /** Accepted when collection capabilities report `create_description`. */
+  description?: string;
   collection_type?: "manual" | "smart";
   is_shared?: boolean;
-  allowed_profile_ids?: string[];
   query_definition?: QueryDefinition;
   sort_config?: Record<string, unknown>;
   /** Filter-only QueryDefinition fragment; omit for no display filter. */
@@ -1524,7 +1511,6 @@ export interface UpdateCollectionRequest {
   name?: string;
   description?: string;
   is_shared?: boolean;
-  allowed_profile_ids?: string[];
   query_definition?: QueryDefinition;
   sort_config?: Record<string, unknown>;
   source_url?: string;
@@ -1536,6 +1522,8 @@ export interface UpdateCollectionRequest {
   include_in_server_collections?: boolean;
   poster_source_url?: string;
   group_id?: string | null;
+  /** A synced list's cadence; "" stops scheduled syncs. */
+  sync_schedule?: UserCollectionSyncSchedule;
 }
 
 export interface LibraryCollection {
@@ -1554,6 +1542,8 @@ export interface LibraryCollection {
   backdrop_url: string;
   poster_thumbhash?: string;
   backdrop_thumbhash?: string;
+  /** `poster_url` is the collage the server made of its members, not an uploaded or template image. */
+  poster_is_collage?: boolean;
   source_url: string;
   query_definition: QueryDefinition;
   sort_config: Record<string, unknown>;
@@ -1567,6 +1557,10 @@ export interface LibraryCollection {
   sync_schedule?: string;
   next_sync_at?: string;
   item_count: number;
+  /** Admin list only: turned-on Home rows that show it. */
+  home_row_count?: number;
+  /** Admin list only: Home and library page rows that show it, turned-off ones included. */
+  row_count?: number;
   created_at: string;
   updated_at: string;
 }
@@ -1699,6 +1693,13 @@ export interface ImportMDBListCollectionResponse {
   sync_run?: LibraryCollectionSyncRun;
 }
 
+/**
+ * Imports a public TMDB list. `url` is the list page
+ * (https://www.themoviedb.org/list/{id}-{slug}) or its numeric ID; the body is
+ * otherwise the same as an MDBList import.
+ */
+export type ImportTMDBListCollectionRequest = ImportMDBListCollectionRequest;
+
 export interface ImportTMDBCollectionRequest {
   library_id?: number;
   library_ids?: number[];
@@ -1765,6 +1766,7 @@ export interface ImportTraktCollectionResponse {
 // concerns). sync_schedule is restricted to a fixed set so we can guarantee
 // the >=24h minimum interval without parsing user-supplied cron.
 export type UserCollectionSyncSchedule = "" | "daily" | "weekly" | "monthly";
+export type UserCollectionSyncCadence = UserCollectionSyncSchedule | "custom";
 
 export interface UserImportSharedFields {
   title: string;
@@ -1779,10 +1781,6 @@ export interface UserImportSharedFields {
   library_ids?: number[];
   /** Default order viewers land on; `{}` keeps the source list's own order. */
   sort_config?: CollectionSortConfig;
-}
-
-export interface ImportUserMDBListCollectionRequest extends UserImportSharedFields {
-  url: string;
 }
 
 export interface MDBListListSummary {
@@ -1805,17 +1803,6 @@ export interface MDBListDiscoveryResponse {
   lists: MDBListListSummary[];
 }
 
-export interface ImportUserTMDBCollectionRequest extends UserImportSharedFields {
-  preset: ImportTMDBCollectionRequest["preset"];
-  media_type: ImportTMDBCollectionRequest["media_type"];
-  time_window?: ImportTMDBCollectionRequest["time_window"];
-}
-
-export interface ImportUserTraktCollectionRequest extends UserImportSharedFields {
-  preset: ImportTraktCollectionRequest["preset"];
-  media_type: ImportTraktCollectionRequest["media_type"];
-}
-
 // A completed sync always has a non-empty status; the empty-string variant in
 // UserCollectionSyncStatus only appears on un-synced rows.
 export type UserCollectionSyncResultStatus = Exclude<UserCollectionSyncStatus, "">;
@@ -1829,13 +1816,8 @@ export interface UserCollectionSyncResult {
   completed_at: string;
 }
 
-export interface ImportUserCollectionResponse {
-  collection: Collection;
-  sync?: UserCollectionSyncResult;
-}
-
 // Media Requests
-export type RequestMediaType = "movie" | "series" | "audiobook";
+export type RequestMediaType = "movie" | "series";
 export type RequestSearchMediaType = RequestMediaType | "all";
 export type MediaRequestStatus = "pending" | "approved" | "queued" | "downloading" | "completed";
 export type MediaRequestOutcome = "active" | "declined" | "cancelled" | "failed";
@@ -1892,8 +1874,6 @@ export interface RequestDownload {
 
 export interface RequestMediaResult {
   media_type: RequestMediaType;
-  provider?: string;
-  provider_item_id?: string;
   tmdb_id: number;
   title: string;
   year?: number;
@@ -1906,6 +1886,12 @@ export interface RequestMediaResult {
   availability: RequestAvailability;
   library_content_id?: string;
   request: RequestState;
+  /**
+   * The title is on the viewer's watchlist, as an entry for a title the
+   * library doesn't have or as its library item. Absent from servers without
+   * watchlist titles.
+   */
+  in_watchlist?: boolean;
 }
 
 export interface RequestMediaPage {
@@ -1957,6 +1943,8 @@ export interface RequestMediaDetail {
   availability: RequestAvailability;
   library_content_id?: string;
   request: RequestState;
+  /** The title is on the viewer's watchlist; see RequestMediaResult.in_watchlist. */
+  in_watchlist?: boolean;
 }
 
 /** One regular season of a series, as the request detail reports it. */
@@ -2035,9 +2023,7 @@ export interface DiscoverBrowseResponse {
 
 export interface CreateMediaRequestInput {
   media_type: RequestMediaType;
-  provider?: string;
-  provider_item_id?: string;
-  tmdb_id?: number;
+  tmdb_id: number;
   tvdb_id?: number;
   imdb_id?: string;
   title: string;
@@ -2073,7 +2059,6 @@ export interface RequestTarget {
 export interface MediaRequest {
   id: string;
   provider: string;
-  provider_item_id?: string;
   media_type: RequestMediaType;
   tmdb_id: number;
   tvdb_id?: number;
@@ -2101,13 +2086,14 @@ export interface MediaRequest {
   download?: RequestDownload;
   integration_kind?: string;
   external_id?: string;
-  external_status?: string | null;
-  external_detail?: string | null;
-  external_library_id?: string | null;
-  external_download_id?: string | null;
-  silo_audiobook_link?: string | null;
+  external_status?: string;
   library_content_id?: string;
-  last_error?: string | null;
+  last_error?: string;
+  /**
+   * What created the request: direct (the Request button) or watchlist
+   * (adding the title to a watchlist). The server may add values.
+   */
+  source?: string;
   created_at: string;
   updated_at: string;
   approved_at?: string;
@@ -2123,15 +2109,25 @@ export interface RequestFeatureStatus {
 }
 
 export interface RequestSettings {
+  /** Validator captured when this editor representation was loaded. */
+  etag?: string;
   requests_enabled: boolean;
   global_max_requests: number;
   global_window_days: number;
   global_auto_approval_enabled: boolean;
   force_dual_quality: boolean;
+  /**
+   * Adding a title the library doesn't have to a watchlist also requests it.
+   * Absent from servers that predate it; left out of an update, the stored
+   * value is kept.
+   */
+  watchlist_requests?: boolean;
   updated_at: string;
 }
 
 export interface RequestUserLimit {
+  /** Validator captured when this editor representation was loaded. */
+  etag?: string;
   user_id: number;
   limit_mode: RequestLimitMode;
   max_requests?: number | null;
@@ -2141,6 +2137,8 @@ export interface RequestUserLimit {
 }
 
 export interface RequestIntegration {
+  /** Validator captured when this editor representation was loaded. */
+  etag?: string;
   id: string;
   name: string;
   enabled: boolean;
@@ -2304,6 +2302,7 @@ export interface AutoscanSourceCreateInput {
   poll_interval_seconds?: number | null;
   path_rewrites: AutoscanPathRewrite[];
   source_config?: Record<string, string>;
+  label?: string;
 }
 
 export interface AutoscanConnectionTestInput {
@@ -2349,7 +2348,7 @@ export interface AutoscanStatusSource {
 }
 
 export interface AutoscanRunningPoll {
-  id: number;
+  id: string | number;
   source_id: string | null;
   plugin_id: string;
   capability_id: string;
@@ -2370,6 +2369,44 @@ export interface AutoscanStatus {
 
 export type AutoscanEventStatus = "running" | "success" | "error" | "unresolved";
 
+/** Outcome counters of a completed autoscan scan run. */
+export interface AutoscanScanResult {
+  new: number;
+  updated: number;
+  unchanged: number;
+  missing: number;
+  missing_skipped_protected: number;
+  files_deleted: number;
+  items_deleted: number;
+  memberships_removed: number;
+  errors: number;
+  /** Non-zero when the run did not scan because an overlapping scan was in progress. */
+  skipped: number;
+}
+
+export type AutoscanChangeOutcome =
+  | "queued"
+  | "joined"
+  | "suppressed"
+  | "unresolved"
+  | "ignored"
+  | "error";
+
+/** One change an autoscan event received and what the host did with it. */
+export interface AutoscanEventChange {
+  source_path: string;
+  rewritten_path: string;
+  scope?: string;
+  /** A known outcome, or the raw value a newer server sent. */
+  outcome: AutoscanChangeOutcome | (string & {});
+  reason?: string;
+  detail?: string;
+  library_id?: number;
+  target_mode?: string;
+  target_path?: string;
+  scan_run_id?: string;
+}
+
 export interface AutoscanEventScanRun {
   id: string;
   library_id: number;
@@ -2381,6 +2418,7 @@ export interface AutoscanEventScanRun {
   started_at?: string;
   completed_at?: string;
   error_message?: string;
+  result?: AutoscanScanResult;
 }
 
 export interface AutoscanEvent {
@@ -2402,6 +2440,8 @@ export interface AutoscanEvent {
   scans_suppressed: number;
   error_message?: string;
   scan_runs: AutoscanEventScanRun[];
+  changes: AutoscanEventChange[];
+  changes_truncated: boolean;
 }
 
 export interface AutoscanEventsResponse {
@@ -2430,6 +2470,7 @@ export interface AutoscanScan {
   capability_id?: string;
   event_status?: AutoscanEventStatus;
   event_completed_at?: string;
+  result?: AutoscanScanResult;
 }
 
 export interface AutoscanScansResponse {
@@ -2459,6 +2500,8 @@ export interface AccessGroup {
   audio_transcode_allowed: boolean;
   max_streams: number;
   max_transcodes: number;
+  max_remote_stream_bitrate_kbps: number;
+  max_local_stream_bitrate_kbps: number;
   allowed_permissions: string[] | null;
   requests_allowed: boolean;
   is_default: boolean;
@@ -2478,6 +2521,8 @@ export interface AccessGroupInput {
   audio_transcode_allowed?: boolean;
   max_streams?: number;
   max_transcodes?: number;
+  max_remote_stream_bitrate_kbps?: number;
+  max_local_stream_bitrate_kbps?: number;
   allowed_permissions?: string[] | null;
   requests_allowed?: boolean;
   is_default?: boolean;
@@ -2491,12 +2536,22 @@ export interface AdminUserEffectivePolicy {
   max_playback_quality: string;
   max_streams: number;
   max_transcodes: number;
+  max_remote_stream_bitrate_kbps: number;
+  max_local_stream_bitrate_kbps: number;
   transcode_allowed: boolean;
   audio_transcode_allowed: boolean;
   download_allowed: boolean;
   download_transcode_allowed: boolean;
   requests_allowed: boolean;
   permissions: string[];
+}
+
+// The built-in layer an ungrouped account resolves its unset policy fields to
+// (GET /api/v2/admin/users/policy-defaults).
+export type AdminPolicyDefaultLayer = Omit<AdminUserEffectivePolicy, "permissions">;
+export interface AdminPolicyDefaults {
+  admin: AdminPolicyDefaultLayer;
+  ungrouped: AdminPolicyDefaultLayer;
 }
 
 export interface AdminUser {
@@ -2511,12 +2566,25 @@ export interface AdminUser {
   max_playback_quality: string | null;
   max_streams: number | null;
   max_transcodes: number | null;
+  max_remote_stream_bitrate_kbps: number | null;
+  max_local_stream_bitrate_kbps: number | null;
   transcode_allowed: boolean | null;
   audio_transcode_allowed: boolean | null;
   max_profiles: number;
   download_allowed: boolean | null;
   download_transcode_allowed: boolean | null;
   requests_allowed: boolean | null;
+  /** Signs in with a local password; false when an external provider manages sign-in. */
+  password_login: boolean;
+  /** Holds a temporary password it must replace at its next sign-in. */
+  password_change_required: boolean;
+  /** The server Owner: only the Owner may change this account. */
+  is_owner: boolean;
+  /**
+   * A break-glass admin keeps local password sign-in while the server turns
+   * it off (auth.local_password_login).
+   */
+  break_glass: boolean;
   effective_policy: AdminUserEffectivePolicy;
   created_at: string;
   updated_at: string;
@@ -2528,14 +2596,20 @@ export interface CreateUserRequest {
   username: string;
   email: string;
   password: string;
+  /** The password is temporary: the account must replace it at its first sign-in. */
+  require_password_change?: boolean;
   role: string;
   permissions?: string[];
   create_default_profile?: boolean;
   default_profile_name?: string;
+  /** The account's access group; omitted, a regular account joins the default group. */
+  access_group_id?: number | null;
   library_ids?: number[] | null;
   max_playback_quality?: string;
   max_streams?: number;
   max_transcodes?: number;
+  max_remote_stream_bitrate_kbps?: number;
+  max_local_stream_bitrate_kbps?: number;
   transcode_allowed?: boolean;
   audio_transcode_allowed?: boolean;
   max_profiles?: number;
@@ -2551,6 +2625,10 @@ export interface UpdateUserRequest {
   username?: string;
   email?: string;
   password?: string;
+  /** Only with password: make it temporary, replaced at the next sign-in. */
+  require_password_change?: boolean;
+  /** Admin accounts only; only the server Owner may set or clear it. */
+  break_glass?: boolean;
   role?: string;
   permissions?: string[];
   enabled?: boolean;
@@ -2559,6 +2637,8 @@ export interface UpdateUserRequest {
   max_playback_quality?: string | null;
   max_streams?: number | null;
   max_transcodes?: number | null;
+  max_remote_stream_bitrate_kbps?: number | null;
+  max_local_stream_bitrate_kbps?: number | null;
   transcode_allowed?: boolean | null;
   audio_transcode_allowed?: boolean | null;
   max_profiles?: number;
@@ -2575,6 +2655,8 @@ export interface AdminStats {
   total_movie_files?: number;
   total_shows: number;
   total_show_files?: number;
+  /** Movies and series that carry an advisory age. */
+  advisory_titles?: number;
   active_streams: number;
   total_storage_bytes: number;
   /**
@@ -2634,6 +2716,8 @@ export interface AdminSession {
   is_paused: boolean;
   has_playback_control?: boolean;
   client_ip?: string;
+  /** Server classification used to select the local or remote stream bitrate policy. */
+  stream_location?: "local" | "remote";
   client_name?: string;
   client_version?: string;
   client_build?: string;
@@ -2655,6 +2739,8 @@ export interface AdminSession {
   transcode_hw_accel?: string;
   tone_map_mode?: string;
   source_container?: string;
+  output_container?: string;
+  output_protocol?: string;
   source_bitrate_kbps: number | null;
   source_video_codec?: string;
   source_video_resolution?: string;
@@ -2667,7 +2753,7 @@ export interface AdminSession {
   requested_video_resolution?: string;
   video_decision?: string;
   audio_decision?: string;
-  /** Server-computed activity bucket: direct | remux | transcode | audio.
+  /** Server-computed activity bucket: direct | remux | direct_stream | transcode.
    * Absent when the per-stream decisions are unknown. */
   effective_play_method?: string;
   /** Server-side identification of Jellyfin-ecosystem clients (the JF pill). */
@@ -2675,6 +2761,8 @@ export interface AdminSession {
   /** Resolved playback workload and route. Node IDs/names are omitted when
    * that phase runs on the integrated API process (or direct play has no
    * executor). */
+  /** Empty means default network; absent means unknown (older session). */
+  routing_network_provider?: string;
   routing_workload?: string;
   routing_execution?: string;
   routing_execution_node_id?: number;
@@ -2704,6 +2792,7 @@ export interface AuditLogEntry {
   timestamp: string;
   client_ip: string;
   user_id?: number | null;
+  impersonator_user_id?: number | null;
   session_id?: string;
   playback_session_id?: string;
   request_id?: string;
@@ -2812,7 +2901,7 @@ export interface ClientDiagnosticManifest {
 export interface DiagnosticReportSummary {
   id: string;
   short_id: string;
-  user_id: number;
+  user_id: string | number; // v2 uses opaque strings; bridge fixtures may still supply numbers.
   profile_id?: string;
   state: DiagnosticReportState;
   captured_at: string;
@@ -2881,7 +2970,9 @@ export type EventChannel =
   // useSettingValuesRealtime.
   | "user_settings"
   | "settings"
-  | "notifications";
+  | "notifications"
+  // Admin-only changes to the offline-download preparation queue.
+  | "download_preparations";
 
 export interface NotificationReasonFlags {
   // episode.available reasons
@@ -2953,6 +3044,7 @@ export interface NotificationReadEventPayload {
 export type NotificationWebhookType = "discord" | "generic";
 
 export interface NotificationWebhook {
+  etag?: string;
   id: string;
   name: string;
   type: NotificationWebhookType;
@@ -3157,12 +3249,22 @@ export interface EventsErrorMessage {
   message: string;
 }
 
+/**
+ * The access the connection was opened under changed (access group,
+ * permissions, playback quality, role, or profile verification). The server
+ * closes the socket right after it with EVENTS_ACCESS_CHANGED_CLOSE_CODE.
+ */
+export interface EventsAccessChangedMessage {
+  type: "access_changed";
+}
+
 export type EventsStreamMessage =
   | EventsHelloMessage
   | EventsSubscribedMessage
   | EventsSnapshotMessage
   | EventsEventMessage
-  | EventsErrorMessage;
+  | EventsErrorMessage
+  | EventsAccessChangedMessage;
 
 export type AdminLogStreamMessage =
   | AdminLogSnapshotMessage
@@ -3279,8 +3381,17 @@ export interface Library {
   chapter_thumbnails_enabled: boolean;
   chapter_thumbnails_supported: boolean;
   intro_detection_enabled: boolean;
+  /** Generate seek-bar previews for the library's video files. Absent from servers without seek previews. */
+  trickplay_enabled?: boolean;
+  /** The server can generate seek-bar previews (public asset storage is configured). Absent from servers without seek previews. */
+  trickplay_supported?: boolean;
   /** Allow-list of video kinds fetched during metadata refresh; empty disables. */
   trailer_kinds: string[];
+  /**
+   * The library's own real-time monitoring switch. It only takes effect while
+   * the server-wide scanner.realtime_monitoring setting is on.
+   */
+  realtime_monitoring: boolean;
   sort_order: number;
   poster_url?: string;
   last_scanned_at: string | null;
@@ -3324,41 +3435,6 @@ export interface LibraryMetadataMatchQueueStatus {
   parked_count: number;
 }
 
-export interface LibraryMovieMatchQueueEntry {
-  media_file_id: number;
-  media_folder_id: number;
-  file_path: string;
-  first_queued_at: string;
-  available_at: string;
-  last_attempted_at?: string;
-  attempt_count: number;
-  last_error?: string;
-  state: "pending" | "parked";
-  failure_kind?: string;
-  failure_detail?: LibraryMetadataMatchFailureDetail;
-  deterministic_attempt_count: number;
-  matcher_revision: number;
-  parked_at?: string;
-  updated_at: string;
-}
-
-export interface LibrarySeriesMatchQueueEntry {
-  media_folder_id: number;
-  observed_root_path: string;
-  first_queued_at: string;
-  available_at: string;
-  last_attempted_at?: string;
-  attempt_count: number;
-  last_error?: string;
-  state: "pending" | "parked";
-  failure_kind?: string;
-  failure_detail?: LibraryMetadataMatchFailureDetail;
-  deterministic_attempt_count: number;
-  matcher_revision: number;
-  parked_at?: string;
-  updated_at: string;
-}
-
 export interface LibraryMetadataMatchFailureDetail {
   message?: string;
   decision?: {
@@ -3376,37 +3452,6 @@ export interface LibraryMetadataMatchFailureDetail {
     }>;
   };
   [key: string]: unknown;
-}
-
-export interface LibraryRawMatchBacklogEntry {
-  media_file_id: number;
-  media_folder_id: number;
-  file_path: string;
-  base_title?: string;
-  base_year?: number;
-  base_type?: string;
-  last_attempted_at?: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface LibraryMetadataMatchQueueDetail extends LibraryMetadataMatchQueueStatus {
-  limit: number;
-  offset: number;
-  movies: LibraryMovieMatchQueueEntry[];
-  series: LibrarySeriesMatchQueueEntry[];
-  raw_files: LibraryRawMatchBacklogEntry[];
-}
-
-export interface LibraryMetadataMatchQueueActionResponse {
-  status: "queued" | "cancelled";
-  library_id: number;
-  movie_cancelled?: number;
-  series_cancelled?: number;
-  raw_file_cancelled?: number;
-  raw_file_retried?: number;
-  total_cancelled?: number;
-  queue: LibraryMetadataMatchQueueStatus;
 }
 
 export interface LibrarySkippedRoot {
@@ -3453,11 +3498,6 @@ export interface LibraryRoot {
   content_id?: string;
 }
 
-export interface LibraryRootsResponse {
-  items: LibraryRoot[];
-  total: number;
-}
-
 export interface UpsertLibraryRootOverrideRequest extends LibraryRootOverride {
   library_id: number;
   root_path: string;
@@ -3490,10 +3530,50 @@ export interface CreateLibraryRequest {
   auto_translate_metadata?: boolean;
   chapter_thumbnails_enabled?: boolean;
   intro_detection_enabled?: boolean;
+  /** Sent only when it changes, so a server without seek previews never sees it. */
+  trickplay_enabled?: boolean;
   trailer_kinds?: string[];
+  /** Omitted on create means on. */
+  realtime_monitoring?: boolean;
 }
 
-export interface UpdateLibraryRequest extends Partial<CreateLibraryRequest> {}
+/**
+ * Effective real-time monitoring state of one library, from
+ * getLibraryRealtimeMonitoring. The first four states are derived from
+ * settings and report freshness; the rest come from a server node's report.
+ */
+export type LibraryRealtimeMonitoringState =
+  | "server_disabled"
+  | "library_disabled"
+  | "monitoring_off"
+  | "not_reporting"
+  | "starting"
+  | "monitoring"
+  | "unsupported_filesystem"
+  | "unsupported_platform"
+  | "limit_reached"
+  | "root_unavailable"
+  | "error";
+
+export interface LibraryRealtimeMonitoringEntry {
+  library_id: number;
+  /** The library's own switch. */
+  enabled: boolean;
+  state: LibraryRealtimeMonitoringState;
+  /** "inotify", "fanotify", or empty. */
+  backend: string;
+  detail: string;
+  directories: number;
+  /** Present only with a fresh node report. */
+  node_id?: string;
+  updated_at?: string;
+}
+
+export interface LibraryRealtimeMonitoring {
+  /** The server-wide scanner.realtime_monitoring setting. */
+  server_enabled: boolean;
+  libraries: LibraryRealtimeMonitoringEntry[];
+}
 
 export interface ScanRequest {
   library_id?: number;
@@ -3567,6 +3647,32 @@ export interface CatalogSeedImportResponse {
 
 export type AdminJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
+export type StorageTransitionPhase =
+  | "queued"
+  | "checking_target"
+  | "copying"
+  | "verifying"
+  | "committing"
+  | "restart_pending"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+export type StorageTransitionFailureCategory =
+  | "preparation_failed"
+  | "target_check_failed"
+  | "copy_failed"
+  | "verification_failed"
+  | "commit_failed"
+  | "unknown";
+
+export interface StorageTransitionJobResult {
+  manual_restart_required?: boolean;
+  phase?: StorageTransitionPhase;
+  verified_objects?: number;
+  failure_category?: StorageTransitionFailureCategory;
+}
+
 export interface LibraryRefreshJobRequest {
   library_id: number;
   library_name?: string;
@@ -3590,13 +3696,23 @@ export interface AdminJob {
   status: AdminJobStatus;
   created_by_user_id: number;
   request_payload: CatalogSeedExportRequest | LibraryRefreshJobRequest | Record<string, unknown>;
-  result_payload: CatalogSeedExportResult | LibraryRefreshJobResult | Record<string, unknown>;
+  result_payload:
+    | CatalogSeedExportResult
+    | LibraryRefreshJobResult
+    | StorageTransitionJobResult
+    | Record<string, unknown>;
   message: string;
   error_message?: string;
   progress_current: number;
   progress_total: number;
   artifact_size_bytes: number;
   public_url?: string;
+  /**
+   * Whether this server can mint a shareable seven-day link. False when exports
+   * are stored locally: only storage-side presigning produces a URL that works
+   * off this server. Undefined on responses that predate the field.
+   */
+  public_link_supported?: boolean;
   requested_at: string;
   started_at?: string;
   completed_at?: string;
@@ -3725,6 +3841,12 @@ export interface PluginCapability {
   subscriptions?: string[];
   config_schema?: PluginConfigSchema[];
   metadata?: Record<string, unknown>;
+  /** How an auth_provider.v1 capability signs people in; absent for other types. */
+  sign_in_mode?: "oauth" | "credentials" | "network";
+  /** An installation's OAuth sign-in capability: the redirect URI to register at the provider. */
+  callback_url?: string;
+  /** An installation's OAuth sign-in capability: the post-logout redirect URI to register. */
+  post_logout_redirect_url?: string;
 }
 
 export interface PluginRoute {
@@ -3757,7 +3879,10 @@ export interface PluginAuthBinding {
   display_order: number;
   auto_provision: boolean;
   default_login: boolean;
-  authorization_mode: "none" | "external_groups_v1";
+  /** Redirect URI to register at an OAuth (OIDC) provider; empty for LDAP or without a public URL. */
+  callback_url?: string;
+  /** Post-logout redirect URI to register for provider logout; empty like callback_url. */
+  post_logout_redirect_url?: string;
   created_at: string;
   updated_at: string;
 }
@@ -3813,6 +3938,22 @@ export interface PluginCatalogEntry {
   metadata?: Record<string, unknown>;
 }
 
+export type PluginRuntimeState = "stopped" | "starting" | "running" | "backoff" | "failed";
+
+/**
+ * Process state of one installation. `resident` marks a plugin the server
+ * supervises (started at boot, restarted after a crash); `backoff` and
+ * `failed` only occur for those.
+ */
+export interface PluginRuntime {
+  resident: boolean;
+  state: PluginRuntimeState;
+  restart_count: number;
+  last_error?: string;
+  last_started_at?: string;
+  next_restart_at?: string;
+}
+
 export interface PluginInstallation {
   id: number;
   repository_id?: number | null;
@@ -3820,6 +3961,7 @@ export interface PluginInstallation {
   version: string;
   install_path: string;
   enabled: boolean;
+  runtime: PluginRuntime;
   capabilities: PluginCapability[];
   global_config_schema: PluginConfigSchema[];
   user_config_schema: PluginConfigSchema[];
@@ -3882,8 +4024,6 @@ export interface SavePluginConfigRequest {
   value: Record<string, unknown>;
   /** Explicitly clear these manifest-declared secret fields. */
   clear_secrets?: string[];
-  /** Explicitly clear these manifest-declared public fields. */
-  clear_fields?: string[];
 }
 
 export interface SavePluginAuthBindingRequest {
@@ -3892,7 +4032,6 @@ export interface SavePluginAuthBindingRequest {
   display_order: number;
   auto_provision: boolean;
   default_login: boolean;
-  authorization_mode: "none" | "external_groups_v1";
 }
 
 export interface SavePluginTaskBindingRequest {
@@ -3902,34 +4041,6 @@ export interface SavePluginTaskBindingRequest {
 
 export interface PluginTaskBindingUpdateResponse {
   restart_required: boolean;
-}
-
-export interface PluginSettingsSummary {
-  id: number;
-  plugin_id: string;
-  version: string;
-  user_config_schema: PluginConfigSchema[];
-  routes: PluginRoute[];
-  assets: PluginAsset[];
-  /**
-   * Optional slash-delimited grouping path from the plugin manifest
-   * (e.g. "Tools/Utilities") that groups the plugin's entries in the
-   * Apps sidebar section. Absent when the manifest declares no category.
-   */
-  category?: string;
-}
-
-export interface PluginSettingsListResponse {
-  installations: PluginSettingsSummary[];
-}
-
-export interface PluginSettingsDetailResponse {
-  installation: PluginSettingsSummary;
-  values: Record<string, string>;
-}
-
-export interface UpdatePluginSettingsRequest {
-  values: Record<string, string>;
 }
 
 // Stream Nodes
@@ -3964,10 +4075,10 @@ export interface NodeDetectedBackend {
 
 /**
  * A node's stored hardware capability report — the body its /hw-capabilities
- * endpoint served. The payload also carries the node's transformation and
- * tone-map advertisements, which no admin surface reads yet.
+ * endpoint served, including its extraction and tone-map advertisements.
  */
 export interface NodeCapabilities {
+  transport_features?: string[];
   /** Backend that would actually be used: nvenc, qsv, vaapi, or none. */
   resolved?: string;
   render_devices?: string[] | null;
@@ -4073,8 +4184,26 @@ export interface HostGPUStats {
  * predating resource sampling.
  */
 export interface NodeLastStats {
+  sampled_at?: string;
+  attribution?: ResourceAttribution | null;
   system?: HostSystemStats | null;
   gpu?: HostGPUStats[] | null;
+  /**
+   * The build the node was running at its last health check, in the same
+   * shape as the API's own build info. Absent on a node predating the field.
+   */
+  build?: NodeBuildInfo | null;
+}
+
+/** A node's build identity as reported on its health response. */
+export interface NodeBuildInfo {
+  /** Short revision, `+dirty` when built from a modified tree, or "unavailable". */
+  display?: string;
+  revision?: string;
+  dirty?: boolean;
+  build_number?: number;
+  built_at?: string;
+  available?: boolean;
 }
 
 /**
@@ -4083,7 +4212,37 @@ export interface NodeLastStats {
  * (non-Linux, no sampler, or before the first sample lands), in which case the
  * rest is absent.
  */
+export interface ResourceSource {
+  scope?: string;
+  source?: string;
+  available?: boolean;
+}
+
+export interface ResourceAttribution {
+  instance_id?: string;
+  sample_interval_seconds?: number;
+  cpu?: ResourceSource;
+  memory?: ResourceSource;
+  load?: ResourceSource;
+  network?: ResourceSource;
+  process?: {
+    resident_bytes?: number | null;
+    heap_live_bytes?: number | null;
+    open_fds?: number | null;
+    max_fds?: number | null;
+    goroutines?: number | null;
+  } | null;
+  cgroup_memory?: {
+    scope?: string;
+    current_bytes?: number | null;
+    limit_bytes?: number | null;
+    pressure_some_pct?: number | null;
+  } | null;
+}
+
 export interface SystemResources {
+  stale?: boolean;
+  attribution?: ResourceAttribution | null;
   available?: boolean;
   sampled_at?: string;
   system?: HostSystemStats | null;
@@ -4091,7 +4250,8 @@ export interface SystemResources {
 }
 
 export interface StreamNode {
-  id: number;
+  config_etag?: string;
+  id: string | number; // v2 IDs are opaque strings; bridge mutations and fixtures retain numbers.
   name: string;
   type: string;
   url: string;
@@ -4150,7 +4310,7 @@ export interface StreamNode {
 
 export interface CreateNodeRequest {
   name: string;
-  type: string;
+  type: "proxy" | "transcode";
   url: string;
   // Client-facing base URL, proxy nodes only; empty means clients use `url`.
   public_url?: string;
@@ -4212,19 +4372,6 @@ export interface UserLibrary {
   poster_url?: string;
 }
 
-// Progress entry from GET /progress
-export interface ProgressEntry {
-  media_item_id: string;
-  position_seconds: number;
-  duration_seconds: number;
-  completed: boolean;
-  updated_at: string;
-}
-
-export interface ProgressListResponse {
-  progress: ProgressEntry[];
-}
-
 // Sections
 export interface SectionItemUpcomingEvent {
   type: "movie" | "episode" | "season_premiere";
@@ -4254,6 +4401,9 @@ export interface SectionItem {
   studios?: string[];
   networks?: string[];
   content_rating?: string;
+  /** Display-only advisory age; see ItemDetail.advisory_age. */
+  advisory_age?: number | null;
+  advisory_source?: string;
   status: "pending" | "matched" | "unmatched" | "ambiguous";
   show_status?: string;
   rating_imdb: number | null;
@@ -4291,28 +4441,6 @@ export interface ResolvedSection {
 
 export interface SectionsResponse {
   sections: ResolvedSection[];
-}
-
-export interface DiscoverRow {
-  type: string;
-  label: string;
-  /** URL kind for the dedicated "see all" page (e.g. "for-you-main", "cluster", "genre"). */
-  section_kind?: string;
-  /** URL key paired with section_kind when needed (cluster index or genre name). */
-  section_key?: string;
-  items: SectionItem[];
-}
-
-export interface DiscoverResponse {
-  rows: DiscoverRow[];
-}
-
-export interface RecommendationSectionResponse {
-  kind: string;
-  key?: string;
-  type: string;
-  label: string;
-  items: SectionItem[];
 }
 
 export interface ResolvedSectionLayout {
@@ -4471,7 +4599,9 @@ export function queryDefinitionFromSectionConfig(
               ? "ebook"
               : config.media_scope === "manga" || config.filter_type === "manga"
                 ? "manga"
-                : undefined;
+                : config.media_scope === "video"
+                  ? "video"
+                  : undefined;
 
   const legacySortField = typeof config.sort === "string" ? config.sort : undefined;
   const legacySortOrder = typeof config.order === "string" ? config.order : undefined;
@@ -4515,20 +4645,12 @@ export interface SectionOverride {
   removed?: boolean;
 }
 
-export interface SaveOverridesRequest {
-  scope: string;
-  library_id?: string;
-  overrides: SectionOverride[];
-}
-
-export interface ProfileSectionOverridesResponse {
-  overrides: SectionOverride[];
-}
-
 export interface SettingsSectionEntry {
   id: string;
   section_type: string;
   title: string;
+  /** The admin row's own title; empty for a profile-built row. Absent on entries built locally. */
+  default_title?: string;
   featured: boolean;
   item_limit: number;
   hidden: boolean;
@@ -4536,10 +4658,6 @@ export interface SettingsSectionEntry {
   customized: boolean;
   position: number;
   config?: Record<string, unknown>;
-}
-
-export interface SettingsSectionsResponse {
-  sections: SettingsSectionEntry[];
 }
 
 // Sidebar Pins
@@ -4593,51 +4711,6 @@ export interface TopUpInviteCodeRequest {
 }
 
 // Emailed invitations
-export type InvitationStatus = "pending" | "accepted" | "expired" | "revoked";
-
-export interface Invitation {
-  id: number;
-  email: string;
-  role: string;
-  access_group_id?: number;
-  library_ids?: number[];
-  create_profile: boolean;
-  show_tour: boolean;
-  note?: string;
-  invited_by: number;
-  invited_by_name?: string;
-  status: InvitationStatus;
-  expires_at: string;
-  accepted_at?: string;
-  accepted_user_id?: number;
-  created_at: string;
-}
-
-export interface CreateInvitationRequest {
-  email: string;
-  role?: string;
-  access_group_id?: number | null;
-  library_ids?: number[] | null;
-  create_profile?: boolean;
-  show_tour?: boolean;
-  note?: string;
-}
-
-export interface SendInvitationResponse {
-  invitation: Invitation;
-  email_sent: boolean;
-  /** Only readable in this response — the server stores just the token hash. */
-  claim_url?: string;
-}
-
-export interface InvitationLookupResponse {
-  email: string;
-  inviter_name?: string;
-  server_name: string;
-  expires_at: string;
-  show_tour: boolean;
-}
-
 // Onboarding tour (server-driven manifest)
 export interface OnboardingSettingOption {
   value: string;
@@ -4685,23 +4758,6 @@ export interface OnboardingState {
   done: boolean;
 }
 
-// API Keys
-export interface AdminAPIKey {
-  id: number;
-  user_id: number;
-  username: string;
-  label: string;
-  key: string;
-  rate_tier: string;
-  created_at: string;
-  last_used_at?: string;
-}
-
-export interface AdminCreateAPIKeyRequest {
-  label: string;
-  user_id?: number;
-}
-
 // Rate Limiting
 export interface RateLimitTierConfig {
   requests_per_second: number;
@@ -4729,8 +4785,8 @@ export interface RateLimitConfig {
   active_backend?: string;
   /**
    * Whether the Redis backend can be selected at all (GET responses only).
-   * Sentinel and REDIS_URL deployments have no stored `redis.url`, so only the
-   * server can answer this.
+   * REDIS_URL deployments have no stored `redis.url`, so only the server can
+   * answer this.
    */
   redis_available?: boolean;
 }
@@ -4815,6 +4871,17 @@ export interface AdminServerStatus {
   restart_requested_at?: string;
   /** Absent on servers predating the dashboard health summary. */
   health?: AdminServerHealth;
+  /**
+   * Resolved artwork backend and whether artwork.storage_backend is locked to
+   * it. Absent on servers predating local artwork storage.
+   */
+  artwork_storage?: AdminArtworkStorageStatus;
+}
+
+export interface AdminArtworkStorageStatus {
+  backend?: string;
+  locked: boolean;
+  private_locked?: boolean;
 }
 
 // GET /admin/stats/playback-activity. `buckets` carries only hours that saw a
@@ -4864,7 +4931,7 @@ export interface AdminTopTitle {
 }
 
 export interface AdminTopProfile {
-  user_id: number;
+  user_id: string | number; // v2 IDs are opaque strings; bridge fixtures retain numbers.
   username: string;
   profile_id: string;
   profile_name: string;
@@ -4913,7 +4980,7 @@ export interface AdminTimeseries {
 // include one-shot web downloads. All zeros with an empty top_users on a
 // deployment where nobody downloads — the widget's empty state, not an error.
 export interface AdminDownloadsUser {
-  user_id: number;
+  user_id: string | number; // v2 IDs are opaque strings; bridge fixtures retain numbers.
   username: string;
   downloads: number;
   total_bytes: number;
@@ -5086,20 +5153,8 @@ export interface SubtitleProviderTestResponse {
 
 // --- Marker Providers ---
 
-export interface MarkerProviderConfig {
-  provider: string;
-  display_name?: string;
-  source_type?: string;
-  plugin_id?: string;
-  plugin_installation_id?: number;
-  capability_id?: string;
-  is_submitter: boolean;
-  fetch_enabled: boolean;
-  fetch_priority: number;
-  contribute_enabled: boolean;
-  contribute_auto_local: boolean;
-  contribute_min_confidence: number;
-}
+export type MarkerProviderConfig =
+  import("@/api/v2/schema").components["schemas"]["AdminMarkerProvider"];
 
 export interface MarkerProviderUpdateRequest {
   fetch_enabled?: boolean;
@@ -5131,44 +5186,12 @@ export interface MarkerProviderValidationResponse {
 
 // --- Task Framework ---
 
-export type TaskState = "idle" | "running" | "cancelling";
-
-export type TaskCategory = "library" | "metadata" | "system";
-
-export type TriggerType = "interval" | "daily" | "weekly" | "startup";
-
-export interface TriggerConfig {
-  type: TriggerType;
-  interval_ms?: number;
-  time_of_day?: string;
-  day_of_week?: number;
-  max_runtime_ms?: number;
-}
-
-export interface ExecutionResult {
-  id: number;
-  task_key: string;
-  started_at: string;
-  completed_at: string;
-  status: "completed" | "failed" | "cancelled";
-  error_message?: string;
-  result_data?: Record<string, unknown>;
-  duration_ms: number;
-}
-
-export interface TaskInfo {
-  key: string;
-  name: string;
-  description: string;
-  category: TaskCategory;
-  state: TaskState;
-  progress: number;
-  progress_message?: string;
-  manual_only?: boolean;
-  last_execution?: ExecutionResult;
-  triggers: TriggerConfig[];
-  next_run_at?: string;
-}
+export type TaskInfo = import("@/api/v2/schema").components["schemas"]["AdminTask"];
+export type TaskState = TaskInfo["state"];
+export type TaskCategory = TaskInfo["category"];
+export type TriggerConfig = import("@/api/v2/schema").components["schemas"]["AdminTaskTrigger"];
+export type TriggerType = TriggerConfig["type"];
+export type ExecutionResult = import("@/api/v2/schema").components["schemas"]["AdminTaskExecution"];
 
 // Match dialog types
 export interface MatchCandidate {
@@ -5210,14 +5233,7 @@ export interface ItemMatchApplyRequest {
 
 // Split/merge (wrong version-grouping repair) types
 
-export interface ItemFile {
-  id: number;
-  library_id: number;
-  file_path: string;
-  observed_root_path: string;
-  season_number?: number;
-  episode_number?: number;
-}
+export type ItemFile = import("@/api/v2/schema").components["schemas"]["AdminItemFile"];
 
 export interface ItemFilesResponse {
   files: ItemFile[];
@@ -5233,13 +5249,7 @@ export interface ItemSplitTarget {
   year?: number;
 }
 
-export interface ItemSplitRequest {
-  file_ids: number[];
-  target: ItemSplitTarget;
-  history_mode?: SplitHistoryMode;
-  persist_override?: boolean;
-  dry_run?: boolean;
-}
+export type ItemSplitRequest = import("@/api/v2/schema").components["schemas"]["AdminSplitRequest"];
 
 export interface ReattributionReport {
   playback_session_log: number;
@@ -5258,35 +5268,11 @@ export interface ReattributionReport {
   }[];
 }
 
-export interface ItemSplitResponse {
-  dry_run: boolean;
-  source_content_id: string;
-  target_content_id: string;
-  target_created: boolean;
-  files_moved: number;
-  root_overrides: string[];
-  file_overrides: string[];
-  episode_pairs: number;
-  reattribution: ReattributionReport;
-}
+export type ItemSplitResponse = import("@/api/v2/schema").components["schemas"]["AdminSplitResult"];
 
 // Image selector types
-export interface RemoteImage {
-  provider_id: string;
-  url: string;
-  original_url: string;
-  type: "poster" | "backdrop" | "logo" | "still";
-  language: string;
-  width: number;
-  height: number;
-  rating: number;
-}
-
-export interface CurrentImages {
-  poster_url?: string;
-  backdrop_url?: string;
-  logo_url?: string;
-}
+export type RemoteImage = import("@/api/v2/schema").components["schemas"]["ItemImageEntry"];
+export type CurrentImages = import("@/api/v2/schema").components["schemas"]["CurrentImages"];
 
 export interface ItemImagesResponse {
   images: RemoteImage[];
@@ -5318,11 +5304,6 @@ export interface UnmatchedLibraryItem {
   status: string;
 }
 
-export interface UnmatchedLibraryItemsResponse {
-  items: UnmatchedLibraryItem[];
-  total: number;
-}
-
 export interface FilesystemBrowseEntry {
   name: string;
   path: string;
@@ -5341,99 +5322,4 @@ export interface PolicyCapability {
   editor_available: boolean;
   decision_types: string[];
   generation: number;
-}
-
-export interface PolicyVendorModule {
-  path: string;
-  source: string;
-}
-
-export interface PolicyCompileIssue {
-  row: number;
-  col: number;
-  message: string;
-}
-
-export interface PolicyVersionSummary {
-  id: number;
-  document_id: number;
-  version_number: number;
-  source_sha256: string;
-  compiled_ok: boolean;
-  compile_error?: string;
-  created_by_user_id?: number;
-  comment?: string;
-  created_at: string;
-}
-
-export interface PolicyVersion extends PolicyVersionSummary {
-  source?: string;
-}
-
-export interface PolicyDocument {
-  id: number;
-  domain: string;
-  name: string;
-  enabled: boolean;
-  active_version_id?: number;
-  active_version?: PolicyVersion;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface PolicyCreateVersionResult {
-  id: number;
-  version_number: number;
-  compiled_ok: boolean;
-}
-
-export interface PolicyActivateVersionResult {
-  active_version_id: number;
-  generation: number;
-}
-
-export interface PolicySetDocumentEnabledResult {
-  id: number;
-  enabled: boolean;
-  generation: number;
-}
-
-export interface PolicyValidateResult {
-  compiled_ok: boolean;
-  errors: PolicyCompileIssue[];
-}
-
-export interface PolicySimulateRequest {
-  domain: string;
-  source?: string;
-  input: unknown;
-}
-
-export interface PolicySimulateResult {
-  decision: unknown;
-  eval_time_ns: number;
-  generation: number;
-}
-
-export interface PolicyDecisionEntry {
-  id: number;
-  timestamp: string;
-  decision_name: string;
-  policy_generation: number;
-  user_id?: number;
-  profile_id?: string;
-  session_id?: string;
-  request_id?: string;
-  node_id?: string;
-  allowed: boolean | null;
-  eval_time_ns: number;
-  input_digest: string;
-  input_sample?: unknown;
-  result_sample?: unknown;
-  error?: string;
-}
-
-export interface PolicyDecisionListResult {
-  entries: PolicyDecisionEntry[];
-  next_cursor?: string;
 }

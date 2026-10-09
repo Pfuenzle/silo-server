@@ -1,26 +1,23 @@
+// @vitest-environment node
+
 import { describe, expect, it } from "vitest";
 
-import { buildLoginRetryHref, sanitizeAuthRedirect } from "./authRedirect";
+import { guardRedirectTarget, sanitizeAuthRedirect } from "./authRedirect";
 
-describe("sanitizeAuthRedirect", () => {
-  it.each(["https://evil.example", "//evil.example", "/\\evil.example", "/%5Cevil.example"])(
-    "rejects external redirect form %s",
-    (value) => {
-      expect(sanitizeAuthRedirect(value)).toBeNull();
-    },
-  );
+describe("guardRedirectTarget", () => {
+  it("carries the requested page, query included, as the redirect", () => {
+    expect(
+      guardRedirectTarget("/profiles", { pathname: "/admin/users/7", search: "?tab=devices" }),
+    ).toBe("/profiles?redirect=%2Fadmin%2Fusers%2F7%3Ftab%3Ddevices");
+  });
 
-  it.each(["/%2Fevil.example", "/library\nnext"])(
-    "rejects encoded separators and control characters in %s",
-    (value) => {
-      expect(sanitizeAuthRedirect(value)).toBeNull();
-    },
-  );
+  it("adds nothing for the home page", () => {
+    expect(guardRedirectTarget("/login", { pathname: "/", search: "" })).toBe("/login");
+  });
 
-  it("preserves a safe same-origin path, query, and fragment", () => {
-    const path = "/library?tab=new#recent";
-
-    expect(sanitizeAuthRedirect(path)).toBe(path);
-    expect(buildLoginRetryHref(path)).toBe("/login?redirect=%2Flibrary%3Ftab%3Dnew%23recent");
+  it("round-trips through the sanitizer the profile picker applies", () => {
+    const target = guardRedirectTarget("/profiles", { pathname: "/admin/users/7", search: "" });
+    const redirect = new URLSearchParams(target.split("?")[1]).get("redirect");
+    expect(sanitizeAuthRedirect(redirect)).toBe("/admin/users/7");
   });
 });

@@ -31,12 +31,6 @@ import { adminKeys } from "../keys";
 import { refreshRatingChoice } from "../ratingsSurfaceRefresh";
 import { refreshAuthProviders } from "../authProviders";
 
-export {
-  usePluginAuthGroupMappings,
-  usePreviewPluginAuthGroupMappings,
-  useReplacePluginAuthGroupMappings,
-} from "./pluginAuthMappings";
-
 const ADMIN_STALE_TIME = 30_000;
 export const CHECK_PLUGIN_UPDATES_TASK_KEY = "check_plugin_updates";
 

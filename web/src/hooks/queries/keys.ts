@@ -51,6 +51,7 @@ export const itemKeys = {
     ["items", "detail", id, libraryId ?? "default"] as const,
   watchDetail: (id: string, fileId?: number, libraryId?: number) =>
     ["items", "watchDetail", id, fileId ?? "default", libraryId ?? "default"] as const,
+  watchTrickplay: (id: string, fileId: number) => ["items", "watchTrickplay", id, fileId] as const,
   markers: (id: string) => ["items", "markers", id] as const,
   browse: (params: BrowseParams) => ["items", "browse", params] as const,
   infiniteBrowse: (params: InfiniteBrowseParams) => ["items", "infiniteBrowse", params] as const,
@@ -95,6 +96,7 @@ export const catalogKeys = {
 export const favoriteKeys = {
   all: ["favorites"] as const,
   list: () => ["favorites", "list"] as const,
+  exists: () => ["favorites", "exists"] as const,
   check: (itemId: string) => ["favorites", "check", itemId] as const,
 };
 
@@ -102,6 +104,8 @@ export const watchlistKeys = {
   all: ["watchlist"] as const,
   list: () => ["watchlist", "list"] as const,
   check: (itemId: string) => ["watchlist", "check", itemId] as const,
+  /** Watchlist entries for titles the library doesn't have yet. */
+  titles: () => ["watchlist", "titles"] as const,
 };
 
 export const historyKeys = {
@@ -109,16 +113,22 @@ export const historyKeys = {
   list: () => ["history", "list"] as const,
 };
 
+export const shuffleKeys = {
+  all: ["shuffles"] as const,
+  detail: (shuffleId: string) => ["shuffles", shuffleId] as const,
+};
+
 export const collectionKeys = {
   all: ["collections"] as const,
   list: () => ["collections", "list"] as const,
   server: () => ["collections", "server"] as const,
   items: (collectionId: string) => ["collections", "items", collectionId] as const,
+  /** The list, each own manual collection marked with whether it holds the title. */
+  containing: (contentId: string) => ["collections", "containing", contentId] as const,
   preview: (scope: "user" | "admin", fingerprint: string) =>
     ["collections", "preview", scope, fingerprint] as const,
   templates: () => ["collections", "templates"] as const,
   mdblistSearch: (query: string) => ["collections", "mdblist", "search", query] as const,
-  mdblistTop: () => ["collections", "mdblist", "top"] as const,
 };
 
 export const requestKeys = {
@@ -169,7 +179,9 @@ export const compatKeys = {
 
 export const personKeys = {
   all: ["people"] as const,
-  search: (query: string, limit = 20) => ["people", "search", query, limit] as const,
+  searchCapabilities: () => ["people", "search-capabilities"] as const,
+  search: (query: string, limit = 20, mediaScope?: string) =>
+    ["people", "search", query, limit, mediaScope ?? "all"] as const,
   detail: (id: string) => ["people", "detail", id] as const,
   catalog: (
     id: string,
@@ -242,6 +254,7 @@ export const notificationKeys = {
 export const historyImportKeys = {
   all: ["history-imports"] as const,
   sources: () => ["history-imports", "sources"] as const,
+  capability: () => ["history-imports", "capability"] as const,
   runs: (limit = 10) => ["history-imports", "runs", limit] as const,
   run: (id?: string) => ["history-imports", "run", id] as const,
   plexCheck: (sessionId?: string) => ["history-imports", "plex-check", sessionId] as const,
@@ -280,6 +293,8 @@ export const sectionKeys = {
     ["sections", "library", libraryId, "items", sectionId] as const,
   adminList: (scope: string, libraryId?: number) =>
     ["sections", "admin", scope, libraryId] as const,
+  /** Mutation key on every admin row write, so the Home rows list can wait for them. */
+  adminWrite: () => ["sections", "admin-write"] as const,
   profileOverrides: (scope: string, libraryId?: string) =>
     ["sections", "profile", scope, libraryId] as const,
   profileOverridesRaw: (scope: string, libraryId?: string) =>
@@ -301,6 +316,7 @@ export const ratingKeys = {
 export const subtitleKeys = {
   all: ["subtitles"] as const,
   downloaded: (mediaFileId: number) => ["subtitles", "downloaded", mediaFileId] as const,
+  providerStatus: () => ["subtitles", "provider-status"] as const,
 };
 
 export const recKeys = {
@@ -334,12 +350,13 @@ export const downloadKeys = {
 export const themeKeys = {
   all: ["theme"] as const,
   adminCss: () => ["theme", "admin-css"] as const,
-  catalogIndex: () => ["theme", "catalog"] as const,
   branding: () => ["theme", "branding"] as const,
 };
 
 export const adminKeys = {
   users: () => ["admin", "users"] as const,
+  // Outside users(): saving an account does not change the server defaults.
+  policyDefaults: () => ["admin", "policyDefaults"] as const,
   accessGroups: () => ["admin", "accessGroups"] as const,
   accessGroup: (id: number) => ["admin", "accessGroups", id] as const,
   serverNotificationChannels: () => ["admin", "notifications", "serverChannels"] as const,
@@ -357,8 +374,12 @@ export const adminKeys = {
   deviceDetail: (userId: number, deviceId: string) =>
     ["admin", "devices", userId, deviceId] as const,
   libraries: () => ["admin", "libraries"] as const,
-  libraryRoots: (libraryId?: number, state?: string) =>
-    ["admin", "libraries", "roots", libraryId ?? "all", state ?? "all"] as const,
+  libraryRealtimeMonitoring: () => ["admin", "libraries", "realtimeMonitoring"] as const,
+  libraryCapabilities: () => ["admin", "libraries", "capabilities"] as const,
+  trickplayLibraries: () => ["admin", "trickplay", "libraries"] as const,
+  itemTrickplay: (itemId: string) => ["admin", "trickplay", "items", itemId] as const,
+  libraryRoots: (libraryId?: number, state?: string, search?: string) =>
+    ["admin", "libraries", "roots", libraryId ?? "all", state ?? "all", search ?? ""] as const,
   libraryMatchQueueStatuses: () => ["admin", "libraries", "metadataMatchQueue"] as const,
   libraryMatchQueueDetail: (libraryId: number) =>
     ["admin", "libraries", "metadataMatchQueue", libraryId] as const,
@@ -369,17 +390,23 @@ export const adminKeys = {
   catalogImportSources: () => ["admin", "catalog", "importSources"] as const,
   localImportSources: () => ["admin", "catalog", "localImportSources"] as const,
   collections: (libraryId?: number) => ["admin", "collections", libraryId] as const,
+  /** The admin Home and library page rows that show a server collection. */
+  collectionRows: (collectionId: string) => ["admin", "collections", "rows", collectionId] as const,
   collectionGroups: (libraryId?: number) => ["admin", "collectionGroups", libraryId] as const,
   collectionTemplates: () => ["admin", "collections", "templates"] as const,
   collectionTemplateBundles: () => ["admin", "collections", "templateBundles"] as const,
+  // Outside "collections": refreshing the admin collections after a write
+  // doesn't re-run a dry run; Starter packs checks its pack again itself.
+  starterPackDryRun: (packId: string, body: unknown) =>
+    ["admin", "starterPackDryRun", packId, body] as const,
   libraryProviders: (id: number) => ["admin", "libraries", id, "providers"] as const,
   libraryProviderDefaults: (libraryType: string) =>
     ["admin", "libraries", "provider-defaults", libraryType] as const,
   nodes: () => ["admin", "nodes"] as const,
   stats: () => ["admin", "stats"] as const,
   sessions: () => ["admin", "sessions"] as const,
+  downloadPreparations: () => ["admin", "downloadPreparations"] as const,
   serverSettings: () => ["admin", "serverSettings"] as const,
-  credentialProviderFallback: () => ["admin", "auth", "credentialProviderFallback"] as const,
   serverStatus: () => ["admin", "serverStatus"] as const,
   dashboardLayout: () => ["admin", "dashboard", "layout"] as const,
   // Dashboard insight endpoints are keyed by their window so a 1h tile and a
@@ -396,6 +423,10 @@ export const adminKeys = {
   restartKeys: () => ["admin", "restartKeys"] as const,
   catalogSearchStatus: () => ["admin", "catalogSearchStatus"] as const,
   jellyfinCompatStatus: () => ["admin", "jellyfinCompatStatus"] as const,
+  networkAccessCapabilities: () => ["admin", "networkAccess", "capabilities"] as const,
+  networkAccessStatusRoot: () => ["admin", "networkAccess", "status"] as const,
+  networkAccessStatus: (provider: string) =>
+    ["admin", "networkAccess", "status", provider] as const,
   requestsRoot: () => ["admin", "requests"] as const,
   // The queue, its view counts, and a request's history sit under
   // requestsRoot, so every request action refreshes them.
@@ -454,14 +485,14 @@ export const adminKeys = {
   policyCapability: () => ["policy", "capability"] as const,
   policyVendor: () => ["admin", "policy", "vendor"] as const,
   policyDocuments: () => ["admin", "policy", "documents"] as const,
-  policyDocument: (id?: number) => ["admin", "policy", "documents", id ?? "none"] as const,
-  policyVersions: (id?: number) =>
+  policyDocument: (id?: string) => ["admin", "policy", "documents", id ?? "none"] as const,
+  policyVersions: (id?: string) =>
     ["admin", "policy", "documents", id ?? "none", "versions"] as const,
-  policyVersion: (id?: number, version?: number) =>
+  policyVersion: (id?: string, version?: string) =>
     ["admin", "policy", "documents", id ?? "none", "versions", version ?? "none"] as const,
   policyDecisions: (params: Record<string, unknown>) =>
     ["admin", "policy", "decisions", params] as const,
-  policyDecision: (id?: number) => ["admin", "policy", "decisions", id ?? "none"] as const,
+  policyDecision: (id?: string) => ["admin", "policy", "decisions", id ?? "none"] as const,
   subtitleProviders: () => ["admin", "subtitleProviders"] as const,
   downloadedSubtitles: (params: {
     provider?: string;
@@ -483,9 +514,14 @@ export const adminKeys = {
     ["admin", "historyImportAdminRuns", "detail", id] as const,
   activeScans: () => ["admin", "activeScans"] as const,
   tasks: () => ["admin", "tasks"] as const,
+  // Under tasks() so every task-list invalidation also refreshes it.
+  tasksIncludingHidden: () => ["admin", "tasks", { includeHidden: true }] as const,
   task: (key: string) => ["admin", "tasks", key] as const,
   taskHistory: (key: string) => ["admin", "tasks", key, "history"] as const,
   taskMetrics: (key: string) => ["admin", "tasks", key, "metrics"] as const,
+  markerCapabilities: () => ["admin", "markerCapabilities"] as const,
+  ratingSources: () => ["admin", "ratingSources"] as const,
+  ratingSourceCapabilities: () => ["admin", "ratingSourceCapabilities"] as const,
   markerProviders: () => ["admin", "markerProviders"] as const,
   markerProvider: (provider: string) => ["admin", "markerProviders", provider] as const,
   markerProviderValidation: (provider: string) =>
@@ -498,18 +534,9 @@ export const adminKeys = {
   pluginCatalog: () => ["admin", "plugins", "catalog"] as const,
   pluginCatalogSettings: () => ["admin", "plugins", "catalogSettings"] as const,
   pluginInstallations: () => ["admin", "plugins", "installations"] as const,
-  pluginAuthGroupMappings: (installationId: number, capabilityId: string) =>
-    [
-      "admin",
-      "plugins",
-      "installations",
-      installationId,
-      "auth-group-mappings",
-      capabilityId,
-    ] as const,
-  unmatchedItems: (page?: number, search?: string) =>
-    page != null
-      ? (["admin", "libraries", "unmatchedItems", page, search ?? ""] as const)
+  unmatchedItems: (search?: string) =>
+    search !== undefined
+      ? (["admin", "libraries", "unmatchedItems", search] as const)
       : (["admin", "libraries", "unmatchedItems"] as const),
   itemImages: (id: string) => ["admin", "items", id, "images"] as const,
   buildInfo: () => ["admin", "system", "buildInfo"] as const,

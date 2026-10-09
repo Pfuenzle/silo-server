@@ -1,113 +1,85 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router";
-import { api, setAccessToken, setRefreshToken } from "@/api/client";
-import type { RefreshResponse, User } from "@/api/types";
-import { AuthBackground } from "@/components/auth/AuthBackground";
-import { OAuthFailure } from "@/components/auth/OAuthFailure";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { setAccessToken, setRefreshToken } from "@/api/client";
+import { userFromAccount } from "@/api/v2/account";
+import { v2, V2ProblemError } from "@/api/v2/request";
 import { useAuth } from "@/hooks/useAuth";
-import { buildLoginRetryHref, sanitizeAuthRedirect } from "@/lib/authRedirect";
+import { sanitizeAuthRedirect } from "@/lib/authRedirect";
 
-type OAuthCompleteResponse = RefreshResponse & {
-  next: string;
-};
-
-async function completeOAuthCode(code: string): Promise<OAuthCompleteResponse> {
-  const res = await fetch("/api/v1/auth/oauth/complete", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code }),
-  });
-  if (!res.ok) {
-    throw new Error("Sign-in response expired. Please try again.");
-  }
-  return (await res.json()) as OAuthCompleteResponse;
+/**
+ * A failed completion goes back to the login page with a reason= code the
+ * page explains. With error= set the page never redirects to the provider
+ * on its own, so a completion that keeps failing cannot loop.
+ */
+function loginFailureHref(reason: string) {
+  return `/login?error=oauth_failed&reason=${reason}`;
 }
 
 export default function OAuthComplete() {
   const navigate = useNavigate();
-  const { completeLogin, resetAuth } = useAuth();
-  const [completionRequest] = useState(() => {
-    const params = new URLSearchParams(window.location.search);
-    return {
-      code: params.get("code"),
-      next: sanitizeAuthRedirect(params.get("next")),
-    } as const;
-  });
-  const [retryNext, setRetryNext] = useState(completionRequest.next);
-  const [failed, setFailed] = useState(() => !completionRequest.code);
+  const { completeLogin } = useAuth();
+  // The code is single use and leaves the address bar once read, so the
+  // completion runs once; only leaving the page abandons it.
+  const started = useRef(false);
+  const unmounted = useRef(false);
+  useEffect(
+    () => () => {
+      unmounted.current = true;
+    },
+    [],
+  );
 
   useEffect(() => {
-    const code = completionRequest.code;
+    if (started.current) return;
+    started.current = true;
+    const code = new URLSearchParams(window.location.search).get("code");
     if (!code) {
-      resetAuth();
+      // Reached without the server's redirect, e.g. reloaded after use.
+      navigate(loginFailureHref("state_invalid"), { replace: true });
       return;
     }
     window.history.replaceState(null, "", window.location.pathname);
 
-    let cancelled = false;
-    let tokensPersisted = false;
-    let loginCompleted = false;
-    (async () => {
+    void (async () => {
+      // The completion code lives 60 seconds and works once; the server
+      // refusing it means it expired or was already used.
+      let redeemed = false;
       try {
-        const tokens = await completeOAuthCode(code);
-        if (cancelled) return;
+        const tokens = await v2("POST /api/v2/auth/oauth/complete", { body: { code } });
+        redeemed = true;
+        if (unmounted.current) return;
         const next = sanitizeAuthRedirect(tokens.next) || "/";
-        setRetryNext(next);
         setAccessToken(tokens.access_token);
         setRefreshToken(tokens.refresh_token);
-        tokensPersisted = true;
-        const user = await api<User>("/auth/me");
-        if (cancelled) return;
+        const user = userFromAccount(await v2("GET /api/v2/account/me"));
+        if (unmounted.current) return;
         completeLogin({
           access_token: tokens.access_token,
           refresh_token: tokens.refresh_token,
           expires_in: tokens.expires_in,
           user,
         });
-        loginCompleted = true;
         navigate(next, { replace: true });
-      } catch {
-        if (!cancelled) {
-          resetAuth();
-          setFailed(true);
+      } catch (err) {
+        if (!unmounted.current) {
+          setAccessToken(null);
+          setRefreshToken(null);
+          const refused = !redeemed && err instanceof V2ProblemError;
+          navigate(loginFailureHref(refused ? "session_expired" : "login_failed"), {
+            replace: true,
+          });
         }
       }
     })();
-    return () => {
-      cancelled = true;
-      if (tokensPersisted && !loginCompleted) {
-        resetAuth();
-      }
-    };
-  }, [completeLogin, completionRequest.code, navigate, resetAuth]);
-
-  if (failed) {
-    return (
-      <main className="auth-shell">
-        <AuthBackground />
-        <Card className="auth-card glass panel-border w-full max-w-md border-0">
-          <CardHeader>
-            <CardTitle className="text-3xl font-extrabold tracking-[-0.04em]">Sign in</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <OAuthFailure
-              onRetry={() => navigate(buildLoginRetryHref(retryNext), { replace: true })}
-            />
-          </CardContent>
-        </Card>
-      </main>
-    );
-  }
+  }, [completeLogin, navigate]);
 
   return (
-    <main className="auth-shell">
-      <AuthBackground />
+    <div className="auth-shell">
       <div
         className="border-primary h-8 w-8 animate-spin rounded-full border-b-2"
         role="status"
-        aria-label="Completing sign in"
+        aria-label="Signing in"
       />
-    </main>
+    </div>
   );
 }
