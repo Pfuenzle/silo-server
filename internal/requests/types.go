@@ -26,6 +26,12 @@ const (
 type Status string
 
 const (
+	SubmissionStateInFlight = "in_flight"
+	SubmissionStateFailed = "failed"
+	SubmissionStateFulfilled = "fulfilled"
+)
+
+const (
 	StatusPending     Status = "pending"
 	StatusApproved    Status = "approved"
 	StatusQueued      Status = "queued"
@@ -254,6 +260,9 @@ type EffectivePolicy struct {
 
 type Request struct {
 	ID                   string    `json:"id"`
+	FulfillmentKey       string    `json:"-"`
+	SubmissionState      string    `json:"-"`
+	SubmissionStartedAt  *time.Time `json:"-"`
 	Provider             string    `json:"provider"`
 	MediaType            MediaType `json:"media_type"`
 	TMDBID               int       `json:"tmdb_id"`
@@ -280,6 +289,15 @@ type Request struct {
 	Targets          []Target   `json:"targets,omitempty"`
 	ExternalID       string     `json:"external_id,omitempty"`
 	ExternalStatus   string     `json:"external_status,omitempty"`
+	ProviderItemID   string     `json:"provider_item_id,omitempty"`
+	ExternalLibraryID string    `json:"external_library_id,omitempty"`
+	ExternalDownloadID string   `json:"external_download_id,omitempty"`
+	ExternalDetail   string     `json:"external_detail,omitempty"`
+	ImportedPath     string     `json:"-"`
+	ScanRunID        string     `json:"-"`
+	SiloAudiobookID  string     `json:"silo_audiobook_id,omitempty"`
+	SiloAudiobookLink string    `json:"silo_audiobook_link,omitempty"`
+	Retryable        bool       `json:"retryable"`
 	LibraryContentID string     `json:"library_content_id,omitempty"`
 	LastError        string     `json:"last_error,omitempty"`
 	CreatedAt        time.Time  `json:"created_at"`
@@ -613,6 +631,18 @@ type FulfillmentStatus struct {
 	ExternalID      string
 	ExternalStatus  string
 	Message         string
+}
+
+type RequestLifecycle struct {
+	ExternalLibraryID string
+	ExternalDownloadID string
+	ExternalStatus string
+	ExternalDetail string
+	ImportedPath string
+	ScanRunID string
+	SiloAudiobookID string
+	SiloAudiobookLink string
+	Retryable bool
 }
 
 type ReconcileResult struct {

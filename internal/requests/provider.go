@@ -35,6 +35,7 @@ type RouterTarget struct {
 	ExternalStatus string
 	Status         Status
 	Message        string
+	Metadata       *RouterMetadata `json:"metadata,omitempty"`
 }
 
 type RouterTargetRef struct {
@@ -52,6 +53,13 @@ type RouterTargetStatus struct {
 	// Progress is set by a plugin that declares reports_download_progress
 	// while the target has downloads in flight; nil means none.
 	Progress *DownloadProgress
+	Metadata *RouterMetadata `json:"metadata,omitempty"`
+}
+
+type RouterMetadata struct {
+	ExternalCorrelationID string `json:"external_correlation_id,omitempty"`
+	StatusText string `json:"status_text,omitempty"`
+	ImportedPath string `json:"imported_path,omitempty"`
 }
 
 type RouterOption struct {

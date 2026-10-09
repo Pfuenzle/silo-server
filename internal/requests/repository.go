@@ -397,6 +397,20 @@ func (r *Repository) insertRequest(
 	return req, nil
 }
 
+func (r *Repository) SetRequestSubmissionState(ctx context.Context, id, state string) (*Request, error) {
+	if _, err := r.pool.Exec(ctx, `UPDATE media_requests SET submission_state = $2, submission_started_at = CASE WHEN $2 = $3 THEN now() ELSE NULL END, updated_at = now() WHERE id = $1`, id, state, SubmissionStateInFlight); err != nil {
+		return nil, err
+	}
+	return r.GetRequest(ctx, id)
+}
+
+func (r *Repository) UpdateRequestLifecycle(ctx context.Context, id string, lifecycle RequestLifecycle) (*Request, error) {
+	if _, err := r.pool.Exec(ctx, `UPDATE media_requests SET external_library_id = COALESCE(NULLIF($2, ''), external_library_id), external_download_id = COALESCE(NULLIF($3, ''), external_download_id), external_status = COALESCE(NULLIF($4, ''), external_status), external_detail = COALESCE(NULLIF($5, ''), external_detail), imported_path = COALESCE(NULLIF($6, ''), imported_path), scan_run_id = COALESCE(NULLIF($7, ''), scan_run_id), silo_audiobook_id = COALESCE(NULLIF($8, ''), silo_audiobook_id), silo_audiobook_link = COALESCE(NULLIF($9, ''), silo_audiobook_link), retryable = $10, updated_at = now() WHERE id = $1`, id, lifecycle.ExternalLibraryID, lifecycle.ExternalDownloadID, lifecycle.ExternalStatus, lifecycle.ExternalDetail, lifecycle.ImportedPath, lifecycle.ScanRunID, lifecycle.SiloAudiobookID, lifecycle.SiloAudiobookLink, lifecycle.Retryable); err != nil {
+		return nil, err
+	}
+	return r.GetRequest(ctx, id)
+}
+
 func (r *Repository) GetRequest(ctx context.Context, id string) (*Request, error) {
 	req, err := scanRequest(r.pool.QueryRow(ctx, requestSelectSQL()+`
 		WHERE id = $1

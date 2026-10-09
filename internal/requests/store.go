@@ -71,6 +71,8 @@ type Store interface {
 	// was withdrawn, completed or claimed again gets ErrInvalidState and
 	// writes nothing.
 	RecordSubmission(ctx context.Context, id string, leaseUntil time.Time, targets []Target, actor Viewer) (*Request, error)
+	SetRequestSubmissionState(ctx context.Context, id, state string) (*Request, error)
+	UpdateRequestLifecycle(ctx context.Context, id string, lifecycle RequestLifecycle) (*Request, error)
 	// MarkReconciled stamps last_reconciled_at so the reconcile pass rotates
 	// through every candidate.
 	MarkReconciled(ctx context.Context, id string) error

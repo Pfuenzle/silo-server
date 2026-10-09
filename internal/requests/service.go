@@ -2272,6 +2272,9 @@ func (s *Service) submitApprovedRequest(ctx context.Context, req Request, actor 
 	if submitErr == nil {
 		return submitted, nil
 	}
+	if claimed.MediaType == MediaTypeAudiobook {
+		return s.markSubmissionFailed(ctx, *claimed, actor, submitErr)
+	}
 	if claimed.SubmitAttempts >= maxSubmitAttempts {
 		return s.markSubmissionFailed(ctx, *claimed, actor, submitErr)
 	}
@@ -2299,6 +2302,11 @@ func (s *Service) submitApprovedRequest(ctx context.Context, req Request, actor 
 // holds. missingSeasons marks a request for seasons of a series already in the
 // library, which only a router that takes seasons may receive.
 func (s *Service) submitClaimed(ctx context.Context, req Request, actor Viewer, fc *fulfillContext, missingSeasons bool) (*Request, error) {
+	if req.MediaType == MediaTypeAudiobook {
+		if _, err := s.store.SetRequestSubmissionState(ctx, req.ID, SubmissionStateInFlight); err != nil {
+			return nil, err
+		}
+	}
 	// Resolve before planSubmission drops failed targets, so a failed save
 	// leaves their error records in place.
 	if err := s.ensureSeriesTVDBID(ctx, &req); err != nil {
@@ -2653,6 +2661,18 @@ func (s *Service) recordTargets(ctx context.Context, req Request, actor Viewer, 
 		if status == StatusFailed {
 			message = explainSubmissionFailure(req, message)
 		}
+		if req.MediaType == MediaTypeAudiobook && rt.Metadata != nil {
+			if _, err := s.store.UpdateRequestLifecycle(ctx, req.ID, RequestLifecycle{
+				ExternalLibraryID: rt.Metadata.ExternalCorrelationID,
+				ExternalDownloadID: rt.ExternalID,
+				ExternalStatus: rt.ExternalStatus,
+				ExternalDetail: rt.Metadata.StatusText,
+				ImportedPath: rt.Metadata.ImportedPath,
+				Retryable: status == StatusFailed,
+			}); err != nil {
+				return nil, err
+			}
+		}
 		record = append(record, Target{
 			IntegrationID: rt.ConnectionID, IntegrationKind: connKind[rt.ConnectionID],
 			Quality: rt.Quality, IsAnime: req.IsAnime, Status: status,
@@ -2771,6 +2791,19 @@ func (s *Service) markSubmissionFailed(ctx context.Context, claimed Request, act
 			return s.store.GetRequest(ctx, claimed.ID)
 		}
 		return nil, fmt.Errorf("submit request failed: %w; mark failed: %v", submitErr, err)
+	}
+	if claimed.MediaType == MediaTypeAudiobook {
+		failed, err = s.store.UpdateRequestLifecycle(ctx, claimed.ID, RequestLifecycle{
+			ExternalLibraryID: failed.ExternalLibraryID, ExternalDownloadID: failed.ExternalDownloadID,
+			ExternalStatus: failed.ExternalStatus, ExternalDetail: submitErr.Error(), Retryable: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		failed, err = s.store.SetRequestSubmissionState(ctx, claimed.ID, SubmissionStateFailed)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return failed, nil
 }
