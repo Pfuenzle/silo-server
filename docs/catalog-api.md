@@ -12,6 +12,8 @@ to server rows. Paging uses that effective row's configuration. A row hidden or
 removed by the profile, a row belonging to another profile, or a row in an
 inaccessible library answers `404`, as an unknown section does.
 
+The default **Recently Released Episodes** row for a series library keeps past-dated episodes eligible and includes future-dated episodes only through tomorrow (inclusive). Its release-date filter uses the episode air date and applies to both row loads and catalog paging; other custom section filters remain unchanged.
+
 ## People search
 
 `GET /api/v2/catalog/people` (`listPeople`) accepts a name query in `q` and

@@ -2204,20 +2204,23 @@ func isGeneratedRecentEpisodesConfig(probe map[string]json.RawMessage) bool {
 	return source == "home_library_recent" && kind == "recently_released_episodes"
 }
 
-// CapGeneratedRecentEpisodes adds the rolling four-day future boundary used by
-// generated home episode sections. It is idempotent so all section parsers can
-// apply the policy without duplicating the rule.
+// CapGeneratedRecentEpisodes makes tomorrow the inclusive future boundary for generated home episode sections.
+// Its mandatory AND-matched group keeps other OR filters from bypassing the cap.
 func CapGeneratedRecentEpisodes(def QueryDefinition) QueryDefinition {
-	for _, group := range def.Groups {
-		for _, rule := range group.Rules {
-			if rule.Field == "release_date" && rule.Op == "in_next" && rule.Value == "4d" {
-				return def
-			}
+	def = def.Normalize()
+	def.Match = "all"
+	for i := range def.Groups {
+		group := &def.Groups[i]
+		if len(group.Rules) != 1 || group.Rules[0].Field != "release_date" || group.Rules[0].Op != "in_next" {
+			continue
 		}
+		group.Match = "all"
+		group.Rules[0].Value = "1d"
+		return def
 	}
 	def.Groups = append(def.Groups, QueryGroup{
 		Match: "all",
-		Rules: []QueryRule{{Field: "release_date", Op: "in_next", Value: "4d"}},
+		Rules: []QueryRule{{Field: "release_date", Op: "in_next", Value: "1d"}},
 	})
 	return def
 }

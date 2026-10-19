@@ -315,8 +315,11 @@ func TestDefaultLibrarySectionsForTypeSeries(t *testing.T) {
 	assertQueryDefinition(t, got[3].Config, catalog.QueryDefinition{
 		MediaScope: "episode",
 		Match:      "all",
-		Groups:     []catalog.QueryGroup{},
-		Sort:       catalog.QuerySort{Field: "release_date", Order: "desc"},
+		Groups: []catalog.QueryGroup{{
+			Match: "all",
+			Rules: []catalog.QueryRule{{Field: "release_date", Op: "in_next", Value: "1d"}},
+		}},
+		Sort: catalog.QuerySort{Field: "release_date", Order: "desc"},
 	})
 	assertQueryDefinition(t, got[4].Config, catalog.QueryDefinition{
 		MediaScope: "series",
