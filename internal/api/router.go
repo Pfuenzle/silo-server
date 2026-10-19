@@ -1007,6 +1007,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 			requestsTMDB,
 			mediarequests.NewCatalogPresence(itemRepo, providerIDRepo),
 		)
+		ConfigureAudiobookRequests(requestSvc, deps, itemRepo, viewerResolver)
 		requestSvc.SetTitleObserver(watchlistTitles)
 		watchlistRequestWithdrawer = requestSvc
 		requestSvc.SetWatchlistPreference(mediarequests.StoreWatchlistPreference{Stores: deps.UserStoreProvider})

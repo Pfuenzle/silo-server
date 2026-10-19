@@ -3,6 +3,12 @@ package api
 import (
 	"context"
 	"errors"
+	"github.com/Silo-Server/silo-server/internal/access"
+	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/autoscan"
+	"github.com/Silo-Server/silo-server/internal/catalog"
+	"github.com/Silo-Server/silo-server/internal/metadata"
+	"github.com/Silo-Server/silo-server/internal/scantrigger"
 
 	"github.com/Silo-Server/silo-server/internal/plugins"
 	mediarequests "github.com/Silo-Server/silo-server/internal/requests"
@@ -51,4 +57,51 @@ func AttachRequestRouter(svc *mediarequests.Service, pluginService *plugins.Serv
 		return
 	}
 	svc.SetRouterProvider(mediarequests.NewPluginRouterProvider(PluginRequestRouterAdapter{pluginService}))
+}
+
+// ConfigureAudiobookRequests gives HTTP submissions the same provider search
+// and scan-confirmed import lifecycle as the background reconcile service.
+func ConfigureAudiobookRequests(svc *mediarequests.Service, deps Dependencies, items *catalog.ItemRepository, resolver apimw.ViewerResolver) {
+	if deps.FolderRepo != nil && deps.LibraryScanQueue != nil && deps.FileRepo != nil && items != nil {
+		linker := mediarequests.NewAudiobookImportLinker(deps.LibraryScanQueue, scantrigger.NewResolver(deps.FolderRepo), deps.FileRepo, items, nil)
+		linker.SetPathMapperFactory(func(config map[string]any) (mediarequests.PathMapper, error) {
+			return autoscan.NewPathMapperFromConfig(config)
+		})
+		svc.SetAudiobookImportLinker(linker)
+	}
+	svc.SetAudiobookSearcher(mediarequests.AudiobookSearchFunc(func(ctx context.Context, viewer mediarequests.Viewer, query string) ([]mediarequests.AudiobookSearchResult, error) {
+		out := make([]mediarequests.AudiobookSearchResult, 0, 24)
+		if resolver != nil && items != nil {
+			scope, err := resolver.Resolve(ctx, access.ResolveInput{UserID: viewer.UserID, ProfileID: viewer.ProfileID, SkipPINVerification: true})
+			if err != nil {
+				return nil, err
+			}
+			filter := catalog.AccessFilter{UserID: viewer.UserID, ProfileID: viewer.ProfileID, MaturityLimits: scope.MaturityLimits, AllowedLibraryIDs: scope.AllowedLibraryIDs, DisabledLibraryIDs: scope.DisabledLibraryIDs}
+			matches, _, err := items.Search(ctx, query, []string{"audiobook"}, 20, 0, filter)
+			if err != nil {
+				return nil, err
+			}
+			for _, item := range matches {
+				out = append(out, mediarequests.AudiobookSearchResult{Provider: "silo", ProviderItemID: item.ContentID, Available: true, Title: item.Title, Year: item.Year, Overview: item.Overview})
+			}
+		}
+		searcher, ok := deps.MetadataService.(interface {
+			SearchAudiobookProviders(context.Context, string) ([]metadata.SearchResult, error)
+		})
+		if !ok {
+			return out, nil
+		}
+		results, err := searcher.SearchAudiobookProviders(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		for _, result := range results {
+			id := result.ProviderIDs[result.Provider]
+			if id == "" || result.Name == "" {
+				continue
+			}
+			out = append(out, mediarequests.AudiobookSearchResult{Provider: "audiobook-metadata", ProviderItemID: id, Title: result.Name, OriginalTitle: result.OriginalTitle, Year: result.Year, Overview: result.Overview, ImageURL: result.ImageURL})
+		}
+		return out, nil
+	}))
 }

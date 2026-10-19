@@ -112,7 +112,6 @@ import (
 	"github.com/Silo-Server/silo-server/internal/s3client"
 	"github.com/Silo-Server/silo-server/internal/scanner"
 	"github.com/Silo-Server/silo-server/internal/scanqueue"
-	"github.com/Silo-Server/silo-server/internal/scantrigger"
 	"github.com/Silo-Server/silo-server/internal/secret"
 	"github.com/Silo-Server/silo-server/internal/sections"
 	"github.com/Silo-Server/silo-server/internal/server"
@@ -3307,49 +3306,6 @@ func main() {
 				catalog.NewProviderIDRepository(deps.DB),
 			),
 		)
-		if deps.FolderRepo != nil && deps.LibraryScanQueue != nil && deps.FileRepo != nil && itemRepo != nil {
-			linker := mediarequests.NewAudiobookImportLinker(deps.LibraryScanQueue, scantrigger.NewResolver(deps.FolderRepo), deps.FileRepo, itemRepo, nil)
-			linker.SetPathMapperFactory(func(config map[string]any) (mediarequests.PathMapper, error) {
-				return autoscan.NewPathMapperFromConfig(config)
-			})
-			requestReconcileSvc.SetAudiobookImportLinker(linker)
-		}
-		requestReconcileSvc.SetAudiobookSearcher(mediarequests.AudiobookSearchFunc(func(ctx context.Context, viewer mediarequests.Viewer, query string) ([]mediarequests.AudiobookSearchResult, error) {
-			out := make([]mediarequests.AudiobookSearchResult, 0, 24)
-			if requestScopeResolver != nil && itemRepo != nil {
-				if scope, err := requestScopeResolver.Resolve(ctx, access.ResolveInput{UserID: viewer.UserID, ProfileID: viewer.ProfileID, SkipPINVerification: true}); err == nil {
-					filter := catalog.AccessFilter{UserID: viewer.UserID, ProfileID: viewer.ProfileID, MaturityLimits: scope.MaturityLimits, AllowedLibraryIDs: scope.AllowedLibraryIDs, DisabledLibraryIDs: scope.DisabledLibraryIDs}
-					if items, _, searchErr := itemRepo.Search(ctx, query, []string{"audiobook"}, 20, 0, filter); searchErr != nil {
-						return nil, searchErr
-					} else {
-						for _, item := range items {
-							out = append(out, mediarequests.AudiobookSearchResult{Provider: "silo", ProviderItemID: item.ContentID, Title: item.Title, Year: item.Year, Overview: item.Overview})
-						}
-					}
-				}
-			}
-			if metadataService == nil {
-				return out, nil
-			}
-			results, err := metadataService.SearchAudiobookProviders(ctx, query)
-			if err != nil {
-				return nil, err
-			}
-			for _, result := range results {
-				providerItemID := result.ProviderIDs[result.Provider]
-				if providerItemID == "" {
-					for _, id := range result.ProviderIDs {
-						providerItemID = id
-						break
-					}
-				}
-				if providerItemID == "" || result.Name == "" {
-					continue
-				}
-				out = append(out, mediarequests.AudiobookSearchResult{Provider: "audiobook-metadata", ProviderItemID: providerItemID, Title: result.Name, OriginalTitle: result.OriginalTitle, Year: result.Year, Overview: result.Overview, ImageURL: result.ImageURL})
-			}
-			return out, nil
-		}))
 		requestReconcileSvc.SetAnimeIndex(animeids.NewStore(deps.DB))
 		requestReconcileSvc.SetRequesterIdentityResolver(plugins.RequesterIdentityFromLookup(plugins.NewPgUserIdentityLookup(deps.DB)))
 		if metadataService != nil {
@@ -3370,6 +3326,7 @@ func main() {
 			requestScopeResolver = reconcileResolver
 			requestReconcileSvc.SetEntitlementResolver(scopeEntitlementResolver{resolver: reconcileResolver})
 		}
+		api.ConfigureAudiobookRequests(requestReconcileSvc, deps, itemRepo, requestScopeResolver)
 		if notificationSystem != nil {
 			requestReconcileSvc.SetFulfillmentNotifier(notifications.NewRequestFulfillmentNotifier(notificationSystem))
 		}
