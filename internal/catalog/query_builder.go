@@ -1147,6 +1147,12 @@ func (qb *QueryBuilder) buildDateRuleClause(column string, rule QueryRule) (stri
 			return "", err
 		}
 		return relativeDateClause(column, rule.Op, "(CURRENT_DATE - INTERVAL '"+interval+"')::date"), nil
+	case "in_next":
+		interval, err := ruleInterval(rule)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%s <= (CURRENT_DATE + INTERVAL '%s')::date", column, interval), nil
 	default:
 		return "", fmt.Errorf("unsupported operator %q for %s", rule.Op, rule.Field)
 	}

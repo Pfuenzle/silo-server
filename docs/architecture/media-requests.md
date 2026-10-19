@@ -19,9 +19,23 @@ quality. Each target change recomputes the request's status and outcome in the
 same transaction (`aggregateStatus`), so after submission the targets own the
 request's state.
 
+Audiobook requests use `(provider, provider_item_id)` as their identity and
+store no TMDB ID. Shared request readers must scan `tmdb_id` as nullable and
+preserve the provider item ID for list, detail, and transition responses. A
+single audiobook row must not prevent an account's mixed-media request list
+from loading. Movie and series requests retain their TMDB identity.
+
+Audiobook search and creation carry the metadata provider's ID through the v2
+API. They bypass TMDB enrichment and movie/series rating checks and retain the
+fork's manual approval behavior. Shared request projections also retain the
+fulfillment key, submission state, external lifecycle fields, import scan run,
+and audiobook catalog link. Provider lifecycle details remain admin-only in
+v2 responses; imported filesystem paths stay private.
+
+
 ## Routing facts
 
-Creating a request reads the title's TMDB detail once, after the cheap refusals
+Creating a movie or series request reads the title's TMDB detail once, after the cheap refusals
 (a movie already in the library, a title already requested). The server's copy of the title and
 year replaces the client's, and a snapshot of what routing can match on is
 stored with the request as `routing_facts`: TMDB genre, keyword, network and

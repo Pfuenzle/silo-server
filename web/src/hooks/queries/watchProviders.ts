@@ -32,6 +32,7 @@ export interface WatchProviderConnectionSetting {
 export const WatchProviderAuthMethod = {
   DeviceCode: "device_code",
   APIKey: "api_key",
+  AuthorizationCode: "authorization_code",
 } as const;
 export type WatchProviderAuthMethod =
   (typeof WatchProviderAuthMethod)[keyof typeof WatchProviderAuthMethod];
@@ -189,6 +190,12 @@ export function startWatchProviderDeviceAuth(provider: string) {
   return v2("POST /api/v2/watch-providers/{provider}/auth/device-code", { path: { provider } });
 }
 
+export function startWatchProviderAuthorizationCodeAuth(provider: string) {
+  return v2("POST /api/v2/watch-providers/{provider}/auth/authorization-code", {
+    path: { provider },
+  });
+}
+
 export async function pollWatchProviderDeviceAuth(provider: string, authSessionId: string) {
   const result = await v2("POST /api/v2/watch-providers/{provider}/auth/poll", {
     path: { provider },
@@ -317,6 +324,15 @@ async function invalidateSyncedSurfaces(queryClient: QueryClient) {
     invalidateAllRatingSurfaceQueries(queryClient),
   ]);
   bumpHomeRefreshSignal(queryClient);
+}
+
+export function useStartWatchProviderAuthorizationCodeAuth(provider: string) {
+  return useMutation({
+    retry: false,
+    mutationFn: () => startWatchProviderAuthorizationCodeAuth(provider),
+    onSuccess: ({ authorization_url }) => window.location.assign(authorization_url),
+    onError: (error: Error) => toast.error(error.message),
+  });
 }
 
 export function useStartWatchProviderDeviceAuth(provider: string) {

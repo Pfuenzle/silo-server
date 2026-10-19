@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import type { MouseEvent } from "react";
-import { Film, RefreshCw, Tv } from "lucide-react";
+import { BookOpen, Film, RefreshCw, Tv } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useCanRequest } from "@/hooks/useCanRequest";
 import { useRequestSearch } from "@/hooks/queries/useRequests";
@@ -12,6 +12,8 @@ import {
   REQUEST_DIALOG_SUGGESTION_LIMIT,
   requestDetailHref,
   requestDisplayState,
+  requestMediaKey,
+  requestSearchHref,
   requestSuggestions,
   tmdbImageURL,
   tmdbPageCount,
@@ -21,10 +23,6 @@ import { EnterKeyHint } from "@/components/ui/kbd";
 import ViewTransitionLink from "./ViewTransitionLink";
 import { RequestStatusBadge } from "./RequestStatusBadge";
 import RequestResultsGrid, { RequestResultsPager } from "./RequestResultsGrid";
-
-function cardKey(item: Pick<RequestMediaResult, "media_type" | "tmdb_id">): string {
-  return `${item.media_type}-${item.tmdb_id}`;
-}
 
 function unavailableReasonLabel(item: RequestMediaResult): string {
   return item.request.reason ? formatRequestReason(item.request.reason) : "Blocked";
@@ -50,7 +48,7 @@ export interface RequestSuggestionCombobox {
 
 type RequestToAddSectionCommonProps = {
   query: string;
-  /** The TMDB types to search, following the host's search scope. Default: movies and series. */
+  /** The media to search, following the host's search scope. Default: movies and series. */
   mediaType?: RequestSearchMediaType;
   /** True when the library search returned at least one hit. Drives header copy. */
   libraryHadHits: boolean;
@@ -187,7 +185,7 @@ function DialogVariant({
       >
         {items.map((item, index) => (
           <DialogRow
-            key={cardKey(item)}
+            key={requestMediaKey(item)}
             item={item}
             optionId={combobox?.optionId(index)}
             isSelected={combobox?.selectedIndex === index}
@@ -213,8 +211,10 @@ function DialogRow({
   onSelect?: () => void;
   onPick?: (item: RequestMediaResult) => void;
 }) {
-  const poster = tmdbImageURL(item.poster_path);
-  const Icon = item.media_type === "series" ? Tv : Film;
+  const poster =
+    item.media_type === "audiobook" ? item.poster_path : tmdbImageURL(item.poster_path);
+  const Icon =
+    item.media_type === "series" ? Tv : item.media_type === "audiobook" ? BookOpen : Film;
   const requestable = item.request.requestable;
   const state = item.request.status
     ? requestDisplayState(item.request.status, undefined, item.request.state)
@@ -248,7 +248,11 @@ function DialogRow({
       data-selected={isSelected || undefined}
       onMouseMove={isSelected ? undefined : onSelect}
       tabIndex={-1}
-      to={requestDetailHref(item.media_type, item.tmdb_id)}
+      to={
+        item.media_type === "audiobook"
+          ? requestSearchHref(item.title, "audiobook")
+          : requestDetailHref(item.media_type, item.tmdb_id)
+      }
       onClick={handleClick}
       className="data-[selected]:bg-accent flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors"
     >
@@ -270,7 +274,7 @@ function DialogRow({
         <div className="truncate text-sm font-medium">{item.title}</div>
         <div className="text-muted-foreground text-xs">
           {item.year ? `${item.year} · ` : ""}
-          {item.media_type === "series" ? "Series" : "Movie"}
+          {formatMediaType(item.media_type)}
         </div>
       </div>
       {state ? (

@@ -988,6 +988,20 @@ func buildEpisodeCatalogComparisonClause(column string, rule QueryRule, argIdx i
 			cutoff = fmt.Sprintf("(CURRENT_DATE - INTERVAL '%s')::date", interval)
 		}
 		return relativeDateClause(column, rule.Op, cutoff), nil, argIdx, true, nil
+	case "in_next":
+		duration, ok := rule.Value.(string)
+		if !ok {
+			return "", nil, argIdx, true, fmt.Errorf("in_next requires a duration string like '4d'")
+		}
+		interval, err := parseDuration(duration)
+		if err != nil {
+			return "", nil, argIdx, true, err
+		}
+		cutoff := fmt.Sprintf("CURRENT_TIMESTAMP + INTERVAL '%s'", interval)
+		if cast == "date" {
+			cutoff = fmt.Sprintf("(CURRENT_DATE + INTERVAL '%s')::date", interval)
+		}
+		return fmt.Sprintf("%s <= %s", column, cutoff), nil, argIdx, true, nil
 	default:
 		return "", nil, argIdx, true, fmt.Errorf("unsupported comparison operator %q", rule.Op)
 	}

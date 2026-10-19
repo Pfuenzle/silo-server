@@ -34346,8 +34346,20 @@
             "$ref": "#/components/schemas/RequestDownload",
             "description": "How far the request's downloads are over all its servers (1080p and 4K together), while any reports them: bytes summed, the phase that needs the most attention, the latest estimate, and the oldest report's time"
           },
+          "external_detail": {
+            "description": "Admins only: the fulfillment server's lifecycle detail",
+            "type": "string"
+          },
+          "external_download_id": {
+            "description": "Admins only: the fulfillment server's download identifier",
+            "type": "string"
+          },
           "external_id": {
             "description": "Admins only: the integration's own identifier",
+            "type": "string"
+          },
+          "external_library_id": {
+            "description": "Admins only: the fulfillment server's library identifier",
             "type": "string"
           },
           "external_status": {
@@ -34387,7 +34399,7 @@
             "type": "string"
           },
           "media_type": {
-            "description": "movie or series",
+            "description": "movie, series or audiobook",
             "examples": [
               "movie"
             ],
@@ -34417,6 +34429,10 @@
             ],
             "type": "string"
           },
+          "provider_item_id": {
+            "description": "Audiobook metadata provider identifier",
+            "type": "string"
+          },
           "requested_by_profile_id": {
             "description": "Opaque identifier",
             "examples": [
@@ -34433,6 +34449,10 @@
             "minLength": 1,
             "type": "string"
           },
+          "retryable": {
+            "description": "Whether an audiobook fulfillment failure can be retried",
+            "type": "boolean"
+          },
           "season_progress": {
             "description": "Series season requests: each requested season's episodes, once the series is in the library; empty otherwise",
             "items": {
@@ -34447,6 +34467,14 @@
               "type": "integer"
             },
             "type": "array"
+          },
+          "silo_audiobook_id": {
+            "description": "The audiobook catalog identifier after import",
+            "type": "string"
+          },
+          "silo_audiobook_link": {
+            "description": "The library link after the audiobook import completes",
+            "type": "string"
           },
           "source": {
             "description": "What created the request: direct (the Request button or an API create) or watchlist (adding a title that is not in the library to a watchlist); more values may be added",
@@ -34527,6 +34555,7 @@
           "source",
           "is_anime",
           "targets",
+          "retryable",
           "created_at",
           "updated_at"
         ],
@@ -34568,7 +34597,8 @@
           "media_type": {
             "enum": [
               "movie",
-              "series"
+              "series",
+              "audiobook"
             ],
             "examples": [
               "movie"
@@ -34580,6 +34610,18 @@
           },
           "poster_path": {
             "description": "TMDB image path",
+            "type": "string"
+          },
+          "provider": {
+            "description": "Audiobook requests use audiobook-metadata; movies and series use tmdb",
+            "enum": [
+              "tmdb",
+              "audiobook-metadata"
+            ],
+            "type": "string"
+          },
+          "provider_item_id": {
+            "description": "Required for audiobook requests: the metadata provider's identifier",
             "type": "string"
           },
           "seasons": {
@@ -34605,7 +34647,7 @@
             "type": "string"
           },
           "tmdb_id": {
-            "description": "TMDB identifier (external, not a Silo ID)",
+            "description": "Required for movies and series: TMDB identifier (external, not a Silo ID)",
             "examples": [
               949
             ],
@@ -34629,7 +34671,6 @@
         },
         "required": [
           "media_type",
-          "tmdb_id",
           "title"
         ],
         "type": "object"
@@ -43051,7 +43092,7 @@
             "type": "string"
           },
           "media_type": {
-            "description": "movie or series",
+            "description": "movie, series or audiobook",
             "examples": [
               "movie"
             ],
@@ -43069,6 +43110,14 @@
             "examples": [
               "/abc.jpg"
             ],
+            "type": "string"
+          },
+          "provider": {
+            "description": "Metadata provider for audiobook results",
+            "type": "string"
+          },
+          "provider_item_id": {
+            "description": "The audiobook's identifier at its metadata provider",
             "type": "string"
           },
           "release_date": {
@@ -49118,6 +49167,39 @@
         },
         "required": [
           "api_key"
+        ],
+        "type": "object"
+      },
+      "WatchProviderAuthorizationCodeAuth": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_url": {
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "RFC 3339 instant in UTC with millisecond precision",
+            "format": "date-time",
+            "pattern": "^(?:[1-9][0-9]{3}|0[1-9][0-9]{2}|00[1-9][0-9]|000[2-9])-",
+            "patternDescription": "a non-zero RFC 3339 instant",
+            "type": "string"
+          },
+          "id": {
+            "description": "Opaque identifier",
+            "examples": [
+              "1"
+            ],
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "authorization_url",
+          "expires_at"
         ],
         "type": "object"
       },
@@ -108687,7 +108769,8 @@
               "description": "Only requests for this media type",
               "enum": [
                 "movie",
-                "series"
+                "series",
+                "audiobook"
               ],
               "examples": [
                 "series"
@@ -193553,6 +193636,7 @@
               "enum": [
                 "movie",
                 "series",
+                "audiobook",
                 "all"
               ],
               "examples": [
@@ -208609,6 +208693,250 @@
         "x-silo-class": "profile_scoped",
         "x-silo-demo-restricted": true,
         "x-silo-retry-safety": "non_retryable",
+        "x-silo-service-backed": true
+      }
+    },
+    "/api/v2/watch-providers/{provider}/auth/authorization-code": {
+      "post": {
+        "operationId": "startWatchProviderAuthorizationCodeAuth",
+        "parameters": [
+          {
+            "description": "The household profile acting for this request; it must belong to the authenticated account.",
+            "in": "header",
+            "name": "X-Profile-Id",
+            "required": true,
+            "schema": {
+              "examples": [
+                "1"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked",
+            "in": "header",
+            "name": "X-Profile-Token",
+            "schema": {
+              "examples": [
+                "pvt_5f3a9c1e7b2d4e8fa0c6"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchProviderAuthorizationCodeAuth"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "406": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Acceptable"
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Start browser authorization with a watch provider.",
+        "tags": [
+          "requests"
+        ],
+        "x-silo-class": "profile_scoped",
+        "x-silo-demo-restricted": true,
+        "x-silo-retry-safety": "non_retryable",
+        "x-silo-service-backed": true
+      }
+    },
+    "/api/v2/watch-providers/{provider}/auth/callback": {
+      "get": {
+        "description": "Consumes a single-use authorization session bound to the initiating browser and returns to watch-provider settings. Codes, credentials and provider errors are never included in the redirect.",
+        "operationId": "completeWatchProviderAuthorizationCodeAuth",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "code",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "error",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Redirect: to the provider, to the same start on the public origin, or to the flow's completion or failure location.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Complete browser authorization with a watch provider.",
+        "tags": [
+          "requests"
+        ],
+        "x-silo-class": "public",
+        "x-silo-raw-protocol": "oauth-redirect",
+        "x-silo-raw-reason": "The provider returns in the browser without API authorization headers; the session and browser cookie authorize completion.",
         "x-silo-service-backed": true
       }
     },

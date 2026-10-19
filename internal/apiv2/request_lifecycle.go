@@ -2,17 +2,25 @@ package apiv2
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/Silo-Server/silo-server/internal/api/handlers"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/clientip"
 	mediarequests "github.com/Silo-Server/silo-server/internal/requests"
 	"github.com/Silo-Server/silo-server/internal/watchsync"
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -196,6 +204,85 @@ type WatchProviderDeviceAuth struct {
 }
 type WatchProviderDeviceAuthOutput struct{ Body WatchProviderDeviceAuth }
 
+// Only browser-facing authorization data is exposed; provider state and PKCE
+// material remain in the service's single-use session.
+type WatchProviderAuthorizationCodeAuth struct {
+	ID               ID      `json:"id"`
+	Provider         string  `json:"provider"`
+	AuthorizationURL string  `json:"authorization_url"`
+	ExpiresAt        Instant `json:"expires_at"`
+}
+type WatchProviderAuthorizationCodeAuthOutput struct {
+	SetCookie    string `header:"Set-Cookie"`
+	CacheControl string `header:"Cache-Control"`
+	Body         WatchProviderAuthorizationCodeAuth
+}
+
+const watchProviderSettingsReturn = "/settings/watch-providers"
+
+func watchProviderCallbackURL(publicURL, provider string) (*url.URL, error) {
+	base, err := url.Parse(publicURL)
+	if err != nil || base == nil || (base.Scheme != "https" && base.Scheme != "http") || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		return nil, unavailable("watch-provider public URL")
+	}
+	base.Path = strings.TrimRight(base.Path, "/") + Prefix + "/watch-providers/" + provider + "/auth/callback"
+	base.RawPath = ""
+	return base, nil
+}
+
+func watchProviderAuthorizationCookie(provider, state string, expiresAt time.Time, secure bool) *http.Cookie {
+	key := sha256.Sum256([]byte(provider))
+	return &http.Cookie{
+		Name: fmt.Sprintf("silo_watch_oauth_%x", key[:8]), Value: state,
+		Path: Prefix + "/watch-providers/", Expires: expiresAt,
+		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
+	}
+}
+
+func registerWatchProviderAuthorizationCallback(reg *Registry, providers WatchProviderService) {
+	operation := Operation{Operation: huma.Operation{
+		Method: http.MethodGet, Path: Prefix + "/watch-providers/{provider}/auth/callback",
+		OperationID: "completeWatchProviderAuthorizationCodeAuth", Tags: []string{requestsTag},
+		Summary:     "Complete browser authorization with a watch provider.",
+		Description: "Consumes a single-use authorization session bound to the initiating browser and returns to watch-provider settings. Codes, credentials and provider errors are never included in the redirect.",
+		Parameters: []*huma.Param{
+			{Name: "provider", In: "path", Required: true, Schema: &huma.Schema{Type: huma.TypeString}},
+			{Name: "state", In: "query", Schema: &huma.Schema{Type: huma.TypeString}},
+			{Name: "code", In: "query", Schema: &huma.Schema{Type: huma.TypeString}},
+			{Name: "error", In: "query", Schema: &huma.Schema{Type: huma.TypeString}},
+		},
+		Responses: oauthHandshakeResponses("303"),
+	}, Class: ClassPublic, ServiceBacked: true}
+	RegisterRaw(reg, RawOperation{Operation: operation, Protocol: "oauth-redirect", Reason: "The provider returns in the browser without API authorization headers; the session and browser cookie authorize completion."}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		provider := chi.URLParam(r, "provider")
+		q := r.URL.Query()
+		state := q.Get("state")
+		cookie := watchProviderAuthorizationCookie(provider, "", time.Unix(1, 0), clientip.RequestScheme(r) == "https")
+		returnPath := watchProviderSettingsReturn
+		if callback, callbackErr := watchProviderCallbackURL(reg.deps.WatchProviderPublicURL, provider); callbackErr == nil {
+			cookie.Path = callback.Path
+			returnPath = strings.TrimSuffix(callback.Path, Prefix+"/watch-providers/"+provider+"/auth/callback") + watchProviderSettingsReturn
+		}
+		binding, err := r.Cookie(cookie.Name)
+		location := returnPath + "?watch_provider_auth=failed"
+		if providers != nil && err == nil && state != "" && len(q["state"]) == 1 && subtle.ConstantTimeCompare([]byte(binding.Value), []byte(state)) == 1 {
+			cookie.MaxAge = -1
+			http.SetCookie(w, cookie)
+			code := q.Get("code")
+			if q.Has("error") || len(q["code"]) != 1 {
+				code = ""
+			}
+			_, completeErr := providers.CompleteAuthorizationCodeAuth(r.Context(), provider, state, code)
+			if completeErr == nil && code != "" {
+				location = returnPath + "?watch_provider_auth=connected"
+			}
+		}
+		http.Redirect(w, r, location, http.StatusSeeOther)
+	}))
+}
+
 func registerRequestLifecycle(reg *Registry, requests RequestLifecycleService, providers WatchProviderService) {
 	op := func(method, path, id, summary string) Operation {
 		o := Operation{Operation: humaOp(method, Prefix+path, id, requestsTag, summary), Class: ClassProfileScoped, ServiceBacked: true}
@@ -248,6 +335,7 @@ func registerRequestLifecycle(reg *Registry, requests RequestLifecycleService, p
 		}
 		return claimsFrom(ctx).UserID, profileFrom(ctx), nil
 	}
+	registerWatchProviderAuthorizationCallback(reg, providers)
 	Register(reg, op(http.MethodGet, "/watch-providers", "listWatchProviders", "List watch providers and their capabilities."), func(ctx context.Context, _ *struct{}) (*WatchProviderCollectionOutput, error) {
 		if _, _, err := scope(ctx); err != nil {
 			return nil, err
@@ -356,6 +444,30 @@ func registerRequestLifecycle(reg *Registry, requests RequestLifecycleService, p
 		}
 		return &WatchProviderDeviceAuthOutput{Body: WatchProviderDeviceAuth{ID(s.ID), s.Provider, s.UserCode, s.VerificationURL, s.IntervalSeconds, NewInstant(s.ExpiresAt)}}, nil
 	})
+	Register(reg, op(http.MethodPost, "/watch-providers/{provider}/auth/authorization-code", "startWatchProviderAuthorizationCodeAuth", "Start browser authorization with a watch provider."), func(ctx context.Context, in *WatchProviderInput) (*WatchProviderAuthorizationCodeAuthOutput, error) {
+		u, p, err := scope(ctx)
+		if err != nil {
+			return nil, err
+		}
+		callback, err := watchProviderCallbackURL(reg.deps.WatchProviderPublicURL, in.Provider)
+		if err != nil {
+			return nil, err
+		}
+		r := requestFrom(ctx)
+		if r == nil || !strings.EqualFold(clientip.RequestScheme(r), callback.Scheme) || !strings.EqualFold(clientip.RequestHost(r), callback.Host) {
+			return nil, NewProblem(TypeConflict, "Open Silo at its configured public URL to connect a watch provider.")
+		}
+		session, err := providers.StartAuthorizationCodeAuth(ctx, u, p, in.Provider, callback.String())
+		if err != nil {
+			return nil, watchProviderProblem(err)
+		}
+		cookie := watchProviderAuthorizationCookie(in.Provider, session.ID, session.ExpiresAt, callback.Scheme == "https")
+		cookie.Path = callback.Path
+		return &WatchProviderAuthorizationCodeAuthOutput{
+			SetCookie: cookie.String(), CacheControl: "no-store",
+			Body: WatchProviderAuthorizationCodeAuth{ID(session.ID), session.Provider, session.AuthorizeURL, NewInstant(session.ExpiresAt)},
+		}, nil
+	})
 	Register(reg, op(http.MethodPost, "/watch-providers/{provider}/auth/poll", "pollWatchProviderDeviceAuth", "Poll device authorization. Concurrent polls are not durably coalesced."), func(ctx context.Context, in *WatchProviderPollInput) (*WatchProviderConnectionOutput, error) {
 		u, p, err := scope(ctx)
 		if err != nil {
@@ -431,7 +543,7 @@ func watchProviderProblem(err error) *Problem {
 	if invalid, ok := errors.AsType[watchsync.InvalidConnectionSettingError](err); ok {
 		return NewProblem(TypeValidationFailed, fmt.Sprintf("Connection setting %q %s.", invalid.Key, invalid.Reason))
 	}
-	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, watchsync.ErrConnectionNotFound) || errors.Is(err, watchsync.ErrAuthSessionMismatch) {
+	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, watchsync.ErrConnectionNotFound) || errors.Is(err, watchsync.ErrAuthSessionMismatch) || errors.Is(err, watchsync.ErrAuthSessionNotFound) {
 		return NewProblem(TypeNotFound, "Watch-provider connection or authorization session not found.")
 	}
 	if errors.Is(err, watchsync.ErrAuthSessionCompleted) || errors.Is(err, watchsync.ErrAuthSessionExpired) || watchsync.IsDeviceAuthPending(err) {

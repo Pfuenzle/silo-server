@@ -15,6 +15,7 @@
   "requested_by_profile_id": "p-owner",
   "is_anime": false,
   "targets": [],
+  "retryable": false,
   "created_at": "2026-01-02T03:04:05.678Z",
   "updated_at": "2026-01-02T03:04:05.678Z"
 }

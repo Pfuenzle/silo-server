@@ -46,6 +46,7 @@ type serviceFakeRepo struct {
 	connections            map[string]Connection
 	dueConnections         []Connection
 	sessions               map[string]DeviceAuthSession
+	sessionMu              sync.Mutex
 	settings               map[string]string
 	syncRuns               []SyncRun
 	historyExports         []HistoryExport
@@ -121,6 +122,8 @@ func (r *serviceFakeRepo) UpsertAuthSession(
 	_ context.Context,
 	session DeviceAuthSession,
 ) (DeviceAuthSession, error) {
+	r.sessionMu.Lock()
+	defer r.sessionMu.Unlock()
 	if session.ID == "" {
 		session.ID = "auth-1"
 	}
@@ -129,10 +132,33 @@ func (r *serviceFakeRepo) UpsertAuthSession(
 }
 
 func (r *serviceFakeRepo) GetAuthSession(_ context.Context, id string) (DeviceAuthSession, error) {
+	r.sessionMu.Lock()
+	defer r.sessionMu.Unlock()
 	session, ok := r.sessions[id]
 	if !ok {
 		return DeviceAuthSession{}, errors.New("missing auth session")
 	}
+	return session, nil
+}
+
+func (r *serviceFakeRepo) ConsumeAuthorizationCodeAuthSession(_ context.Context, id, provider string, now time.Time) (DeviceAuthSession, error) {
+	r.sessionMu.Lock()
+	defer r.sessionMu.Unlock()
+	session, ok := r.sessions[id]
+	if !ok {
+		return DeviceAuthSession{}, ErrAuthSessionNotFound
+	}
+	if session.Provider != provider || !isAuthorizationCodeSession(session) {
+		return DeviceAuthSession{}, ErrAuthSessionMismatch
+	}
+	if session.CompletedAt != nil {
+		return DeviceAuthSession{}, ErrAuthSessionCompleted
+	}
+	if !session.ExpiresAt.After(now) {
+		return DeviceAuthSession{}, ErrAuthSessionExpired
+	}
+	session.CompletedAt = &now
+	r.sessions[id] = session
 	return session, nil
 }
 

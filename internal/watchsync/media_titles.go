@@ -17,12 +17,18 @@ const mediaTitleLookupTimeout = 5 * time.Second
 // episode's own, and Year, SeriesTitle and SeriesYear come from its series,
 // as on the import side (an episode's year is its series' year). Providers
 // that create titles they have not seen yet need these alongside the IDs.
+// AbsoluteEpisodeNumber is the position among regular episodes in catalog
+// season order. It is zero for specials or when seasons/episode numbers have
+// gaps. SeriesEpisodeCount is the regular catalog total when the whole known
+// series is contiguous; it does not predict episodes absent from the catalog.
 type MediaTitles struct {
-	Kind        string
-	Title       string
-	Year        int
-	SeriesTitle string
-	SeriesYear  int
+	Kind                  string
+	Title                 string
+	Year                  int
+	SeriesTitle           string
+	SeriesYear            int
+	AbsoluteEpisodeNumber int
+	SeriesEpisodeCount    int
 }
 
 type mediaTitleResolver interface {
@@ -64,23 +70,23 @@ func titlesFor(titles map[string]MediaTitles, mediaItemID, kind string) (MediaTi
 	return found, true
 }
 
-// withScrobbleTitles fills the display titles of a playback event that does
-// not carry them yet.
+// withScrobbleTitles fills catalog titles and episode ordering at dispatch.
+// Existing titles do not bypass the ordering lookup for an episode.
 func (s *Service) withScrobbleTitles(ctx context.Context, event ScrobbleEvent) ScrobbleEvent {
-	if event.Title != "" || event.MediaItemID == "" {
+	if event.MediaItemID == "" || (event.Title != "" && event.Kind != "episode") {
 		return event
 	}
 	return scrobbleWithTitles(event, s.mediaTitles(ctx, []string{event.MediaItemID}))
 }
 
-// scrobbleWithTitles fills event's display titles from titles when it does not
-// carry them yet.
+// scrobbleWithTitles fills missing display titles and catalog episode ordering.
 func scrobbleWithTitles(event ScrobbleEvent, titles map[string]MediaTitles) ScrobbleEvent {
-	if event.Title != "" {
-		return event
-	}
+	// Episode ordering must still be loaded when a caller already supplied titles.
 	if found, ok := titlesFor(titles, event.MediaItemID, event.Kind); ok {
-		event.Title, event.Year, event.SeriesTitle, event.SeriesYear = found.Title, found.Year, found.SeriesTitle, found.SeriesYear
+		if event.Title == "" {
+			event.Title, event.Year, event.SeriesTitle, event.SeriesYear = found.Title, found.Year, found.SeriesTitle, found.SeriesYear
+		}
+		event.AbsoluteEpisodeNumber, event.SeriesEpisodeCount = found.AbsoluteEpisodeNumber, found.SeriesEpisodeCount
 	}
 	return event
 }
@@ -119,12 +125,12 @@ func titledWithin(ctx context.Context, titled func() ScrobbleEvent, event Scrobb
 	}
 }
 
-// withPlayTitles returns plays with the display titles of those that do not
-// carry them yet filled in. The input slice is not modified.
+// withPlayTitles returns plays enriched with catalog titles and episode ordering.
+// The input slice is not modified.
 func (s *Service) withPlayTitles(ctx context.Context, plays []LocalPlay) []LocalPlay {
 	ids := make([]string, 0, len(plays))
 	for _, play := range plays {
-		if play.Title == "" && play.MediaItemID != "" {
+		if play.MediaItemID != "" && (play.Title == "" || play.Kind == "episode") {
 			ids = append(ids, play.MediaItemID)
 		}
 	}
@@ -134,8 +140,11 @@ func (s *Service) withPlayTitles(ctx context.Context, plays []LocalPlay) []Local
 	}
 	out := make([]LocalPlay, len(plays))
 	for i, play := range plays {
-		if found, ok := titlesFor(titles, play.MediaItemID, play.Kind); ok && play.Title == "" {
-			play.Title, play.Year, play.SeriesTitle, play.SeriesYear = found.Title, found.Year, found.SeriesTitle, found.SeriesYear
+		if found, ok := titlesFor(titles, play.MediaItemID, play.Kind); ok {
+			if play.Title == "" {
+				play.Title, play.Year, play.SeriesTitle, play.SeriesYear = found.Title, found.Year, found.SeriesTitle, found.SeriesYear
+			}
+			play.AbsoluteEpisodeNumber, play.SeriesEpisodeCount = found.AbsoluteEpisodeNumber, found.SeriesEpisodeCount
 		}
 		out[i] = play
 	}

@@ -34,6 +34,7 @@
           "updated_at": "2026-01-02T03:04:05.678Z"
         }
       ],
+      "retryable": false,
       "created_at": "2026-01-02T03:04:05.678Z",
       "updated_at": "2026-01-02T03:04:05.678Z",
       "approved_at": "2026-01-02T03:04:05.678Z"
@@ -72,6 +73,7 @@
           "updated_at": "2026-01-02T03:04:05.678Z"
         }
       ],
+      "retryable": false,
       "created_at": "2026-01-02T03:04:05.678Z",
       "updated_at": "2026-01-02T03:04:05.678Z",
       "approved_at": "2026-01-02T03:04:05.678Z"
@@ -110,6 +112,7 @@
           "updated_at": "2026-01-02T03:04:05.678Z"
         }
       ],
+      "retryable": false,
       "created_at": "2026-01-02T03:04:05.678Z",
       "updated_at": "2026-01-02T03:04:05.678Z",
       "approved_at": "2026-01-02T03:04:05.678Z"

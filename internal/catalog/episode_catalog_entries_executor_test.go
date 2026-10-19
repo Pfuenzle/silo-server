@@ -186,6 +186,29 @@ func TestEpisodeCatalogReleaseDateInLastUsesDateCutoff(t *testing.T) {
 	}
 }
 
+func TestEpisodeCatalogReleaseDateInNextUsesDateCutoff(t *testing.T) {
+	def := QueryDefinition{
+		Match: "all",
+		Groups: []QueryGroup{{
+			Match: "all",
+			Rules: []QueryRule{
+				{Field: "release_date", Op: "in_next", Value: "4d"},
+			},
+		}},
+	}.Normalize()
+
+	where, _, _, ok, err := buildEpisodeCatalogEntryQueryWhere(def, 2)
+	if err != nil {
+		t.Fatalf("buildEpisodeCatalogEntryQueryWhere returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("buildEpisodeCatalogEntryQueryWhere unexpectedly fell back")
+	}
+	if !strings.Contains(where, "ece.episode_air_date <= (CURRENT_DATE + INTERVAL '4 days')::date") {
+		t.Fatalf("expected release_date filter to cap future dates, got %q", where)
+	}
+}
+
 func TestEpisodeCatalogEntryQueryFallsBackForSameFileTechnicalAnd(t *testing.T) {
 	group := QueryGroup{
 		Match: "all",

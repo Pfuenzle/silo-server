@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Navigate, useSearchParams } from "react-router";
-import { Film, Info, Library, RefreshCw, Tv } from "lucide-react";
+import { BookOpen, Film, Info, Library, RefreshCw, Tv } from "lucide-react";
 import BrandCarousel from "@/components/BrandCarousel";
 import { CancelRequestDialog } from "@/components/CancelRequestDialog";
 import MediaCarousel from "@/components/MediaCarousel";
@@ -12,6 +12,13 @@ import ViewTransitionLink from "@/components/ViewTransitionLink";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { MediaRequest, RequestDiscoverySection, RequestMediaResult } from "@/api/types";
 import {
@@ -38,6 +45,7 @@ import {
   requestDiscoverSectionHref,
   requestDisplayState,
   requestSearchHref,
+  requestMediaKey,
   tmdbImageURL,
   type RequestDisplayState,
 } from "@/lib/mediaRequests";
@@ -110,6 +118,7 @@ function RequestsHub() {
   const activeTab = normalizeRequestTab(searchParams.get("tab"));
   const mine = useMyMediaRequests({ limit: 100 });
   const totalMine = mine.data?.length ?? 0;
+  const [searchType, setSearchType] = useState("video");
 
   function setActiveTab(value: string) {
     const next = new URLSearchParams(searchParams);
@@ -130,16 +139,29 @@ function RequestsHub() {
               Requests
             </h1>
             <p className="text-muted-foreground mt-1 text-sm">
-              Ask for movies and series that aren&rsquo;t in the library yet, and follow your
-              requests.
+              Ask for movies, series, and audiobooks that aren&rsquo;t in the library yet, and
+              follow your requests.
             </p>
           </div>
           {/* Search is the app's own search page, which lists titles to request. */}
-          <div className="w-full sm:w-72">
-            <SearchBar
-              placeholder="Search movies and series"
-              buildSearchHref={(query) => requestSearchHref(query)}
-            />
+          <div className="flex w-full gap-2 sm:w-auto">
+            <Select value={searchType} onValueChange={setSearchType}>
+              <SelectTrigger aria-label="Request media type" className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="video">Movies and series</SelectItem>
+                <SelectItem value="audiobook">Audiobooks</SelectItem>
+              </SelectContent>
+            </Select>
+            <div className="min-w-0 flex-1 sm:w-72">
+              <SearchBar
+                placeholder={
+                  searchType === "audiobook" ? "Search audiobooks" : "Search movies and series"
+                }
+                buildSearchHref={(query) => requestSearchHref(query, searchType)}
+              />
+            </div>
           </div>
         </div>
       </header>
@@ -263,7 +285,7 @@ function DiscoverRow({
     >
       {section.results.map((item) => (
         <RequestPosterCard
-          key={`${item.media_type}-${item.tmdb_id}`}
+          key={requestMediaKey(item)}
           variant="discover"
           item={item}
           isSubmitting={isSubmitting(item)}
@@ -394,9 +416,26 @@ function RequestRow({
   isCancelling: boolean;
 }) {
   const state = requestDisplayState(request.status, request.outcome, request.state);
-  const href = requestDetailHref(request.media_type, request.tmdb_id);
-  const poster = tmdbImageURL(request.poster_path, "w154");
-  const MediaIcon = request.media_type === "series" ? Tv : Film;
+  const libraryHref = request.library_content_id
+    ? `/item/${encodeURIComponent(request.library_content_id)}`
+    : request.silo_audiobook_link;
+  const href =
+    request.media_type === "audiobook"
+      ? libraryHref
+      : requestDetailHref(request.media_type, request.tmdb_id);
+  const poster =
+    request.media_type === "audiobook"
+      ? request.poster_path
+      : tmdbImageURL(request.poster_path, "w154");
+  const MediaIcon =
+    request.media_type === "series" ? Tv : request.media_type === "audiobook" ? BookOpen : Film;
+  const artwork = poster ? (
+    <img src={poster} alt="" loading="lazy" className="h-full w-full object-cover" />
+  ) : (
+    <span className="text-muted-foreground flex h-full items-center justify-center">
+      <MediaIcon className="h-4 w-4" />
+    </span>
+  );
   const details = [
     formatMediaType(request.media_type),
     request.year ? String(request.year) : "",
@@ -409,30 +448,39 @@ function RequestRow({
 
   return (
     <li className="flex gap-3 py-3 sm:gap-4" data-request-id={request.id}>
-      <ViewTransitionLink
-        to={href}
-        tabIndex={-1}
-        aria-hidden
-        className="bg-muted relative h-[72px] w-12 shrink-0 overflow-hidden rounded-md"
-      >
-        {poster ? (
-          <img src={poster} alt="" loading="lazy" className="h-full w-full object-cover" />
-        ) : (
-          <span className="text-muted-foreground flex h-full items-center justify-center">
-            <MediaIcon className="h-4 w-4" />
-          </span>
-        )}
-      </ViewTransitionLink>
+      {href ? (
+        <ViewTransitionLink
+          to={href}
+          tabIndex={-1}
+          aria-hidden
+          className="bg-muted relative h-[72px] w-12 shrink-0 overflow-hidden rounded-md"
+        >
+          {artwork}
+        </ViewTransitionLink>
+      ) : (
+        <div
+          aria-hidden
+          className="bg-muted relative h-[72px] w-12 shrink-0 overflow-hidden rounded-md"
+        >
+          {artwork}
+        </div>
+      )}
 
       <div className="flex min-w-0 flex-1 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <ViewTransitionLink
-              to={href}
-              className="text-foreground min-w-0 truncate text-sm font-semibold hover:underline"
-            >
-              {request.title}
-            </ViewTransitionLink>
+            {href ? (
+              <ViewTransitionLink
+                to={href}
+                className="text-foreground min-w-0 truncate text-sm font-semibold hover:underline"
+              >
+                {request.title}
+              </ViewTransitionLink>
+            ) : (
+              <span className="text-foreground min-w-0 truncate text-sm font-semibold">
+                {request.title}
+              </span>
+            )}
             {state ? <RequestStatusBadge state={state} /> : null}
           </div>
           <p className="text-muted-foreground text-xs">{details.join(" · ")}</p>
@@ -470,12 +518,12 @@ function RequestRow({
           ) : null}
         </div>
 
-        {onCancel || request.library_content_id ? (
+        {onCancel || libraryHref ? (
           <div className="flex shrink-0 flex-wrap items-center gap-2">
-            {request.library_content_id ? (
+            {libraryHref ? (
               <Button asChild variant="outline" size="sm">
                 <ViewTransitionLink
-                  to={`/item/${encodeURIComponent(request.library_content_id)}`}
+                  to={libraryHref}
                   aria-label={`Open ${request.title} in library`}
                 >
                   <Library className="h-3.5 w-3.5" aria-hidden />

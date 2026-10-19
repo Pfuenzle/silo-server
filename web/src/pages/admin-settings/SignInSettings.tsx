@@ -38,7 +38,13 @@ const RECHECK_KEYS = [RECHECK_INTERVAL_KEY, OUTAGE_POLICY_KEY];
 // password sign-in is off, and a reset needs a local password to replace.
 const PASSWORD_ACCOUNT_KEYS = ["signup.enabled", "password_reset.self_service_enabled"];
 // server.public_url is read, not edited: OpenID Connect needs it.
-const KEYS = [LOCAL_LOGIN_KEY, ...PASSWORD_ACCOUNT_KEYS, EMAIL_MATCH_KEY, ...RECHECK_KEYS, "server.public_url"];
+const KEYS = [
+  LOCAL_LOGIN_KEY,
+  ...PASSWORD_ACCOUNT_KEYS,
+  EMAIL_MATCH_KEY,
+  ...RECHECK_KEYS,
+  "server.public_url",
+];
 
 const RECHECK_INTERVALS = [
   { value: "15m", label: "15 minutes" },
@@ -293,10 +299,7 @@ export default function SignInSettings() {
 
         <NetworkSignInSection installations={installations.data} />
 
-        <FieldGroup
-          label="Provider sessions"
-          dirty={RECHECK_KEYS.some((key) => form.isDirty(key))}
-        >
+        <FieldGroup label="Provider sessions" dirty={RECHECK_KEYS.some((key) => form.isDirty(key))}>
           <SettingField
             label="Re-check access every"
             dirty={form.isDirty(RECHECK_INTERVAL_KEY)}

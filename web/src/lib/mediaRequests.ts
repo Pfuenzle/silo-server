@@ -121,11 +121,11 @@ export function canCancelOwnRequest(
 }
 
 /**
- * The detail page of a TMDB title. It serves titles outside the library; one
- * the viewer can open in the library redirects to its item page.
+ * The detail page of a TMDB title, or the request hub for audiobooks whose
+ * metadata provider has no title detail route.
  */
 export function requestDetailHref(mediaType: RequestMediaType, tmdbID: number): string {
-  return `/title/${mediaType}/${tmdbID}`;
+  return mediaType === "audiobook" ? "/requests" : `/title/${mediaType}/${tmdbID}`;
 }
 
 /** The media type a title URL names, or undefined for any other segment. */
@@ -134,21 +134,24 @@ export function parseRequestMediaType(value: string | undefined): RequestMediaTy
 }
 
 /**
- * The app's search page, scoped to what can be requested: movies and series,
- * or just one of them. Its "Request to add" section lists the TMDB matches.
+ * The app's search page, scoped to the media that can be requested. Its
+ * "Request to add" section lists matches from the selected metadata provider.
  */
 export function requestSearchHref(query: string, mediaType?: string | null): string {
   const params = new URLSearchParams({
     source: "query",
     q: query.trim(),
-    type: parseRequestMediaType(mediaType ?? undefined) ?? "video",
+    type:
+      mediaType === "audiobook"
+        ? "audiobook"
+        : (parseRequestMediaType(mediaType ?? undefined) ?? "video"),
   });
   return `/catalog?${params.toString()}`;
 }
 
 /**
- * The TMDB search type for a catalog search scope, or null when the scope
- * holds nothing TMDB can supply (audiobooks, ebooks, manga).
+ * The request search type for a catalog search scope, or null when no
+ * request metadata provider serves that scope (ebooks and manga).
  */
 export function requestSearchTypeForScope(
   scope: string | undefined,
@@ -162,6 +165,8 @@ export function requestSearchTypeForScope(
     case "series":
     case "episode":
       return "series";
+    case "audiobook":
+      return "audiobook";
     default:
       return null;
   }
@@ -188,6 +193,15 @@ export function pendingPageSize(
   return pages?.at(-1)?.results.length || TMDB_PAGE_SIZE;
 }
 
+/** Provider identity keeps audiobook results distinct even though their TMDB IDs are zero. */
+export function requestMediaKey(
+  item: Pick<RequestMediaResult, "media_type" | "tmdb_id" | "provider" | "provider_item_id">,
+): string {
+  return item.media_type === "audiobook"
+    ? JSON.stringify([item.media_type, item.provider, item.provider_item_id])
+    : `${item.media_type}-${item.tmdb_id}`;
+}
+
 /**
  * The titles of a list read page by page, in order. A TMDB list can shift
  * between page reads (popularity changes), so a title already shown on an
@@ -200,7 +214,7 @@ export function flattenResultPages(
   const out: RequestMediaResult[] = [];
   for (const page of pages ?? []) {
     for (const item of page.results) {
-      const key = `${item.media_type}-${item.tmdb_id}`;
+      const key = requestMediaKey(item);
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(item);

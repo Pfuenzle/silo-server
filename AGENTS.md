@@ -187,6 +187,29 @@ changed-line findings as CI while analyzing only the packages the branch touched
 
 Format Go files as touched with `gofmt`/`goimports`; the frontend follows `web/.prettierrc`.
 
+## Fork integration
+
+Merge `upstream/main` into a named integration branch; preserve the shared
+history rather than rebasing published fork commits. Record the fetched upstream
+commit before resolving conflicts. Keep unrelated local edits outside the merge
+and reapply them explicitly after integration.
+
+Preserve fork behavior unless the upstream implementation is demonstrably
+identical across the API, UI, persistence, and plugin contract. Partial overlap
+requires combining the implementations; ask the developer when their behaviors
+cannot coexist. In particular, retain simultaneous OIDC and LDAP, provider
+session controls, audiobook requests and Listenarr fulfillment metadata, and
+watch-provider authorization-code flows until equivalent upstream behavior exists.
+Use upstream compatibility authentication, including profile PIN and temporary
+password checks, instead of restoring the older fork login call.
+
+Integrate the canonical sibling SDK independently. Build development images with
+the `silo_plugin_sdk` named context pointing at that checkout. A local workspace
+passing does not prove a build with published SDK tags. Before deployment, run
+focused fork regression tests and the integrated build; preserve database and
+Compose rollback inputs, then verify liveness, readiness, authentication, the
+Requests account list, and the changed plugin surfaces.
+
 ## Development environment
 
 Copy `.silo-dev.env.example` to `.silo-dev.env` and fill in how to

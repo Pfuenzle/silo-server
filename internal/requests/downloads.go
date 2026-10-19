@@ -138,7 +138,11 @@ func (s *Service) refreshRequestDownloads(ctx, checkCtx context.Context, fc *ful
 		return reconcileUnchanged, false, featureErr
 	}
 	statuses, checkErr := s.checkTargetStatuses(checkCtx, req, polled, fc)
-	change, err = s.applyTargetStatuses(ctx, polled, statuses)
+	if req.MediaType == MediaTypeAudiobook {
+		change, err = s.reconcileAudiobookStatuses(ctx, req, polled, statuses, fc)
+	} else {
+		change, err = s.applyTargetStatuses(ctx, polled, statuses)
+	}
 	if err != nil {
 		return reconcileUnchanged, true, errors.Join(featureErr, err)
 	}

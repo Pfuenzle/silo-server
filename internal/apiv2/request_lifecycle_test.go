@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +47,10 @@ type fakeWatchLifecycle struct {
 	settingValues         map[string]any
 	lastUpdate            watchsync.ConnectionUpdate
 	updateErr             error
+	redirectURI           string
+	authState             string
+	authCode              string
+	completeCalls         int
 	WatchProviderService
 	user         int
 	profile, key string
@@ -74,6 +80,15 @@ func (f *fakeWatchLifecycle) StartDeviceAuth(_ context.Context, u int, p, key st
 	f.user, f.profile, f.key = u, p, key
 	return watchsync.DeviceAuthSession{ID: "auth-1", DeviceCode: "private-code", ExpiresAt: fixedTime(), UserCode: "PUBLIC", Provider: key}, f.err
 }
+func (f *fakeWatchLifecycle) StartAuthorizationCodeAuth(_ context.Context, u int, p, key, redirectURI string) (watchsync.AuthorizationCodeSession, error) {
+	f.user, f.profile, f.key, f.redirectURI = u, p, key, redirectURI
+	return watchsync.AuthorizationCodeSession{ID: "state-1", Provider: key, AuthorizeURL: "https://anilist.co/api/v2/oauth/authorize?state=state-1", ExpiresAt: time.Now().Add(time.Minute)}, f.err
+}
+func (f *fakeWatchLifecycle) CompleteAuthorizationCodeAuth(_ context.Context, key, state, code string) (watchsync.Connection, error) {
+	f.key, f.authState, f.authCode = key, state, code
+	f.completeCalls++
+	return watchsync.Connection{AccessToken: "secret-token", RefreshToken: "private-refresh"}, f.err
+}
 func (f *fakeWatchLifecycle) ListSyncRuns(_ context.Context, u int, p, key string, limit int) ([]watchsync.SyncRun, error) {
 	f.user, f.profile, f.key, f.limit = u, p, key, limit
 	return nil, f.err
@@ -86,6 +101,118 @@ func lifecycleHandler(r *fakeLifecycle, w *fakeWatchLifecycle) http.Handler {
 	deps.RequestLifecycle = r
 	deps.WatchProviders = w
 	return NewHandler(deps)
+}
+
+func TestWatchProviderAuthorizationCodeBrowserFlow(t *testing.T) {
+	provider := "plugin:4:anilist"
+	path := Prefix + "/watch-providers/" + provider + "/auth/"
+	fake := &fakeWatchLifecycle{}
+	deps := requestDeps(fixtureRequests())
+	deps.WatchProviders = fake
+	deps.WatchProviderPublicURL = "http://example.com"
+	h := NewHandler(deps)
+	start := do(t, h, http.MethodPost, path+"authorization-code", "", requestOwner)
+	if start.Code != http.StatusOK || fake.user != 1 || fake.profile != "p-owner" || fake.redirectURI != "http://example.com"+path+"callback" {
+		t.Fatalf("start = %d %s; scope/callback = %+v", start.Code, start.Body.String(), fake)
+	}
+	var body struct {
+		ID               string `json:"id"`
+		Provider         string `json:"provider"`
+		AuthorizationURL string `json:"authorization_url"`
+	}
+	if err := json.Unmarshal(start.Body.Bytes(), &body); err != nil || body.ID != "state-1" || body.Provider != provider || body.AuthorizationURL == "" {
+		t.Fatalf("authorization projection = %s (%v)", start.Body.String(), err)
+	}
+	cookies := start.Result().Cookies()
+	if len(cookies) != 1 || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteLaxMode || start.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("browser binding/cache = %+v %v", cookies, start.Header())
+	}
+	callback := func(query string, cookie *http.Cookie) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, path+"callback?"+query, nil)
+		if cookie != nil {
+			r.AddCookie(cookie)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	for _, query := range []string{"state=state-1&code=private-code", "state=wrong&code=private-code", "state=state-1&state=other&code=private-code"} {
+		cookie := cookies[0]
+		if query == "state=state-1&code=private-code" {
+			cookie = nil
+		}
+		rec := callback(query, cookie)
+		if rec.Code != http.StatusSeeOther || fake.completeCalls != 0 || rec.Header().Get("Location") != watchProviderSettingsReturn+"?watch_provider_auth=failed" {
+			t.Fatalf("unbound callback accepted: %d %v calls=%d", rec.Code, rec.Header(), fake.completeCalls)
+		}
+	}
+	rec := callback("state=state-1&code=private-code", cookies[0])
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != watchProviderSettingsReturn+"?watch_provider_auth=connected" || fake.authState != "state-1" || fake.authCode != "private-code" || fake.key != provider {
+		t.Fatalf("callback = %d %v; exchange = %+v", rec.Code, rec.Header(), fake)
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Referrer-Policy") != "no-referrer" || strings.Contains(rec.Body.String(), "secret-token") || len(rec.Result().Cookies()) != 1 || rec.Result().Cookies()[0].MaxAge != -1 {
+		t.Fatal("callback leaked credentials or retained browser binding")
+	}
+	fake.err = errors.New("private-provider-error with secret-token")
+	rec = callback("state=state-1&code=private-code", cookies[0])
+	if rec.Header().Get("Location") != watchProviderSettingsReturn+"?watch_provider_auth=failed" || strings.Contains(rec.Body.String(), "private-provider-error") {
+		t.Fatal("callback exposed provider error")
+	}
+	rec = callback("state=state-1&error=access_denied&error_description=private-provider-error", cookies[0])
+	if fake.authCode != "" || rec.Header().Get("Location") != watchProviderSettingsReturn+"?watch_provider_auth=failed" {
+		t.Fatal("denied authorization did not consume the state without exchanging a code")
+	}
+}
+
+func TestWatchProviderAuthorizationCodeStartOriginAndErrors(t *testing.T) {
+	fake := &fakeWatchLifecycle{}
+	deps := requestDeps(fixtureRequests())
+	deps.WatchProviders = fake
+	deps.WatchProviderPublicURL = "https://silo.example"
+	path := Prefix + "/watch-providers/plugin:4:anilist/auth/authorization-code"
+	requireProblem(t, do(t, NewHandler(deps), http.MethodPost, path, "", requestOwner), TypeConflict)
+	if fake.redirectURI != "" {
+		t.Fatal("started flow on another origin")
+	}
+	deps.WatchProviderPublicURL = ""
+	requireProblem(t, do(t, NewHandler(deps), http.MethodPost, path, "", requestOwner), TypeDependencyUnavailable)
+	deps.WatchProviderPublicURL = "http://example.com"
+	fake.err = errors.New("private-provider-error")
+	rec := do(t, NewHandler(deps), http.MethodPost, path, "", requestOwner)
+	requireProblem(t, rec, TypeInternalError)
+	if strings.Contains(rec.Body.String(), "private-provider-error") {
+		t.Fatal("provider error exposed")
+	}
+	requireProblem(t, do(t, NewHandler(deps), http.MethodPost, path, "", nil), TypeAuthenticationRequired)
+	uri, err := watchProviderCallbackURL("https://silo.example", "plugin:4:anilist")
+	if err != nil || uri.Scheme != "https" {
+		t.Fatalf("callback = %v %v", uri, err)
+	}
+	if _, err := url.ParseRequestURI(uri.String()); err != nil {
+		t.Fatal(err)
+	}
+	uri, err = watchProviderCallbackURL("https://silo.example/silo/", "plugin:4:anilist")
+	if err != nil || uri.String() != "https://silo.example/silo/api/v2/watch-providers/plugin:4:anilist/auth/callback" {
+		t.Fatalf("deployment prefix lost: %v %v", uri, err)
+	}
+	secureCookie := watchProviderAuthorizationCookie("plugin:4:anilist", "state", time.Now().Add(time.Minute), true)
+	if !secureCookie.Secure {
+		t.Fatal("HTTPS binding must be secure")
+	}
+	deps.WatchProviderPublicURL = "http://example.com/silo"
+	fake.err = nil
+	h := NewHandler(deps)
+	start := do(t, h, http.MethodPost, path, "", requestOwner)
+	if start.Code != http.StatusOK || len(start.Result().Cookies()) != 1 || start.Result().Cookies()[0].Path != "/silo/api/v2/watch-providers/plugin:4:anilist/auth/callback" {
+		t.Fatalf("prefixed start = %d %v", start.Code, start.Header())
+	}
+	r := httptest.NewRequest(http.MethodGet, Prefix+"/watch-providers/plugin:4:anilist/auth/callback?state=state-1&code=code", nil)
+	r.AddCookie(start.Result().Cookies()[0])
+	result := httptest.NewRecorder()
+	h.ServeHTTP(result, r)
+	if result.Header().Get("Location") != "/silo/settings/watch-providers?watch_provider_auth=connected" || result.Result().Cookies()[0].Path != start.Result().Cookies()[0].Path {
+		t.Fatalf("prefixed completion = %v", result.Header())
+	}
 }
 
 func TestWatchProviderLifecycleScopeAndSecrets(t *testing.T) {

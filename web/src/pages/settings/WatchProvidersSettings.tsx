@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   AlertCircle,
   Check,
@@ -23,6 +23,7 @@ import {
   useDeleteWatchProviderConnection,
   usePollWatchProviderDeviceAuth,
   useStartWatchProviderDeviceAuth,
+  useStartWatchProviderAuthorizationCodeAuth,
   useTriggerWatchProviderSync,
   useUpdateWatchProviderConnection,
   useWatchProviderConnection,
@@ -400,6 +401,7 @@ function WatchProviderCard({
   const { data: savedConnection, isLoading, isFetching } = useWatchProviderConnection(providerKey);
   const updateConnection = useUpdateWatchProviderConnection(providerKey);
   const startAuth = useStartWatchProviderDeviceAuth(providerKey);
+  const startAuthorizationCodeAuth = useStartWatchProviderAuthorizationCodeAuth(providerKey);
   const pollAuth = usePollWatchProviderDeviceAuth(providerKey);
   const connectAPIKey = useConnectWatchProviderAPIKey(providerKey);
   const deleteConnection = useDeleteWatchProviderConnection(providerKey);
@@ -460,11 +462,14 @@ function WatchProviderCard({
     (connection.connected && !connection.etag) ||
     updateConnection.isPending ||
     startAuth.isPending ||
+    startAuthorizationCodeAuth.isPending ||
     pollAuth.isPending ||
     connectAPIKey.isPending ||
     deleteConnection.isPending;
   const displayName = connection.display_name;
   const usesAPIKey = connection.auth_method === WatchProviderAuthMethod.APIKey;
+  const usesAuthorizationCode =
+    connection.auth_method === WatchProviderAuthMethod.AuthorizationCode;
   const showAuth = Boolean(authSession) && !connection.connected;
   const showAPIKey = usesAPIKey && apiKeyPrompt && !connection.connected;
   const runInfo = connection.connected ? deriveRunInfo(connection, latestRun) : null;
@@ -535,6 +540,10 @@ function WatchProviderCard({
   const handleStartConnect = () => {
     if (usesAPIKey) {
       setApiKeyPrompt(true);
+      return;
+    }
+    if (usesAuthorizationCode) {
+      startAuthorizationCodeAuth.mutate();
       return;
     }
     startAuth.mutate(undefined, {
@@ -614,7 +623,9 @@ function WatchProviderCard({
               onClick={handleStartConnect}
               className="flex-1 sm:flex-none"
             >
-              {startAuth.isPending || connectAPIKey.isPending ? (
+              {startAuth.isPending ||
+              startAuthorizationCodeAuth.isPending ||
+              connectAPIKey.isPending ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <CheckCircle2 className="h-4 w-4" />
@@ -624,6 +635,21 @@ function WatchProviderCard({
           )}
         </div>
       </header>
+
+      {usesAuthorizationCode && !connection.connected ? (
+        <p className="text-muted-foreground mt-4 text-xs leading-relaxed">
+          Open Silo at its public URL, then register this callback URL with {displayName} before
+          connecting:
+          <code className="mt-1 block break-all select-all">
+            {
+              new URL(
+                `${window.location.pathname.slice(0, window.location.pathname.lastIndexOf("/settings/"))}/api/v2/watch-providers/${providerKey}/auth/callback`,
+                window.location.origin,
+              ).href
+            }
+          </code>
+        </p>
+      ) : null}
 
       {showAuth && authSession ? (
         <div className="mt-4">
@@ -931,6 +957,15 @@ function WatchProviderCard({
 
 export default function WatchProvidersSettings() {
   const { data, isLoading } = useWatchProviders();
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const result = url.searchParams.get("watch_provider_auth");
+    if (!result) return;
+    if (result === "connected") toast.success("Watch provider connected");
+    else toast.error("Could not connect the watch provider. Please try again.");
+    url.searchParams.delete("watch_provider_auth");
+    window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+  }, []);
 
   if (isLoading) {
     return (

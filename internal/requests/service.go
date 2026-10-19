@@ -102,6 +102,7 @@ type Service struct {
 	users             access.UserRepository
 	requesterIdentity RequesterIdentityResolver
 	audiobookSearch   AudiobookSearcher
+	audiobookLinker   *AudiobookImportLinker
 	tvdbResolver      TVDBIDResolver
 	notifier          FulfillmentNotifier
 	lifecycle         LifecycleNotifier
@@ -136,7 +137,8 @@ func NewService(store Store, tmdbClient TMDBClient, presence PresenceResolver) *
 
 func (s *Service) SetRouterProvider(p RequestRouterProvider) { s.router = p }
 
-func (s *Service) SetAudiobookSearcher(searcher AudiobookSearcher) { s.audiobookSearch = searcher }
+func (s *Service) SetAudiobookSearcher(searcher AudiobookSearcher)        { s.audiobookSearch = searcher }
+func (s *Service) SetAudiobookImportLinker(linker *AudiobookImportLinker) { s.audiobookLinker = linker }
 
 func (s *Service) SetEntitlementResolver(r EntitlementResolver) { s.entitlements = r }
 
@@ -974,70 +976,87 @@ func (s *Service) CreateRequest(ctx context.Context, viewer Viewer, input Create
 	if err != nil {
 		return nil, err
 	}
-	if err := s.ensureCreateAllowedByCeiling(ctx, viewer, normalized); err != nil {
-		return nil, err
-	}
-	tvdbLookupFailed := s.enrichExternalIDs(ctx, &normalized)
-
-	matches, err := s.lookupPresence(ctx, normalized.MediaType, []PresenceCandidate{createPresenceCandidate(normalized)})
-	if err != nil {
-		return nil, err
-	}
-	match := matches[normalized.TMDBID]
-	if match.Available {
-		if normalized.MediaType == MediaTypeMovie || normalized.WholeSeries {
-			return nil, ErrAlreadyAvailable
+	isAudiobook := normalized.MediaType == MediaTypeAudiobook
+	var tvdbLookupFailed bool
+	var facts RoutingFacts
+	if isAudiobook {
+		providerStore, ok := s.store.(ProviderItemRequestStore)
+		if !ok {
+			return nil, fmt.Errorf("audiobook request persistence is not configured")
 		}
-		more, err := s.moreSeasonsRequestable(ctx)
+		active, err := providerStore.ListActiveByProviderItem(ctx, normalized.Provider, normalized.ProviderItemID)
 		if err != nil {
 			return nil, err
 		}
-		if !more {
-			return nil, ErrAlreadyAvailable
+		if active != nil {
+			return nil, ErrAlreadyRequested
 		}
-	}
+	} else {
+		if err := s.ensureCreateAllowedByCeiling(ctx, viewer, normalized); err != nil {
+			return nil, err
+		}
+		tvdbLookupFailed = s.enrichExternalIDs(ctx, &normalized)
 
-	active, err := s.store.ListActiveByTMDB(ctx, normalized.MediaType, []int{normalized.TMDBID})
-	if err != nil {
-		return nil, err
-	}
-	if active[normalized.TMDBID] != nil {
-		return nil, ErrAlreadyRequested
-	}
-
-	// One TMDB detail read, after the cheap refusals, serves routing and the
-	// stored title: the server's copy of the title and year wins over the
-	// client's.
-	detail := s.requestDetail(ctx, normalized.MediaType, normalized.TMDBID)
-	if detail != nil {
-		if title := strings.TrimSpace(detail.Title); title != "" {
-			normalized.Title = title
-		}
-		if detail.Year > 0 {
-			year := detail.Year
-			normalized.Year = &year
-		}
-		// A caller without the display fields (a watchlist add keeps only
-		// its own snapshot) gets TMDB's; one that sent them keeps its own.
-		if normalized.Overview == "" {
-			normalized.Overview = strings.TrimSpace(detail.Overview)
-		}
-		if normalized.PosterPath == "" {
-			normalized.PosterPath = strings.TrimSpace(detail.PosterPath)
-		}
-		if normalized.BackdropPath == "" {
-			normalized.BackdropPath = strings.TrimSpace(detail.BackdropPath)
-		}
-	}
-	facts := s.routingFacts(ctx, detail)
-	if normalized.MediaType == MediaTypeSeries && !normalized.WholeSeries {
-		// A series partly in the library can still be requested for the
-		// seasons it is missing.
-		seasons, err := s.resolveRequestedSeasons(ctx, normalized.Seasons, detail, match)
+		matches, err := s.lookupPresence(ctx, normalized.MediaType, []PresenceCandidate{createPresenceCandidate(normalized)})
 		if err != nil {
 			return nil, err
 		}
-		normalized.Seasons = seasons
+		match := matches[normalized.TMDBID]
+		if match.Available {
+			if normalized.MediaType == MediaTypeMovie || normalized.WholeSeries {
+				return nil, ErrAlreadyAvailable
+			}
+			more, err := s.moreSeasonsRequestable(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if !more {
+				return nil, ErrAlreadyAvailable
+			}
+		}
+
+		active, err := s.store.ListActiveByTMDB(ctx, normalized.MediaType, []int{normalized.TMDBID})
+		if err != nil {
+			return nil, err
+		}
+		if active[normalized.TMDBID] != nil {
+			return nil, ErrAlreadyRequested
+		}
+
+		// One TMDB detail read, after the cheap refusals, serves routing and the
+		// stored title: the server's copy of the title and year wins over the
+		// client's.
+		detail := s.requestDetail(ctx, normalized.MediaType, normalized.TMDBID)
+		if detail != nil {
+			if title := strings.TrimSpace(detail.Title); title != "" {
+				normalized.Title = title
+			}
+			if detail.Year > 0 {
+				year := detail.Year
+				normalized.Year = &year
+			}
+			// A caller without the display fields (a watchlist add keeps only
+			// its own snapshot) gets TMDB's; one that sent them keeps its own.
+			if normalized.Overview == "" {
+				normalized.Overview = strings.TrimSpace(detail.Overview)
+			}
+			if normalized.PosterPath == "" {
+				normalized.PosterPath = strings.TrimSpace(detail.PosterPath)
+			}
+			if normalized.BackdropPath == "" {
+				normalized.BackdropPath = strings.TrimSpace(detail.BackdropPath)
+			}
+		}
+		facts = s.routingFacts(ctx, detail)
+		if normalized.MediaType == MediaTypeSeries && !normalized.WholeSeries {
+			// A series partly in the library can still be requested for the
+			// seasons it is missing.
+			seasons, err := s.resolveRequestedSeasons(ctx, normalized.Seasons, detail, match)
+			if err != nil {
+				return nil, err
+			}
+			normalized.Seasons = seasons
+		}
 	}
 
 	policy, err := s.EffectivePolicy(ctx, viewer.UserID)
@@ -1055,7 +1074,7 @@ func (s *Service) CreateRequest(ctx context.Context, viewer Viewer, input Create
 	// Auto-approval does not depend on a router: without one, an approved
 	// request waits for the title to appear in the library.
 	status := StatusPending
-	if policy.AutoApprove {
+	if !isAudiobook && policy.AutoApprove {
 		status = StatusApproved
 	}
 	record := CreateRequestRecord{
@@ -2411,7 +2430,7 @@ func (s *Service) submitClaimed(ctx context.Context, req Request, actor Viewer, 
 		}
 		return s.markSubmissionFailed(ctx, req, actor, errors.New(explainSubmissionFailure(req, msg)))
 	}
-	return s.recordTargets(ctx, req, actor, plan, targets, connectionKindByID(conns), nil, nil)
+	return s.recordTargets(ctx, req, actor, plan, targets, connectionKindByID(conns), nil, nil, conns)
 }
 
 // submitRouted sends each wanted tier to the server the routing rules chose
@@ -2444,6 +2463,7 @@ func (s *Service) submitRouted(ctx context.Context, req Request, actor Viewer, f
 	var targets []RouterTarget
 	connKind := map[string]string{}
 	failures := map[Quality]string{}
+	connections := make(map[string]ResolvedRouterConnection)
 	for _, q := range plan.want {
 		decision, ok := decisions[q]
 		if !ok {
@@ -2477,6 +2497,7 @@ func (s *Service) submitRouted(ctx context.Context, req Request, actor Viewer, f
 				continue
 			}
 		}
+		connections[conn.ID] = conn
 		maps.Copy(connKind, connectionKindByID([]ResolvedRouterConnection{conn}))
 		got, msg, err := s.router.Fulfill(ctx, installationID, capabilityID, req, []Quality{q}, []ResolvedRouterConnection{conn})
 		if err != nil {
@@ -2510,7 +2531,14 @@ func (s *Service) submitRouted(ctx context.Context, req Request, actor Viewer, f
 		}
 		targets = append(targets, tier...)
 	}
-	return s.recordTargets(ctx, req, actor, plan, targets, connKind, decisions, failures)
+	return s.recordTargets(ctx, req, actor, plan, targets, connKind, decisions, failures, connectionValues(connections))
+}
+func connectionValues(connections map[string]ResolvedRouterConnection) []ResolvedRouterConnection {
+	out := make([]ResolvedRouterConnection, 0, len(connections))
+	for _, connection := range connections {
+		out = append(out, connection)
+	}
+	return out
 }
 
 // unroutedMessage says why a tier went nowhere. Under Standard it can only be
@@ -2687,7 +2715,7 @@ const msgNoTargetForQuality = "fulfillment backend returned no target for this q
 // re-attempts it; failures carries the reason when one is known. decisions,
 // when routing chose the servers, stamps each target with its route.
 func (s *Service) recordTargets(ctx context.Context, req Request, actor Viewer, plan submissionPlan, targets []RouterTarget,
-	connKind map[string]string, decisions map[Quality]RouteDecision, failures map[Quality]string) (*Request, error) {
+	connKind map[string]string, decisions map[Quality]RouteDecision, failures map[Quality]string, conns []ResolvedRouterConnection) (*Request, error) {
 	validQuality := map[Quality]bool{Quality1080p: true, Quality2160p: true}
 	validStatus := map[Status]bool{StatusQueued: true, StatusDownloading: true, StatusCompleted: true, StatusFailed: true}
 	returned := map[Quality]bool{}
@@ -2716,17 +2744,15 @@ func (s *Service) recordTargets(ctx context.Context, req Request, actor Viewer, 
 		if status == StatusFailed {
 			message = explainSubmissionFailure(req, message)
 		}
-		if req.MediaType == MediaTypeAudiobook && rt.Metadata != nil {
-			if _, err := s.store.UpdateRequestLifecycle(ctx, req.ID, RequestLifecycle{
-				ExternalLibraryID:  rt.Metadata.ExternalCorrelationID,
-				ExternalDownloadID: rt.ExternalID,
-				ExternalStatus:     rt.ExternalStatus,
-				ExternalDetail:     rt.Metadata.StatusText,
-				ImportedPath:       rt.Metadata.ImportedPath,
-				Retryable:          status == StatusFailed,
-			}); err != nil {
+		if req.MediaType == MediaTypeAudiobook {
+			lifecycleTarget := rt
+			lifecycleTarget.Status = status
+			if _, err := s.persistRouterTargetLifecycle(ctx, req, lifecycleTarget, status == StatusFailed); err != nil {
 				return nil, err
 			}
+		}
+		if req.MediaType == MediaTypeAudiobook && status == StatusCompleted {
+			status = StatusQueued
 		}
 		record = append(record, Target{
 			IntegrationID: rt.ConnectionID, IntegrationKind: connKind[rt.ConnectionID],
@@ -2759,7 +2785,81 @@ func (s *Service) recordTargets(ctx context.Context, req Request, actor Viewer, 
 			"request_id", req.ID, "targets", len(record))
 		return s.store.GetRequest(ctx, req.ID)
 	}
-	return recorded, err
+	if err != nil {
+		return nil, err
+	}
+	if req.MediaType != MediaTypeAudiobook {
+		return recorded, nil
+	}
+	if recorded == nil {
+		return nil, nil
+	}
+	recorded.Targets, err = s.store.ListTargets(ctx, req.ID)
+	if err != nil {
+		return nil, err
+	}
+	var lifecycleErr error
+	for _, target := range targets {
+		if target.Status != StatusCompleted {
+			continue
+		}
+		connection := connectionByID(conns, target.ConnectionID)
+		targetID := findTargetID(recorded.Targets, target.Quality, target.ConnectionID)
+		if s.audiobookLinker == nil {
+			lifecycleErr = errors.New("audiobook import linker is not configured")
+		} else {
+			var lifecycle RequestLifecycle
+			lifecycle, lifecycleErr = s.audiobookLinker.LinkWithConnection(ctx, *recorded, RouterTargetStatus{Quality: target.Quality, ConnectionID: target.ConnectionID, Status: StatusCompleted, ExternalStatus: target.ExternalStatus, Message: target.Message, Metadata: target.Metadata}, connection)
+			if lifecycleErr == nil {
+				recorded, lifecycleErr = s.store.UpdateRequestLifecycle(ctx, req.ID, lifecycle)
+				if lifecycleErr == nil {
+					recorded, lifecycleErr = s.store.UpdateTargetStatus(ctx, targetID, StatusCompleted, target.ExternalID, target.ExternalStatus, "", actor)
+				}
+			}
+		}
+		if lifecycleErr != nil {
+			_, updateErr := s.store.UpdateRequestLifecycle(ctx, req.ID, RequestLifecycle{ExternalDownloadID: target.ExternalID, ExternalStatus: target.ExternalStatus, ExternalDetail: lifecycleErr.Error(), Retryable: true})
+			if updateErr != nil {
+				return nil, errors.Join(lifecycleErr, updateErr)
+			}
+			failed, targetErr := s.store.UpdateTargetStatus(ctx, targetID, StatusFailed, target.ExternalID, target.ExternalStatus, lifecycleErr.Error(), actor)
+			if targetErr != nil {
+				return nil, errors.Join(lifecycleErr, targetErr)
+			}
+			if failed != nil {
+				recorded = failed
+			}
+		}
+	}
+	submissionState := SubmissionStateInFlight
+	if recorded.Status == StatusCompleted {
+		submissionState = SubmissionStateFulfilled
+	} else if recorded.Outcome == OutcomeFailed {
+		submissionState = SubmissionStateFailed
+	}
+	recorded, err = s.store.SetRequestSubmissionState(ctx, req.ID, submissionState)
+	if err != nil {
+		return nil, err
+	}
+	return recorded, nil
+}
+
+func connectionByID(conns []ResolvedRouterConnection, id string) ResolvedRouterConnection {
+	for _, conn := range conns {
+		if conn.ID == id {
+			return conn
+		}
+	}
+	return ResolvedRouterConnection{ID: id}
+}
+
+func findTargetID(targets []Target, quality Quality, connectionID string) int64 {
+	for _, target := range targets {
+		if target.Quality == quality && target.IntegrationID == connectionID {
+			return target.ID
+		}
+	}
+	return 0
 }
 
 // connectionKindByID maps each connection id to its plugin-declared service kind
@@ -2861,6 +2961,37 @@ func (s *Service) markSubmissionFailed(ctx context.Context, claimed Request, act
 		}
 	}
 	return failed, nil
+}
+
+func (s *Service) persistRouterTargetLifecycle(ctx context.Context, req Request, target RouterTarget, retryable bool) (*Request, error) {
+	lifecycle := RequestLifecycle{
+		ExternalLibraryID: req.ExternalLibraryID, ExternalDownloadID: target.ExternalID,
+		ExternalStatus: target.ExternalStatus, ExternalDetail: target.Message,
+		ImportedPath: req.ImportedPath, ScanRunID: req.ScanRunID,
+		SiloAudiobookID: req.SiloAudiobookID, SiloAudiobookLink: req.SiloAudiobookLink,
+		Retryable: retryable,
+	}
+	if lifecycle.ExternalDownloadID == "" {
+		lifecycle.ExternalDownloadID = req.ExternalDownloadID
+	}
+	if lifecycle.ExternalStatus == "" {
+		lifecycle.ExternalStatus = req.ExternalStatus
+	}
+	if lifecycle.ExternalDetail == "" {
+		lifecycle.ExternalDetail = req.ExternalDetail
+	}
+	if target.Metadata != nil {
+		if target.Metadata.ExternalCorrelationID != "" {
+			lifecycle.ExternalLibraryID = target.Metadata.ExternalCorrelationID
+		}
+		if target.Metadata.StatusText != "" {
+			lifecycle.ExternalDetail = target.Metadata.StatusText
+		}
+		if target.Metadata.ImportedPath != "" {
+			lifecycle.ImportedPath = target.Metadata.ImportedPath
+		}
+	}
+	return s.store.UpdateRequestLifecycle(ctx, req.ID, lifecycle)
 }
 
 type reconcileChange string
@@ -3024,11 +3155,88 @@ func (s *Service) reconcileRequest(ctx context.Context, req Request, fc *fulfill
 		return reconcileUnchanged, nil
 	}
 	statuses, checkErr := s.checkTargetStatuses(ctx, req, targets, fc)
+	if req.MediaType == MediaTypeAudiobook {
+		lifecycleChange, lifecycleErr := s.reconcileAudiobookStatuses(ctx, req, targets, statuses, fc)
+		if lifecycleErr != nil {
+			return reconcileUnchanged, errors.Join(checkErr, lifecycleErr)
+		}
+		return lifecycleChange, checkErr
+	}
 	change, err := s.applyTargetStatuses(ctx, targets, statuses)
 	if err != nil {
 		return reconcileUnchanged, err
 	}
 	return change, checkErr
+}
+
+func (s *Service) reconcileAudiobookStatuses(ctx context.Context, req Request, targets []Target, statuses []RouterTargetStatus, fc *fulfillContext) (reconcileChange, error) {
+	change := reconcileUnchanged
+	for _, status := range statuses {
+		var target *Target
+		for i := range targets {
+			if targets[i].Quality == status.Quality && targets[i].IntegrationID == status.ConnectionID {
+				target = &targets[i]
+				break
+			}
+		}
+		if target == nil || target.Status == StatusCompleted || target.Status == StatusFailed {
+			continue
+		}
+		if status.ExternalStatus != "" || status.Message != "" || status.Metadata != nil {
+			persisted, err := s.persistRouterTargetLifecycle(ctx, req, RouterTarget{ExternalID: target.ExternalID, ExternalStatus: status.ExternalStatus, Message: status.Message, Metadata: status.Metadata}, status.Status == StatusFailed)
+			if err != nil {
+				return change, err
+			}
+			if persisted != nil {
+				req = *persisted
+			}
+		}
+		if status.Status != StatusCompleted {
+			updated, err := s.applyTargetStatuses(ctx, []Target{*target}, []RouterTargetStatus{status})
+			if err != nil {
+				return change, err
+			}
+			if updated != reconcileUnchanged {
+				change = updated
+			}
+			continue
+		}
+		connection := connectionByID(connectionsForTarget(fc, req.MediaType, target.IntegrationID), target.IntegrationID)
+		if s.audiobookLinker == nil {
+			return change, errors.New("audiobook import linker is not configured")
+		}
+		lifecycle, err := s.audiobookLinker.LinkWithConnection(ctx, req, status, connection)
+		if err != nil {
+			_, persistErr := s.store.UpdateRequestLifecycle(ctx, req.ID, RequestLifecycle{ExternalDownloadID: target.ExternalID, ExternalStatus: status.ExternalStatus, ExternalDetail: err.Error(), ImportedPath: lifecycle.ImportedPath, ScanRunID: lifecycle.ScanRunID, Retryable: true})
+			if _, targetErr := s.store.UpdateTargetStatus(ctx, target.ID, StatusFailed, target.ExternalID, status.ExternalStatus, err.Error(), Viewer{}); targetErr != nil {
+				return change, errors.Join(err, persistErr, targetErr)
+			}
+			if persistErr != nil {
+				return change, errors.Join(err, persistErr)
+			}
+			return reconcileFailed, nil
+		}
+		if _, err := s.store.UpdateRequestLifecycle(ctx, req.ID, lifecycle); err != nil {
+			return change, err
+		}
+		if _, err := s.store.UpdateTargetStatus(ctx, target.ID, StatusCompleted, target.ExternalID, status.ExternalStatus, "", Viewer{}); err != nil {
+			return change, err
+		}
+		if _, err := s.store.SetRequestSubmissionState(ctx, req.ID, SubmissionStateFulfilled); err != nil {
+			return change, err
+		}
+		change = reconcileCompleted
+	}
+	return change, nil
+}
+
+func connectionsForTarget(fc *fulfillContext, mediaType MediaType, connectionID string) []ResolvedRouterConnection {
+	for _, in := range fc.integrations {
+		if in.ID == connectionID {
+			return []ResolvedRouterConnection{{ID: in.ID, BaseURL: in.BaseURL, APIKey: strings.TrimSpace(in.APIKeyRef), Config: in.PluginConfig}}
+		}
+	}
+	return []ResolvedRouterConnection{{ID: connectionID}}
 }
 
 // applyTargetStatuses writes the statuses a router reported for the given
@@ -3447,6 +3655,8 @@ func normalizeMediaType(mediaType MediaType) (MediaType, error) {
 		return MediaTypeMovie, nil
 	case MediaTypeSeries, "tv":
 		return MediaTypeSeries, nil
+	case MediaTypeAudiobook:
+		return MediaTypeAudiobook, nil
 	default:
 		return "", ErrInvalidMediaType
 	}
@@ -3460,6 +3670,8 @@ func normalizeSearchMediaType(mediaType MediaType) (MediaType, error) {
 		return MediaTypeMovie, nil
 	case MediaTypeSeries, "tv":
 		return MediaTypeSeries, nil
+	case MediaTypeAudiobook:
+		return MediaTypeAudiobook, nil
 	default:
 		return "", ErrInvalidMediaType
 	}

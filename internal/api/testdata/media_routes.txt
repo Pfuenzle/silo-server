@@ -859,6 +859,8 @@ GET /api/v2/user/libraries	non-media
 GET /api/v2/user/libraries/capabilities	non-media
 GET /api/v2/watch-providers	non-media
 POST /api/v2/watch-providers/{provider}/auth/api-key	non-media
+POST /api/v2/watch-providers/{provider}/auth/authorization-code	non-media
+GET /api/v2/watch-providers/{provider}/auth/callback	non-media
 POST /api/v2/watch-providers/{provider}/auth/device-code	non-media
 POST /api/v2/watch-providers/{provider}/auth/poll	non-media
 DELETE /api/v2/watch-providers/{provider}/connection	non-media
@@ -2142,6 +2144,8 @@ GET /api/v2/user/libraries	non-media
 GET /api/v2/user/libraries/capabilities	non-media
 GET /api/v2/watch-providers	non-media
 POST /api/v2/watch-providers/{provider}/auth/api-key	non-media
+POST /api/v2/watch-providers/{provider}/auth/authorization-code	non-media
+GET /api/v2/watch-providers/{provider}/auth/callback	non-media
 POST /api/v2/watch-providers/{provider}/auth/device-code	non-media
 POST /api/v2/watch-providers/{provider}/auth/poll	non-media
 DELETE /api/v2/watch-providers/{provider}/connection	non-media

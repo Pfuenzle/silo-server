@@ -16,6 +16,7 @@ import {
   requestDetailHref,
   requestDiscoverSectionHref,
   requestDisplayState,
+  requestInputFromMediaResult,
   requestSearchHref,
   requestSearchTypeForScope,
   upcomingRequestSeasons,
@@ -38,6 +39,32 @@ describe("flattenResultPages", () => {
     ]);
     expect(flattenResultPages(undefined)).toEqual([]);
   });
+
+  it("keeps distinct audiobook provider identities and removes only repeated editions", () => {
+    const book = (provider: string, provider_item_id: string): RequestMediaResult => ({
+      media_type: "audiobook",
+      provider,
+      provider_item_id,
+      tmdb_id: 0,
+      title: "Dune",
+      availability: "missing",
+      request: { requestable: true },
+    });
+    const first = book("audiobook-metadata", "edition-1");
+    const second = book("audiobook-metadata", "edition-2");
+    const otherProvider = book("other-provider", "edition-1");
+
+    expect(
+      flattenResultPages([{ results: [first, second] }, { results: [first, otherProvider] }]),
+    ).toEqual([first, second, otherProvider]);
+    expect(requestInputFromMediaResult(first)).toMatchObject({
+      media_type: "audiobook",
+      provider: "audiobook-metadata",
+      provider_item_id: "edition-1",
+      title: "Dune",
+    });
+    expect(requestInputFromMediaResult(first)).not.toHaveProperty("tmdb_id");
+  });
 });
 
 describe("pendingPageSize", () => {
@@ -54,10 +81,13 @@ describe("requestSearchHref", () => {
     expect(requestSearchHref(" the bear ")).toBe("/catalog?source=query&q=the+bear&type=video");
   });
 
-  it("keeps a movie or series type and drops anything else", () => {
+  it("keeps supported request scopes", () => {
     expect(requestSearchHref("dune", "movie")).toBe("/catalog?source=query&q=dune&type=movie");
     expect(requestSearchHref("dune", "series")).toBe("/catalog?source=query&q=dune&type=series");
     expect(requestSearchHref("dune", "all")).toBe("/catalog?source=query&q=dune&type=video");
+    expect(requestSearchHref("dune", "audiobook")).toBe(
+      "/catalog?source=query&q=dune&type=audiobook",
+    );
   });
 });
 
@@ -70,8 +100,8 @@ describe("requestSearchTypeForScope", () => {
     expect(requestSearchTypeForScope("episode")).toBe("series");
   });
 
-  it("skips TMDB for books", () => {
-    expect(requestSearchTypeForScope("audiobook")).toBeNull();
+  it("uses audiobook metadata for audiobooks and skips unsupported book types", () => {
+    expect(requestSearchTypeForScope("audiobook")).toBe("audiobook");
     expect(requestSearchTypeForScope("ebook")).toBeNull();
     expect(requestSearchTypeForScope("manga")).toBeNull();
   });
@@ -127,6 +157,7 @@ describe("requestDetailHref", () => {
   it("builds the title detail route", () => {
     expect(requestDetailHref("movie", 603)).toBe("/title/movie/603");
     expect(requestDetailHref("series", 1399)).toBe("/title/series/1399");
+    expect(requestDetailHref("audiobook", 0)).toBe("/requests");
   });
 });
 

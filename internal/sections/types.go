@@ -284,6 +284,16 @@ func ParseQueryDefinition(config json.RawMessage) (catalog.QueryDefinition, erro
 		return catalog.QueryDefinition{}, err
 	}
 	def = def.Normalize()
+	var generated struct {
+		Kind   string `json:"generated_kind"`
+		Source string `json:"generated_source"`
+	}
+	if err := json.Unmarshal(config, &generated); err != nil {
+		return catalog.QueryDefinition{}, err
+	}
+	if generated.Kind == "recently_released_episodes" && generated.Source == "home_library_recent" {
+		def = catalog.CapGeneratedRecentEpisodes(def)
+	}
 	return def, def.Validate()
 }
 

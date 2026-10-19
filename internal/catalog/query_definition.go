@@ -48,7 +48,7 @@ var queryFieldDefs = map[string]queryFieldDef{
 	"original_language": {columnSQL: "original_language", executable: true, validOps: map[string]bool{"is": true, "is_not": true}},
 	"content_rating":    {columnSQL: "content_rating", executable: true, validOps: map[string]bool{"is": true, "is_not": true}},
 	"added_at":          {columnSQL: "created_at", executable: true, validOps: map[string]bool{"gt": true, "lt": true, "between": true, "in_last": true}},
-	"release_date":      {columnSQL: "COALESCE(%s.release_date::text, NULLIF(BTRIM(%s.first_air_date), ''))", executable: true, validOps: map[string]bool{"gt": true, "lt": true, "between": true, "in_last": true}},
+	"release_date":      {columnSQL: "COALESCE(%s.release_date::text, NULLIF(BTRIM(%s.first_air_date), ''))", executable: true, validOps: map[string]bool{"gt": true, "lt": true, "between": true, "in_last": true, "in_next": true}},
 	"status":            {columnSQL: "status", executable: true, validOps: map[string]bool{"is": true, "is_not": true}},
 	"actor":             {executable: true, validOps: map[string]bool{"is": true, "is_not": true}},
 	"director":          {executable: true, validOps: map[string]bool{"is": true, "is_not": true}},

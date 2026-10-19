@@ -424,6 +424,7 @@ type Dependencies struct {
 	Requests                           MediaRequestService
 	RequestLifecycle                   RequestLifecycleService
 	WatchProviders                     WatchProviderService
+	WatchProviderPublicURL             string
 	HistoryImports                     HistoryImportService
 	AdminHistoryImports                AdminHistoryImportService
 	AdminSubtitleList                  AdminSubtitleListService

@@ -495,6 +495,9 @@ func (s *Service) StartDeviceAuth(
 	if !ok {
 		return DeviceAuthSession{}, ProviderCapabilityError{Key: providerKey, What: "does not support auth"}
 	}
+	if declared, ok := provider.(interface{ AuthMethod() string }); ok && declared.AuthMethod() != AuthMethodDeviceCode {
+		return DeviceAuthSession{}, ProviderCapabilityError{Key: providerKey, What: "does not support device authorization"}
+	}
 
 	cfg, err := s.serverConfig(ctx, providerKey)
 	if err != nil {
@@ -535,12 +538,18 @@ func (s *Service) PollDeviceAuth(
 	if !ok {
 		return Connection{}, ProviderCapabilityError{Key: providerKey, What: "does not support auth"}
 	}
+	if declared, ok := provider.(interface{ AuthMethod() string }); ok && declared.AuthMethod() != AuthMethodDeviceCode {
+		return Connection{}, ProviderCapabilityError{Key: providerKey, What: "does not support device authorization"}
+	}
 
 	session, err := s.repo.GetAuthSession(ctx, sessionID)
 	if err != nil {
 		return Connection{}, err
 	}
 	if session.UserID != userID || session.ProfileID != profileID || session.Provider != providerKey {
+		return Connection{}, ErrAuthSessionMismatch
+	}
+	if isAuthorizationCodeSession(session) {
 		return Connection{}, ErrAuthSessionMismatch
 	}
 	if session.CompletedAt != nil {

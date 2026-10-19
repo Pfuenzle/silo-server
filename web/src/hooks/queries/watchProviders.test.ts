@@ -7,6 +7,7 @@ import {
   fetchWatchProviderSyncRuns,
   pollWatchProviderDeviceAuth,
   startWatchProviderDeviceAuth,
+  startWatchProviderAuthorizationCodeAuth,
   triggerWatchProviderSync,
   updateWatchProviderConnection,
   deleteWatchProviderConnection,
@@ -17,6 +18,13 @@ import {
 vi.mock("@/api/v2/request", () => ({
   v2: vi.fn(async (operation: string) => {
     if (operation.endsWith("/auth/device-code")) return { id: "auth-1", user_code: "PUBLIC" };
+    if (operation.endsWith("/auth/authorization-code"))
+      return {
+        id: "state-1",
+        provider: "plugin:4:anilist",
+        authorization_url: "https://anilist.co/api/v2/oauth/authorize?state=state-1",
+        expires_at: "2026-10-19T12:00:00.000Z",
+      };
     if (operation.endsWith("/sync"))
       return { run: { id: "run-1", status: "running" }, retry_after_seconds: 0 };
     return { items: [] };
@@ -44,6 +52,22 @@ describe("watch provider v2 queries", () => {
       path: { provider: "simkl" },
       query: { limit: 10 },
     });
+  });
+  it("starts browser authorization through v2 with the installed provider key", async () => {
+    await expect(
+      startWatchProviderAuthorizationCodeAuth("plugin:4:anilist"),
+    ).resolves.toMatchObject({
+      authorization_url: "https://anilist.co/api/v2/oauth/authorize?state=state-1",
+    });
+    expect(v2).toHaveBeenLastCalledWith(
+      "POST /api/v2/watch-providers/{provider}/auth/authorization-code",
+      {
+        path: { provider: "plugin:4:anilist" },
+      },
+    );
+    const error = new Error("Provider unavailable");
+    vi.mocked(v2).mockRejectedValueOnce(error);
+    await expect(startWatchProviderAuthorizationCodeAuth("plugin:4:anilist")).rejects.toBe(error);
   });
   it("passes credentials in typed bodies and keeps provider keys as path values", async () => {
     await expect(startWatchProviderDeviceAuth("simkl")).resolves.toMatchObject({

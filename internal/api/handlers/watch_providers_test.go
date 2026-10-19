@@ -53,6 +53,12 @@ func (s stubWatchProviderService) StartDeviceAuth(context.Context, int, string, 
 func (s stubWatchProviderService) PollDeviceAuth(context.Context, int, string, string, string) (watchsync.Connection, error) {
 	return watchsync.Connection{}, nil
 }
+func (s stubWatchProviderService) StartAuthorizationCodeAuth(context.Context, int, string, string, string) (watchsync.AuthorizationCodeSession, error) {
+	return watchsync.AuthorizationCodeSession{}, nil
+}
+func (s stubWatchProviderService) CompleteAuthorizationCodeAuth(context.Context, string, string, string) (watchsync.Connection, error) {
+	return watchsync.Connection{}, nil
+}
 func (s stubWatchProviderService) ConnectAPIKeyWithConfig(context.Context, int, string, string, string, watchsync.ConnectionConfigValues) (watchsync.Connection, error) {
 	return watchsync.Connection{}, nil
 }

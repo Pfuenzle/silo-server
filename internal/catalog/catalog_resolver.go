@@ -2184,10 +2184,42 @@ func parseCatalogCollectionQueryDefinition(config json.RawMessage) (QueryDefinit
 		return QueryDefinition{}, err
 	}
 	def = def.Normalize()
+	if isGeneratedRecentEpisodesConfig(probe) {
+		def = CapGeneratedRecentEpisodes(def)
+	}
 	if err := def.Validate(); err != nil {
 		return QueryDefinition{}, err
 	}
 	return def, nil
+}
+
+func isGeneratedRecentEpisodesConfig(probe map[string]json.RawMessage) bool {
+	var source, kind string
+	if err := json.Unmarshal(probe["generated_source"], &source); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(probe["generated_kind"], &kind); err != nil {
+		return false
+	}
+	return source == "home_library_recent" && kind == "recently_released_episodes"
+}
+
+// CapGeneratedRecentEpisodes adds the rolling four-day future boundary used by
+// generated home episode sections. It is idempotent so all section parsers can
+// apply the policy without duplicating the rule.
+func CapGeneratedRecentEpisodes(def QueryDefinition) QueryDefinition {
+	for _, group := range def.Groups {
+		for _, rule := range group.Rules {
+			if rule.Field == "release_date" && rule.Op == "in_next" && rule.Value == "4d" {
+				return def
+			}
+		}
+	}
+	def.Groups = append(def.Groups, QueryGroup{
+		Match: "all",
+		Rules: []QueryRule{{Field: "release_date", Op: "in_next", Value: "4d"}},
+	})
+	return def
 }
 
 func bytesTrimSpace(raw []byte) []byte {

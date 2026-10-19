@@ -2759,14 +2759,30 @@ func (f *fakeStore) UpdateRequestLifecycle(_ context.Context, id string, lifecyc
 	if req == nil {
 		return nil, ErrNotFound
 	}
-	if lifecycle.ExternalLibraryID != "" { req.ExternalLibraryID = lifecycle.ExternalLibraryID }
-	if lifecycle.ExternalDownloadID != "" { req.ExternalDownloadID = lifecycle.ExternalDownloadID }
-	if lifecycle.ExternalStatus != "" { req.ExternalStatus = lifecycle.ExternalStatus }
-	if lifecycle.ExternalDetail != "" { req.ExternalDetail = lifecycle.ExternalDetail }
-	if lifecycle.ImportedPath != "" { req.ImportedPath = lifecycle.ImportedPath }
-	if lifecycle.ScanRunID != "" { req.ScanRunID = lifecycle.ScanRunID }
-	if lifecycle.SiloAudiobookID != "" { req.SiloAudiobookID = lifecycle.SiloAudiobookID }
-	if lifecycle.SiloAudiobookLink != "" { req.SiloAudiobookLink = lifecycle.SiloAudiobookLink }
+	if lifecycle.ExternalLibraryID != "" {
+		req.ExternalLibraryID = lifecycle.ExternalLibraryID
+	}
+	if lifecycle.ExternalDownloadID != "" {
+		req.ExternalDownloadID = lifecycle.ExternalDownloadID
+	}
+	if lifecycle.ExternalStatus != "" {
+		req.ExternalStatus = lifecycle.ExternalStatus
+	}
+	if lifecycle.ExternalDetail != "" {
+		req.ExternalDetail = lifecycle.ExternalDetail
+	}
+	if lifecycle.ImportedPath != "" {
+		req.ImportedPath = lifecycle.ImportedPath
+	}
+	if lifecycle.ScanRunID != "" {
+		req.ScanRunID = lifecycle.ScanRunID
+	}
+	if lifecycle.SiloAudiobookID != "" {
+		req.SiloAudiobookID = lifecycle.SiloAudiobookID
+	}
+	if lifecycle.SiloAudiobookLink != "" {
+		req.SiloAudiobookLink = lifecycle.SiloAudiobookLink
+	}
 	req.Retryable = lifecycle.Retryable
 	copy := *req
 	return &copy, nil

@@ -49,8 +49,10 @@ type RequestDownload struct {
 
 // RequestMediaResult is one discovery or search card.
 type RequestMediaResult struct {
-	MediaType        string            `json:"media_type" doc:"movie or series" example:"movie"`
+	MediaType        string            `json:"media_type" doc:"movie, series or audiobook" example:"movie"`
 	TMDBID           int               `json:"tmdb_id" doc:"TMDB identifier (external, not a Silo ID)" example:"949"`
+	Provider         string            `json:"provider,omitempty" doc:"Metadata provider for audiobook results"`
+	ProviderItemID   string            `json:"provider_item_id,omitempty" doc:"The audiobook's identifier at its metadata provider"`
 	Title            string            `json:"title" example:"Heat"`
 	Year             int               `json:"year,omitempty" example:"1995"`
 	Overview         string            `json:"overview,omitempty"`
@@ -210,8 +212,9 @@ type RequestTarget struct {
 type MediaRequest struct {
 	ID                   ID                      `json:"id" example:"1834729"`
 	Provider             string                  `json:"provider" example:"tmdb"`
-	MediaType            string                  `json:"media_type" doc:"movie or series" example:"movie"`
+	MediaType            string                  `json:"media_type" doc:"movie, series or audiobook" example:"movie"`
 	TMDBID               int                     `json:"tmdb_id" doc:"TMDB identifier (external, not a Silo ID)" example:"949"`
+	ProviderItemID       string                  `json:"provider_item_id,omitempty" doc:"Audiobook metadata provider identifier"`
 	TVDBID               *int                    `json:"tvdb_id,omitempty" doc:"TVDB identifier (external, not a Silo ID)"`
 	IMDbID               string                  `json:"imdb_id,omitempty" example:"tt0113277"`
 	Title                string                  `json:"title" example:"Heat"`
@@ -234,6 +237,12 @@ type MediaRequest struct {
 	ExternalID           string                  `json:"external_id,omitempty" doc:"Admins only: the integration's own identifier"`
 	ExternalStatus       string                  `json:"external_status,omitempty" doc:"Admins only: the status as the download server reports it"`
 	LibraryContentID     string                  `json:"library_content_id,omitempty" doc:"The catalog item once the media is in the library"`
+	SiloAudiobookID      string                  `json:"silo_audiobook_id,omitempty" doc:"The audiobook catalog identifier after import"`
+	SiloAudiobookLink    string                  `json:"silo_audiobook_link,omitempty" doc:"The library link after the audiobook import completes"`
+	Retryable            bool                    `json:"retryable" doc:"Whether an audiobook fulfillment failure can be retried"`
+	ExternalLibraryID    string                  `json:"external_library_id,omitempty" doc:"Admins only: the fulfillment server's library identifier"`
+	ExternalDownloadID   string                  `json:"external_download_id,omitempty" doc:"Admins only: the fulfillment server's download identifier"`
+	ExternalDetail       string                  `json:"external_detail,omitempty" doc:"Admins only: the fulfillment server's lifecycle detail"`
 	LastError            string                  `json:"last_error,omitempty" doc:"Admins only: why the last submission to a download server failed. It can name servers and routing rules"`
 	CreatedAt            Instant                 `json:"created_at" example:"2026-01-02T03:04:05.000Z"`
 	UpdatedAt            Instant                 `json:"updated_at" example:"2026-01-02T03:04:05.000Z"`
@@ -255,16 +264,18 @@ type MediaRequestCollection struct {
 // MediaRequestCreate is the createRequest body: the media as the client saw
 // it on a discovery or search card.
 type MediaRequestCreate struct {
-	MediaType    string `json:"media_type" enum:"movie,series" example:"movie"`
-	TMDBID       int    `json:"tmdb_id" minimum:"1" doc:"TMDB identifier (external, not a Silo ID)" example:"949"`
-	TVDBID       *int   `json:"tvdb_id,omitempty" minimum:"1" doc:"TVDB identifier (external, not a Silo ID)"`
-	IMDbID       string `json:"imdb_id,omitempty" example:"tt0113277"`
-	Title        string `json:"title" minLength:"1" example:"Heat"`
-	Year         *int   `json:"year,omitempty" example:"1995"`
-	Overview     string `json:"overview,omitempty"`
-	PosterPath   string `json:"poster_path,omitempty" doc:"TMDB image path"`
-	BackdropPath string `json:"backdrop_path,omitempty" doc:"TMDB image path"`
-	Seasons      []int  `json:"seasons,omitempty" maxItems:"200" doc:"Series only: the season numbers to request, starting at 1 (a season below 1 is refused). Omitted: every aired season not yet complete in the library" example:"[2,3]"`
+	MediaType      string `json:"media_type" enum:"movie,series,audiobook" example:"movie"`
+	Provider       string `json:"provider,omitempty" enum:"tmdb,audiobook-metadata" doc:"Audiobook requests use audiobook-metadata; movies and series use tmdb"`
+	ProviderItemID string `json:"provider_item_id,omitempty" doc:"Required for audiobook requests: the metadata provider's identifier"`
+	TMDBID         int    `json:"tmdb_id,omitempty" minimum:"1" doc:"Required for movies and series: TMDB identifier (external, not a Silo ID)" example:"949"`
+	TVDBID         *int   `json:"tvdb_id,omitempty" minimum:"1" doc:"TVDB identifier (external, not a Silo ID)"`
+	IMDbID         string `json:"imdb_id,omitempty" example:"tt0113277"`
+	Title          string `json:"title" minLength:"1" example:"Heat"`
+	Year           *int   `json:"year,omitempty" example:"1995"`
+	Overview       string `json:"overview,omitempty"`
+	PosterPath     string `json:"poster_path,omitempty" doc:"TMDB image path"`
+	BackdropPath   string `json:"backdrop_path,omitempty" doc:"TMDB image path"`
+	Seasons        []int  `json:"seasons,omitempty" maxItems:"200" doc:"Series only: the season numbers to request, starting at 1 (a season below 1 is refused). Omitted: every aired season not yet complete in the library" example:"[2,3]"`
 }
 
 // MediaRequestCreateInput is the createRequest request.
@@ -288,7 +299,7 @@ type MediaRequestGetInput struct {
 // RequestMediaSearchInput is the searchRequestMedia query.
 type RequestMediaSearchInput struct {
 	Query     string `query:"q" minLength:"1" required:"true" doc:"Title search text" example:"heat"`
-	MediaType string `query:"media_type" enum:"movie,series,all" default:"all" doc:"Restrict results to one media type" example:"all"`
+	MediaType string `query:"media_type" enum:"movie,series,audiobook,all" default:"all" doc:"Restrict results to one media type" example:"all"`
 	ProviderPage
 }
 
@@ -506,16 +517,18 @@ func (reg *Registry) createRequest(ctx context.Context, in *MediaRequestCreateIn
 		return nil, p
 	}
 	req, err := svc.CreateRequest(ctx, viewer, mediarequests.CreateRequestInput{
-		MediaType:    mediarequests.MediaType(in.Body.MediaType),
-		TMDBID:       in.Body.TMDBID,
-		TVDBID:       in.Body.TVDBID,
-		IMDbID:       in.Body.IMDbID,
-		Title:        in.Body.Title,
-		Year:         in.Body.Year,
-		Overview:     in.Body.Overview,
-		PosterPath:   in.Body.PosterPath,
-		BackdropPath: in.Body.BackdropPath,
-		Seasons:      in.Body.Seasons,
+		MediaType:      mediarequests.MediaType(in.Body.MediaType),
+		Provider:       in.Body.Provider,
+		ProviderItemID: in.Body.ProviderItemID,
+		TMDBID:         in.Body.TMDBID,
+		TVDBID:         in.Body.TVDBID,
+		IMDbID:         in.Body.IMDbID,
+		Title:          in.Body.Title,
+		Year:           in.Body.Year,
+		Overview:       in.Body.Overview,
+		PosterPath:     in.Body.PosterPath,
+		BackdropPath:   in.Body.BackdropPath,
+		Seasons:        in.Body.Seasons,
 	})
 	if err != nil {
 		return nil, requestProblem(err)
@@ -829,35 +842,40 @@ func requestSourceOf(s mediarequests.Source) mediarequests.Source {
 // quality, status and download progress.
 func mediaRequestOf(r *mediarequests.Request, viewer mediarequests.Viewer) MediaRequest {
 	out := MediaRequest{
-		ID:               ID(r.ID),
-		Provider:         r.Provider,
-		MediaType:        string(r.MediaType),
-		TMDBID:           r.TMDBID,
-		TVDBID:           r.TVDBID,
-		IMDbID:           r.IMDbID,
-		Title:            r.Title,
-		Year:             r.Year,
-		Overview:         r.Overview,
-		PosterPath:       r.PosterPath,
-		BackdropPath:     r.BackdropPath,
-		Status:           string(r.Status),
-		Outcome:          string(r.Outcome),
-		State:            string(r.State()),
-		Seasons:          NonNil(r.Seasons),
-		SeasonProgress:   requestSeasonProgressOf(r.SeasonProgress),
-		OutcomeReason:    r.OutcomeReason,
-		Source:           string(requestSourceOf(r.Source)),
-		IsAnime:          r.IsAnime,
-		Targets:          make([]RequestTarget, 0, len(r.Targets)),
-		LibraryContentID: r.LibraryContentID,
-		CreatedAt:        NewInstant(r.CreatedAt),
-		UpdatedAt:        NewInstant(r.UpdatedAt),
-		ApprovedAt:       instantPtr(r.ApprovedAt),
-		CompletedAt:      instantPtr(r.CompletedAt),
-		Download:         requestDownloadOf(r.Download()),
+		ID:                ID(r.ID),
+		Provider:          r.Provider,
+		MediaType:         string(r.MediaType),
+		TMDBID:            r.TMDBID,
+		ProviderItemID:    r.ProviderItemID,
+		TVDBID:            r.TVDBID,
+		IMDbID:            r.IMDbID,
+		Title:             r.Title,
+		Year:              r.Year,
+		Overview:          r.Overview,
+		PosterPath:        r.PosterPath,
+		BackdropPath:      r.BackdropPath,
+		Status:            string(r.Status),
+		Outcome:           string(r.Outcome),
+		State:             string(r.State()),
+		Seasons:           NonNil(r.Seasons),
+		SeasonProgress:    requestSeasonProgressOf(r.SeasonProgress),
+		OutcomeReason:     r.OutcomeReason,
+		Source:            string(requestSourceOf(r.Source)),
+		IsAnime:           r.IsAnime,
+		Targets:           make([]RequestTarget, 0, len(r.Targets)),
+		LibraryContentID:  r.LibraryContentID,
+		SiloAudiobookID:   r.SiloAudiobookID,
+		SiloAudiobookLink: r.SiloAudiobookLink,
+		Retryable:         r.Retryable,
+		CreatedAt:         NewInstant(r.CreatedAt),
+		UpdatedAt:         NewInstant(r.UpdatedAt),
+		ApprovedAt:        instantPtr(r.ApprovedAt),
+		CompletedAt:       instantPtr(r.CompletedAt),
+		Download:          requestDownloadOf(r.Download()),
 	}
 	if viewer.IsAdmin {
 		out.IntegrationKind, out.ExternalID, out.ExternalStatus, out.LastError = r.IntegrationKind, r.ExternalID, r.ExternalStatus, r.LastError
+		out.ExternalLibraryID, out.ExternalDownloadID, out.ExternalDetail = r.ExternalLibraryID, r.ExternalDownloadID, r.ExternalDetail
 	}
 	if r.RequestedByUserID != 0 {
 		out.RequestedByUserID = IDFromInt(int64(r.RequestedByUserID))
@@ -922,7 +940,7 @@ func requestMediaResultsOf(results []mediarequests.MediaResult) []RequestMediaRe
 	out := make([]RequestMediaResult, 0, len(results))
 	for _, r := range results {
 		out = append(out, RequestMediaResult{
-			MediaType: string(r.MediaType), TMDBID: r.TMDBID, Title: r.Title, Year: r.Year, Overview: r.Overview,
+			MediaType: string(r.MediaType), Provider: r.Provider, ProviderItemID: r.ProviderItemID, TMDBID: r.TMDBID, Title: r.Title, Year: r.Year, Overview: r.Overview,
 			PosterPath: r.PosterPath, BackdropPath: r.BackdropPath, ReleaseDate: r.ReleaseDate,
 			Popularity: r.Popularity, VoteAverage: r.VoteAverage, Availability: string(r.Availability),
 			LibraryContentID: r.LibraryContentID, Request: requestMediaStateOf(r.Request),

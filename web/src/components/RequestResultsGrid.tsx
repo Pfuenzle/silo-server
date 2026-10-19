@@ -7,10 +7,11 @@ import { useSubmitMediaRequest } from "@/hooks/useSubmitMediaRequest";
 import { useUICustomization } from "@/hooks/useUICustomization";
 import { useWatchlistTitleToggle } from "@/hooks/useWatchlistTitleToggle";
 import { cardGridClasses } from "@/lib/uiCustomization";
+import { requestMediaKey } from "@/lib/mediaRequests";
 import { cn } from "@/lib/utils";
 
 /**
- * TMDB titles on the library's poster grid, each with the hover Request
+ * Metadata titles on the library's poster grid, each with the hover Request
  * and watchlist actions. Used by the Discover, studio/network/genre, and search "Request to
  * add" grids.
  */
@@ -35,12 +36,16 @@ export default function RequestResultsGrid({
     <div className={cn(cardGridClasses(cardPresentation.poster_size), className)}>
       {results.map((item) => (
         <RequestPosterCard
-          key={`${item.media_type}-${item.tmdb_id}`}
+          key={requestMediaKey(item)}
           variant="discover"
           item={item}
           isSubmitting={isSubmitting(item)}
           onRequest={() => submit(item)}
-          onToggleWatchlist={watchlist.enabled ? () => watchlist.toggle(item) : undefined}
+          onToggleWatchlist={
+            watchlist.enabled && item.media_type !== "audiobook"
+              ? () => watchlist.toggle(item)
+              : undefined
+          }
           isWatchlistPending={watchlist.isPending(item)}
           fluid
         />

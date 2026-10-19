@@ -583,6 +583,10 @@ func TestSearchRequestMedia(t *testing.T) {
 	if svc.lastArgs[1] != mediarequests.MediaTypeAll || svc.lastArgs[2] != 1 {
 		t.Fatalf("args = %v", svc.lastArgs)
 	}
+	do(t, h, http.MethodGet, "/api/v2/requests/search?q=harry%20potter&media_type=audiobook", "", requestOwner)
+	if svc.lastArgs[1] != mediarequests.MediaTypeAudiobook || svc.lastArgs[2] != 1 {
+		t.Fatalf("audiobook args = %v", svc.lastArgs)
+	}
 	requireProblem(t, do(t, h, http.MethodGet, "/api/v2/requests/search", "", requestOwner), TypeValidationFailed)
 	requireProblem(t, do(t, h, http.MethodGet, "/api/v2/requests/search?q=%20", "", requestOwner), TypeValidationFailed)
 	requireProblem(t, do(t, h, http.MethodGet, "/api/v2/requests/search?q=heat&media_type=tv", "", requestOwner), TypeValidationFailed)

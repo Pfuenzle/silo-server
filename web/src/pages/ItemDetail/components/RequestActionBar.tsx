@@ -173,11 +173,14 @@ export default function RequestActionBar({ item, libraryHref }: RequestActionBar
     });
   }
 
-  const links = titleLinks(item.media_type, {
-    imdb: item.imdb_id,
-    tmdb: item.tmdb_id,
-    tvdb: item.tvdb_id,
-  });
+  const links =
+    item.media_type === "audiobook"
+      ? []
+      : titleLinks(item.media_type, {
+          imdb: item.imdb_id,
+          tmdb: item.tmdb_id,
+          tvdb: item.tvdb_id,
+        });
 
   return (
     <>

@@ -647,3 +647,59 @@ describe("RequestToAddSection (grid variant)", () => {
     expect(screen.getByRole("button", { name: /^Sending request for dune 1a/ })).toBeDisabled();
   });
 });
+
+describe("RequestToAddSection audiobook search", () => {
+  it("searches the audiobook provider and sends the chosen edition from the current grid", () => {
+    const mutateAsync = vi.fn().mockResolvedValue({ id: "request-book" });
+    mocks.useCanRequest.mockReturnValue({ discoveryEnabled: true });
+    mocks.useCreateMediaRequest.mockReturnValue({ mutateAsync });
+    mocks.useRequestSearch.mockReturnValue({
+      data: {
+        page: 1,
+        total_pages: 1,
+        total_results: 2,
+        results: ["edition-1", "edition-2"].map((provider_item_id) =>
+          missingResult({
+            media_type: "audiobook",
+            tmdb_id: 0,
+            provider: "audiobook-metadata",
+            provider_item_id,
+            title: provider_item_id === "edition-1" ? "Dune Unabridged" : "Dune Abridged",
+          }),
+        ),
+      },
+      isLoading: false,
+      isError: false,
+    });
+    rtlRender(
+      <MemoryRouter>
+        <RequestToAddSection
+          variant="grid"
+          mediaType="audiobook"
+          query="dune"
+          libraryHadHits={false}
+          page={1}
+          onPageChange={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(mocks.useRequestSearch).toHaveBeenLastCalledWith(
+      "audiobook",
+      "dune",
+      1,
+      expect.objectContaining({ enabled: true }),
+    );
+    expect(screen.getAllByRole("button", { name: /^Request Dune/ })).toHaveLength(2);
+    expect(screen.queryByRole("link")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Request Dune Abridged/ }));
+    expect(mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        media_type: "audiobook",
+        provider: "audiobook-metadata",
+        provider_item_id: "edition-2",
+      }),
+    );
+    expect(mutateAsync.mock.calls[0]![0]).not.toHaveProperty("tmdb_id");
+  });
+});

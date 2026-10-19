@@ -100,6 +100,7 @@ function currentLocation() {
 }
 
 beforeEach(() => {
+  HTMLElement.prototype.scrollIntoView = vi.fn();
   mocks.cancel.mockReset();
   mocks.create.mockReset().mockResolvedValue({});
   mocks.mine = [];
@@ -121,10 +122,24 @@ describe("Requests hub", () => {
     expect(currentLocation()).toBe("/catalog?source=query&q=the+bear&type=video");
   });
 
+  it("hands an audiobook search to the catalog's audiobook scope", () => {
+    renderAt("/requests");
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Request media type" }), {
+      key: "ArrowDown",
+    });
+    fireEvent.click(screen.getByRole("option", { name: "Audiobooks" }));
+    const search = screen.getByRole("textbox", { name: "Search audiobooks" });
+    fireEvent.change(search, { target: { value: "dune" } });
+    fireEvent.submit(search.closest("form")!);
+
+    expect(currentLocation()).toBe("/catalog?source=query&q=dune&type=audiobook");
+  });
+
   it.each([
     ["/requests?q=bear", "/catalog?source=query&q=bear&type=video"],
     ["/requests?q=bear&type=movie", "/catalog?source=query&q=bear&type=movie"],
     ["/requests?q=bear&media_type=series&page=3", "/catalog?source=query&q=bear&type=series"],
+    ["/requests?q=dune&media_type=audiobook", "/catalog?source=query&q=dune&type=audiobook"],
     ["/requests?q=bear&type=all", "/catalog?source=query&q=bear&type=video"],
   ])("sends the old hub search URL %s to the app's search page", (from, to) => {
     renderAt(from);
@@ -237,6 +252,7 @@ describe("Requests (Yours list)", () => {
   });
 
   it("opens a request in the library when it has arrived", () => {
+    // Movie and series title navigation remains on the upstream route.
     mocks.mine = [
       request("r30", "Arrived Movie", { status: "completed", library_content_id: "movie 30" }),
       request("r31", "Waiting Movie"),
@@ -247,6 +263,42 @@ describe("Requests (Yours list)", () => {
       within(row("Arrived Movie")).getByRole("link", { name: "Open Arrived Movie in library" }),
     ).toHaveAttribute("href", "/item/movie%2030");
     expect(within(row("Waiting Movie")).queryByRole("link", { name: /in library/ })).toBeNull();
+  });
+
+  it("shows audiobook covers and links only to the supplied library location", () => {
+    mocks.mine = [
+      request("book1", "Waiting Audiobook", {
+        media_type: "audiobook",
+        tmdb_id: 0,
+        poster_path: "https://covers.example/waiting.jpg",
+      }),
+      request("book2", "Arrived Audiobook", {
+        media_type: "audiobook",
+        tmdb_id: 0,
+        status: "completed",
+        state: "available",
+        silo_audiobook_id: "book-2",
+        silo_audiobook_link: "/item/book-2",
+      }),
+    ];
+    renderYours();
+
+    const waiting = screen.getByText("Waiting Audiobook").closest("li")!;
+    expect(within(waiting).queryByRole("link")).toBeNull();
+    expect(waiting.querySelector("img")).toHaveAttribute(
+      "src",
+      "https://covers.example/waiting.jpg",
+    );
+    expect(within(waiting).getByText("Audiobook")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Arrived Audiobook" })).toHaveAttribute(
+      "href",
+      "/item/book-2",
+    );
+    expect(screen.getByRole("link", { name: "Open Arrived Audiobook in library" })).toHaveAttribute(
+      "href",
+      "/item/book-2",
+    );
+    expect(document.querySelector('a[href*="/title/audiobook/"]')).toBeNull();
   });
 
   it("offers Cancel request until a request is sent to the download automation", () => {

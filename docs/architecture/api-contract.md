@@ -2084,11 +2084,30 @@ Request capability status and cancellation are available through v2. The bundled
 web status hook uses v2; the coordinated Apple and Android migrations include
 status and cancellation. The bundled web has no cancel consumer.
 
-Watch-provider settings use typed v2 operations for connection reads/writes, device
-and API-key authorization, manual sync, and recent runs. Responses exclude provider
-access tokens and device codes. Recent runs are an explicit activity window of up
-to 50 entries, default 10, without continuation. Connection and run identifiers are
-strings, and timestamps use the standard UTC instant representation.
+Watch-provider settings use typed v2 operations for connection reads/writes, device,
+authorization-code and API-key authorization, manual sync, and recent runs. Responses
+exclude provider access tokens, device codes, PKCE material and private provider state.
+Recent runs are an explicit activity window of up to 50 entries, default 10, without
+continuation. Connection and run identifiers are strings, and timestamps use the
+standard UTC instant representation.
+
+For `auth_method: authorization_code`, the web posts to
+`/api/v2/watch-providers/{provider}/auth/authorization-code` with the authenticated
+account and acting profile. The response contains `id`, `provider`,
+`authorization_url` and `expires_at`; the browser navigates to `authorization_url`.
+The server builds the callback from its configured public URL, refuses a start on
+another origin, and sets an HttpOnly, SameSite=Lax browser-binding cookie. Application
+registration must use `/api/v2/watch-providers/{provider}/auth/callback` on that public
+URL, with the actual registry key, including the installation ID for plugin keys.
+The settings page displays that callback for the provider being connected.
+
+The public GET callback requires both the session state and its matching browser
+cookie. The service consumes the session atomically before exchanging the code;
+provider denial also consumes the session, and a failed exchange requires a fresh
+start. The callback clears the binding cookie and redirects to
+`/settings/watch-providers?watch_provider_auth=connected` or `failed`; codes, tokens
+and provider error details never enter that URL. Start and callback responses are
+not cached. This flow is v2-only; the frozen v1 contract gains no OAuth route.
 
 Mutation retries remain disabled: device authorization does not claim an exchange
 across API nodes, and manual sync's active-run/cooldown checks and run creation are

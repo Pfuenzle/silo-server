@@ -30,7 +30,12 @@ func TestRequestListKeysetDatabase(t *testing.T) {
  last_error text, created_at timestamptz, updated_at timestamptz, approved_at timestamptz, completed_at timestamptz,
  submit_attempts int NOT NULL DEFAULT 0, submit_lease_until timestamptz, next_submit_at timestamptz,
  outcome_reason text NOT NULL DEFAULT '', routing_facts jsonb NOT NULL DEFAULT '{}', seasons integer[] NOT NULL DEFAULT '{}',
- source text NOT NULL DEFAULT 'direct');
+ source text NOT NULL DEFAULT 'direct', provider_item_id text NOT NULL DEFAULT '',
+ fulfillment_key text NOT NULL DEFAULT '', submission_state text NOT NULL DEFAULT '', submission_started_at timestamptz,
+ external_status text NOT NULL DEFAULT '', external_library_id text NOT NULL DEFAULT '',
+ external_download_id text NOT NULL DEFAULT '', external_detail text NOT NULL DEFAULT '', imported_path text NOT NULL DEFAULT '',
+ scan_run_id text NOT NULL DEFAULT '', silo_audiobook_id text NOT NULL DEFAULT '', silo_audiobook_link text NOT NULL DEFAULT '',
+ retryable boolean NOT NULL DEFAULT false);
  CREATE INDEX ON media_requests (requested_by_user_id, created_at DESC, id DESC)`)
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +43,12 @@ func TestRequestListKeysetDatabase(t *testing.T) {
 	stamp := time.Date(2026, 1, 2, 3, 4, 5, 123456000, time.UTC)
 	insert := func(id string, user int, at time.Time) {
 		t.Helper()
-		_, err := pool.Exec(t.Context(), `INSERT INTO media_requests VALUES ($1,'tmdb','movie',1,NULL,'','',NULL,'','','','pending','active',$2,'profile',false,'',$3,$3,NULL,NULL,0,NULL,NULL,'','{}','{}','direct')`, id, user, at)
+		_, err := pool.Exec(t.Context(), `INSERT INTO media_requests (
+			id, provider, media_type, tmdb_id, tvdb_id, imdb_id, title, year,
+			overview, poster_path, backdrop_path, status, outcome,
+			requested_by_user_id, requested_by_profile_id, is_anime, last_error,
+			created_at, updated_at, approved_at, completed_at
+		) VALUES ($1,'tmdb','movie',1,NULL,'','',NULL,'','','','pending','active',$2,'profile',false,'',$3,$3,NULL,NULL)`, id, user, at)
 		if err != nil {
 			t.Fatal(err)
 		}

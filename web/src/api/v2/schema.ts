@@ -11672,6 +11672,43 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v2/watch-providers/{provider}/auth/authorization-code": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Start browser authorization with a watch provider. */
+    post: operations["startWatchProviderAuthorizationCodeAuth"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v2/watch-providers/{provider}/auth/callback": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Complete browser authorization with a watch provider.
+     * @description Consumes a single-use authorization session bound to the initiating browser and returns to watch-provider settings. Codes, credentials and provider errors are never included in the redirect.
+     */
+    get: operations["completeWatchProviderAuthorizationCodeAuth"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v2/watch-providers/{provider}/auth/device-code": {
     parameters: {
       query?: never;
@@ -25522,8 +25559,14 @@ export interface components {
       created_at: string;
       /** @description How far the request's downloads are over all its servers (1080p and 4K together), while any reports them: bytes summed, the phase that needs the most attention, the latest estimate, and the oldest report's time */
       download?: components["schemas"]["RequestDownload"];
+      /** @description Admins only: the fulfillment server's lifecycle detail */
+      external_detail?: string;
+      /** @description Admins only: the fulfillment server's download identifier */
+      external_download_id?: string;
       /** @description Admins only: the integration's own identifier */
       external_id?: string;
+      /** @description Admins only: the fulfillment server's library identifier */
+      external_library_id?: string;
       /** @description Admins only: the status as the download server reports it */
       external_status?: string;
       /**
@@ -25544,7 +25587,7 @@ export interface components {
       /** @description The catalog item once the media is in the library */
       library_content_id?: string;
       /**
-       * @description movie or series
+       * @description movie, series or audiobook
        * @example movie
        */
       media_type: string;
@@ -25560,6 +25603,8 @@ export interface components {
       poster_path?: string;
       /** @example tmdb */
       provider: string;
+      /** @description Audiobook metadata provider identifier */
+      provider_item_id?: string;
       /**
        * @description Opaque identifier
        * @example p-owner
@@ -25570,10 +25615,16 @@ export interface components {
        * @example 1
        */
       requested_by_user_id?: string;
+      /** @description Whether an audiobook fulfillment failure can be retried */
+      retryable: boolean;
       /** @description Series season requests: each requested season's episodes, once the series is in the library; empty otherwise */
       season_progress: components["schemas"]["RequestSeasonProgress"][];
       /** @description Series: the requested season numbers; empty means the whole series (requests made through v1 or before season requests) */
       seasons: number[];
+      /** @description The audiobook catalog identifier after import */
+      silo_audiobook_id?: string;
+      /** @description The library link after the audiobook import completes */
+      silo_audiobook_link?: string;
       /**
        * @description What created the request: direct (the Request button or an API create) or watchlist (adding a title that is not in the library to a watchlist); more values may be added
        * @example direct
@@ -25631,10 +25682,17 @@ export interface components {
        * @example movie
        * @enum {string}
        */
-      media_type: "movie" | "series";
+      media_type: "movie" | "series" | "audiobook";
       overview?: string;
       /** @description TMDB image path */
       poster_path?: string;
+      /**
+       * @description Audiobook requests use audiobook-metadata; movies and series use tmdb
+       * @enum {string}
+       */
+      provider?: "tmdb" | "audiobook-metadata";
+      /** @description Required for audiobook requests: the metadata provider's identifier */
+      provider_item_id?: string;
       /**
        * @description Series only: the season numbers to request, starting at 1 (a season below 1 is refused). Omitted: every aired season not yet complete in the library
        * @example [
@@ -25647,10 +25705,10 @@ export interface components {
       title: string;
       /**
        * Format: int64
-       * @description TMDB identifier (external, not a Silo ID)
+       * @description Required for movies and series: TMDB identifier (external, not a Silo ID)
        * @example 949
        */
-      tmdb_id: number;
+      tmdb_id?: number;
       /**
        * Format: int64
        * @description TVDB identifier (external, not a Silo ID)
@@ -29157,7 +29215,7 @@ export interface components {
        */
       library_content_id?: string;
       /**
-       * @description movie or series
+       * @description movie, series or audiobook
        * @example movie
        */
       media_type: string;
@@ -29169,6 +29227,10 @@ export interface components {
        * @example /abc.jpg
        */
       poster_path?: string;
+      /** @description Metadata provider for audiobook results */
+      provider?: string;
+      /** @description The audiobook's identifier at its metadata provider */
+      provider_item_id?: string;
       /**
        * @description Calendar date, YYYY-MM-DD
        * @example 1995-12-15
@@ -31754,6 +31816,20 @@ export interface components {
           [key: string]: unknown;
         };
       };
+    };
+    WatchProviderAuthorizationCodeAuth: {
+      authorization_url: string;
+      /**
+       * Format: date-time
+       * @description RFC 3339 instant in UTC with millisecond precision
+       */
+      expires_at: string;
+      /**
+       * @description Opaque identifier
+       * @example 1
+       */
+      id: string;
+      provider: string;
     };
     WatchProviderCapabilities: {
       export_favorites: boolean;
@@ -71507,7 +71583,7 @@ export interface operations {
         /** @description Page size; default 50, maximum 50 */
         limit?: number;
         /** @description Only requests for this media type */
-        media_type?: "movie" | "series";
+        media_type?: "movie" | "series" | "audiobook";
         /** @description Only requests with this outcome */
         outcome?: "active" | "declined" | "cancelled" | "failed";
         /** @description Only requests whose title contains this text, or whose TMDB ID equals it */
@@ -125817,7 +125893,7 @@ export interface operations {
     parameters: {
       query: {
         /** @description Restrict results to one media type */
-        media_type?: "movie" | "series" | "all";
+        media_type?: "movie" | "series" | "audiobook" | "all";
         /** @description Provider result page, 1-based */
         page?: number;
         /** @description Title search text */
@@ -135128,6 +135204,159 @@ export interface operations {
         content: {
           "application/problem+json": components["schemas"]["Problem"];
         };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
+  startWatchProviderAuthorizationCodeAuth: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description The household profile acting for this request; it must belong to the authenticated account. */
+        "X-Profile-Id": string;
+        /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
+        "X-Profile-Token"?: string;
+      };
+      path: {
+        provider: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description OK */
+      200: {
+        headers: {
+          "Cache-Control"?: string;
+          "Set-Cookie"?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["WatchProviderAuthorizationCodeAuth"];
+        };
+      };
+      /** @description Bad Request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Acceptable */
+      406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Conflict */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
+  completeWatchProviderAuthorizationCodeAuth: {
+    parameters: {
+      query?: {
+        code?: string;
+        error?: string;
+        state?: string;
+      };
+      header?: never;
+      path: {
+        provider: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Redirect: to the provider, to the same start on the public origin, or to the flow's completion or failure location. */
+      303: {
+        headers: {
+          Location?: string;
+          [name: string]: unknown;
+        };
+        content?: never;
       };
       /** @description Service Unavailable */
       503: {

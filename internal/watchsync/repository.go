@@ -21,6 +21,7 @@ type Repository interface {
 	GetServerSetting(ctx context.Context, key string) (string, error)
 	UpsertAuthSession(ctx context.Context, session DeviceAuthSession) (DeviceAuthSession, error)
 	GetAuthSession(ctx context.Context, id string) (DeviceAuthSession, error)
+	ConsumeAuthorizationCodeAuthSession(ctx context.Context, id, provider string, now time.Time) (DeviceAuthSession, error)
 	UpsertConnection(ctx context.Context, conn Connection) (Connection, error)
 	UpdateConnectionTokens(ctx context.Context, expected, updated Connection) (Connection, error)
 	GetConnection(ctx context.Context, provider string, userID int, profileID string) (Connection, bool, error)
@@ -306,6 +307,53 @@ func (r *PostgresRepository) GetAuthSession(ctx context.Context, id string) (Dev
 		return DeviceAuthSession{}, fmt.Errorf("get watch provider auth session %q: %w", id, err)
 	}
 	return session, nil
+}
+
+// ConsumeAuthorizationCodeAuthSession claims a valid callback with one atomic
+// update, before the code is exchanged. completed_at is also set on failed or
+// denied exchanges: the provider's single-use code cannot safely be retried.
+func (r *PostgresRepository) ConsumeAuthorizationCodeAuthSession(ctx context.Context, id, provider string, now time.Time) (DeviceAuthSession, error) {
+	row := r.pool.QueryRow(ctx, `
+		UPDATE watch_provider_auth_sessions
+		SET completed_at = $3, updated_at = now()
+		WHERE id = $1::uuid AND provider = $2
+			AND user_code = $4 AND interval_seconds = 0
+			AND completed_at IS NULL AND expires_at > $3
+		RETURNING id::text, provider, user_id, profile_id, device_code, user_code,
+			verification_url, interval_seconds, expires_at, completed_at
+	`, id, provider, now, AuthMethodAuthorizationCode)
+	session, err := r.scanDeviceAuthSession(row)
+	if err == nil {
+		return session, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return DeviceAuthSession{}, fmt.Errorf("consume watch provider authorization session: %w", err)
+	}
+	// Classify a rejected claim without returning any persisted flow secrets.
+	var storedProvider, method string
+	var interval int
+	var completedAt *time.Time
+	var expiresAt time.Time
+	err = r.pool.QueryRow(ctx, `
+		SELECT provider, user_code, interval_seconds, completed_at, expires_at
+		FROM watch_provider_auth_sessions WHERE id = $1::uuid
+	`, id).Scan(&storedProvider, &method, &interval, &completedAt, &expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DeviceAuthSession{}, ErrAuthSessionNotFound
+	}
+	if err != nil {
+		return DeviceAuthSession{}, fmt.Errorf("read watch provider authorization session status: %w", err)
+	}
+	if storedProvider != provider || method != AuthMethodAuthorizationCode || interval != 0 {
+		return DeviceAuthSession{}, ErrAuthSessionMismatch
+	}
+	if completedAt != nil {
+		return DeviceAuthSession{}, ErrAuthSessionCompleted
+	}
+	if !expiresAt.After(now) {
+		return DeviceAuthSession{}, ErrAuthSessionExpired
+	}
+	return DeviceAuthSession{}, ErrAuthSessionNotFound
 }
 
 func (r *PostgresRepository) UpsertConnection(ctx context.Context, conn Connection) (Connection, error) {
@@ -1264,15 +1312,40 @@ func (r *PostgresRepository) GetMediaTitles(ctx context.Context, mediaItemIDs []
 	}
 	// An id in both tables is read as the episode, so one row comes back per id.
 	rows, err := r.pool.Query(ctx, `
-		SELECT m.content_id, m.type, m.title, COALESCE(m.year, 0), '', 0
+		WITH requested_series AS (
+			SELECT DISTINCT series_id FROM episodes WHERE content_id = ANY($1)
+		), season_counts AS (
+			SELECT e.series_id, e.season_number, COUNT(*) AS episode_count,
+				MIN(e.episode_number) = 1 AND COUNT(*) = MAX(e.episode_number) AS contiguous
+			FROM episodes e
+			JOIN requested_series s ON s.series_id = e.series_id
+			WHERE e.season_number > 0
+			GROUP BY e.series_id, e.season_number
+		), episode_ordering AS (
+			SELECT series_id, season_number,
+				COALESCE(SUM(episode_count) OVER preceding_seasons, 0) AS episode_offset,
+				BOOL_AND(contiguous) OVER through_season
+					AND COUNT(*) OVER through_season = season_number AS prefix_contiguous,
+				SUM(episode_count) OVER whole_series AS series_episode_count,
+				BOOL_AND(contiguous) OVER whole_series
+					AND COUNT(*) OVER whole_series = MAX(season_number) OVER whole_series AS series_contiguous
+			FROM season_counts
+			WINDOW preceding_seasons AS (PARTITION BY series_id ORDER BY season_number ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+				through_season AS (PARTITION BY series_id ORDER BY season_number ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
+				whole_series AS (PARTITION BY series_id)
+		)
+		SELECT m.content_id, m.type, m.title, COALESCE(m.year, 0), '', 0, 0, 0
 		FROM media_items m
 		WHERE m.content_id = ANY($1)
 			AND NOT EXISTS (SELECT 1 FROM episodes e WHERE e.content_id = m.content_id)
 		UNION ALL
 		SELECT e.content_id, 'episode', COALESCE(e.title, ''), COALESCE(s.year, 0),
-			COALESCE(s.title, ''), COALESCE(s.year, 0)
+			COALESCE(s.title, ''), COALESCE(s.year, 0),
+			CASE WHEN o.prefix_contiguous AND e.episode_number > 0 THEN o.episode_offset + e.episode_number ELSE 0 END,
+			CASE WHEN o.series_contiguous THEN o.series_episode_count ELSE 0 END
 		FROM episodes e
 		LEFT JOIN media_items s ON s.content_id = e.series_id
+		LEFT JOIN episode_ordering o ON o.series_id = e.series_id AND o.season_number = e.season_number
 		WHERE e.content_id = ANY($1)
 	`, mediaItemIDs)
 	if err != nil {
@@ -1282,7 +1355,8 @@ func (r *PostgresRepository) GetMediaTitles(ctx context.Context, mediaItemIDs []
 	for rows.Next() {
 		var id string
 		var titles MediaTitles
-		if err := rows.Scan(&id, &titles.Kind, &titles.Title, &titles.Year, &titles.SeriesTitle, &titles.SeriesYear); err != nil {
+		if err := rows.Scan(&id, &titles.Kind, &titles.Title, &titles.Year, &titles.SeriesTitle, &titles.SeriesYear,
+			&titles.AbsoluteEpisodeNumber, &titles.SeriesEpisodeCount); err != nil {
 			return nil, fmt.Errorf("scan media titles: %w", err)
 		}
 		result[id] = titles

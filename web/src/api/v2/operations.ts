@@ -509,6 +509,8 @@ export const v2Operations = {
   "GET /api/v2/user/libraries": "listUserLibraries",
   "GET /api/v2/user/libraries/capabilities": "getUserLibraryCapabilities",
   "GET /api/v2/watch-providers": "listWatchProviders",
+  "GET /api/v2/watch-providers/{provider}/auth/callback":
+    "completeWatchProviderAuthorizationCodeAuth",
   "GET /api/v2/watch-providers/{provider}/connection": "getWatchProviderConnection",
   "GET /api/v2/watch-providers/{provider}/connection/settings": "getWatchProviderSettings",
   "GET /api/v2/watch-providers/{provider}/sync-runs": "listWatchProviderSyncRuns",
@@ -805,6 +807,8 @@ export const v2Operations = {
   "POST /api/v2/sync/progress": "syncProgress",
   "POST /api/v2/sync/progress/snapshots": "createProgressBootstrapSnapshot",
   "POST /api/v2/watch-providers/{provider}/auth/api-key": "connectWatchProviderAPIKey",
+  "POST /api/v2/watch-providers/{provider}/auth/authorization-code":
+    "startWatchProviderAuthorizationCodeAuth",
   "POST /api/v2/watch-providers/{provider}/auth/device-code": "startWatchProviderDeviceAuth",
   "POST /api/v2/watch-providers/{provider}/auth/poll": "pollWatchProviderDeviceAuth",
   "POST /api/v2/watch-providers/{provider}/sync": "triggerWatchProviderSync",

@@ -10,24 +10,33 @@ import type { WatchProviderConnection } from "@/hooks/queries/watchProviders";
 
 const mocks = vi.hoisted(() => ({
   updateConnection: vi.fn(),
+  startAuthorizationCode: vi.fn(),
+  startDeviceCode: vi.fn(),
+  connection: {} as Partial<WatchProviderConnection>,
   idleMutation: () => ({ mutate: () => {}, isPending: false, error: null }),
 }));
 
 vi.mock("@/hooks/queries/watchProviders", () => ({
-  WatchProviderAuthMethod: { DeviceCode: "device_code", APIKey: "api_key" },
+  WatchProviderAuthMethod: {
+    DeviceCode: "device_code",
+    APIKey: "api_key",
+    AuthorizationCode: "authorization_code",
+  },
   useWatchProviders: () => ({
     data: { providers: [{ key: "simkl", display_name: "Simkl" }] },
     isLoading: false,
   }),
   useWatchProviderConnection: () => ({
-    data: makeConnection(),
+    data: { ...makeConnection(), ...mocks.connection },
     isLoading: false,
     isFetching: false,
   }),
   useWatchProviderSyncRuns: () => ({ data: undefined }),
   useUpdateWatchProviderConnection: () =>
     useMutation({ retry: false, mutationFn: mocks.updateConnection }),
-  useStartWatchProviderDeviceAuth: mocks.idleMutation,
+  useStartWatchProviderDeviceAuth: () => ({ mutate: mocks.startDeviceCode, isPending: false }),
+  useStartWatchProviderAuthorizationCodeAuth: () =>
+    useMutation({ retry: false, mutationFn: mocks.startAuthorizationCode }),
   usePollWatchProviderDeviceAuth: mocks.idleMutation,
   useConnectWatchProviderAPIKey: mocks.idleMutation,
   useDeleteWatchProviderConnection: mocks.idleMutation,
@@ -127,6 +136,10 @@ describe("WatchProvidersSettings", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     mocks.updateConnection.mockReset();
+    mocks.connection = {};
+    mocks.startAuthorizationCode.mockReset();
+    mocks.startDeviceCode.mockReset();
+    window.history.replaceState(null, "", "/settings/watch-providers");
   });
 
   afterEach(() => {
@@ -134,6 +147,49 @@ describe("WatchProvidersSettings", () => {
     container.remove();
   });
 
+  it("connects an authorization-code provider without starting device authorization", async () => {
+    mocks.connection = { connected: false, auth_method: "authorization_code" };
+    window.history.replaceState(null, "", "/silo/settings/watch-providers");
+    const start = deferred<unknown>();
+    mocks.startAuthorizationCode.mockReturnValue(start.promise);
+    act(() =>
+      root.render(
+        <QueryClientProvider client={new QueryClient()}>
+          <WatchProvidersSettings />
+        </QueryClientProvider>,
+      ),
+    );
+    const connect = findButton(container, "Connect");
+    expect(container.querySelector("code")?.textContent).toBe(
+      `${window.location.origin}/silo/api/v2/watch-providers/simkl/auth/callback`,
+    );
+    act(() => connect.click());
+    await flush();
+    expect(mocks.startAuthorizationCode).toHaveBeenCalledTimes(1);
+    expect(mocks.startDeviceCode).not.toHaveBeenCalled();
+    expect(connect.disabled).toBe(true);
+    await act(async () => {
+      start.resolve({});
+      await start.promise;
+    });
+  });
+
+  it("removes the OAuth outcome from the settings URL after returning", () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/settings/watch-providers?watch_provider_auth=connected",
+    );
+    act(() =>
+      root.render(
+        <QueryClientProvider client={new QueryClient()}>
+          <WatchProvidersSettings />
+        </QueryClientProvider>,
+      ),
+    );
+    expect(window.location.search).toBe("");
+    expect(findButton(container, "Disconnect")).toBeDefined();
+  });
   it("keeps the settings open while retrying a conflicted change", async () => {
     const firstSave = deferred<unknown>();
     const retry = deferred<unknown>();

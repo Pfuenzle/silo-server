@@ -32,7 +32,7 @@ type AdminMediaRequestListInput struct {
 	Outcome           string `query:"outcome" enum:"active,declined,cancelled,failed" doc:"Only requests with this outcome" example:"active"` //nolint:misspell // the store's spelling
 	View              string `query:"view" enum:"needs_approval,in_progress,failed,done" doc:"Only requests in this queue view: needs_approval (pending), in_progress (approved, queued or downloading), failed, or done (completed, or closed by a decline or cancellation)" example:"needs_approval"`
 	Q                 string `query:"q" maxLength:"200" doc:"Only requests whose title contains this text, or whose TMDB ID equals it" example:"severance"`
-	MediaType         string `query:"media_type" enum:"movie,series" doc:"Only requests for this media type" example:"series"`
+	MediaType         string `query:"media_type" enum:"movie,series,audiobook" doc:"Only requests for this media type" example:"series"`
 	RequestedByUserID string `query:"requested_by_user_id" pattern:"^[1-9][0-9]{0,9}$" doc:"Only requests made by this account; at most 2147483647" example:"7"`
 	Limit             int    `query:"limit" minimum:"1" maximum:"50" default:"50" doc:"Page size; default 50, maximum 50" example:"50"`
 	Cursor            string `query:"cursor" doc:"Opaque cursor from page.next_cursor" example:"eyJvIjo1MH0"`

@@ -64,6 +64,25 @@ A plugin connection reports `credentials_configured` as false until every
 global config entry its manifest marks required has a saved value, as the
 built-ins did for their app credentials.
 
+Authorization-code providers use the v2 browser flow described in
+[the API contract](api-contract.md#request-lifecycle-and-watch-providers). Register
+the callback under the configured Silo public URL using the provider's actual
+registry key: `/api/v2/watch-providers/{provider}/auth/callback`. The settings page
+shows the complete callback URL. AniList uses its installed `plugin:<installation
+id>:anilist` key; an installation ID in an example must be replaced with the real
+one. Provider-private authorization state, redirect URI and PKCE verifier remain
+on the server, and callback state is single use.
+
+For episode media, the host exports `absolute_episode_number` only when season
+numbering starts at 1 and the regular episodes are numbered contiguously from 1
+through each season's maximum up to the target season. It sums the regular episode
+rows in earlier seasons and adds the target's local episode number. Gaps leave
+the absolute number at zero; specials are excluded. `series_episode_count` counts
+regular episode rows only when season numbering and every regular season's episode
+numbering are contiguous. AniList rejects
+specials and later-season episodes with an unknown absolute number, retaining the
+local episode-number fallback for the first season.
+
 ## Retired providers
 
 Silo no longer supports Trakt. `RetiredPlugin` lists `silo.watchprovider.trakt`,

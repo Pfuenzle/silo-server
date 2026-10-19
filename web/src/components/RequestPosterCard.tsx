@@ -63,9 +63,9 @@ type MineProps = {
 export type RequestPosterCardProps = DiscoverProps | MineProps;
 
 /**
- * A title known from TMDB, drawn on the same poster card as library titles:
- * a TMDB search or discovery result ("discover"), or one of the viewer's
- * requests ("mine").
+ * A title known from a metadata provider, drawn on the same poster card as
+ * library titles: a search or discovery result ("discover"), or one of the
+ * viewer's requests ("mine").
  */
 export default function RequestPosterCard(props: RequestPosterCardProps) {
   if (props.variant === "mine") {
@@ -112,7 +112,11 @@ function DiscoverCard({
       mediaType={item.media_type}
       year={item.year}
       posterPath={item.poster_path}
-      href={requestDetailHref(item.media_type, item.tmdb_id)}
+      href={
+        item.media_type === "audiobook"
+          ? undefined
+          : requestDetailHref(item.media_type, item.tmdb_id)
+      }
       libraryContentId={item.library_content_id}
       fluid={fluid}
       dim={!requestable}
@@ -133,7 +137,7 @@ function DiscoverCard({
         ) : null
       }
       cornerAction={
-        onToggleWatchlist ? (
+        onToggleWatchlist && item.media_type !== "audiobook" ? (
           <WatchlistAction
             title={item.title}
             inWatchlist={Boolean(item.in_watchlist)}
@@ -167,7 +171,11 @@ function MineCard({ request, fluid, onCancel, isCancelling }: Omit<MineProps, "v
       mediaType={request.media_type}
       year={request.year}
       posterPath={request.poster_path}
-      href={requestDetailHref(request.media_type, request.tmdb_id)}
+      href={
+        request.media_type === "audiobook"
+          ? request.silo_audiobook_link
+          : requestDetailHref(request.media_type, request.tmdb_id)
+      }
       libraryContentId={request.library_content_id}
       fluid={fluid}
       dim={isClosed}
@@ -234,7 +242,7 @@ function ExternalTitleCard({
   mediaType: RequestMediaType;
   year?: number;
   posterPath?: string;
-  href: string;
+  href?: string;
   /** Adds a Library chip linking to the title's library item. */
   libraryContentId?: string;
   fluid?: boolean;
@@ -255,6 +263,15 @@ function ExternalTitleCard({
   const showMetadata = showCaption;
   const meta = [formatMediaType(mediaType), year].filter(Boolean).join(" · ");
   const label = `${title} (${meta})`;
+  const artwork = (
+    <MediaCardArtwork
+      src={mediaType === "audiobook" ? (posterPath ?? null) : tmdbImageURL(posterPath)}
+      alt={title}
+      mediaType={mediaType}
+      lazy
+      dim={dim}
+    />
+  );
 
   return (
     <div
@@ -264,19 +281,19 @@ function ExternalTitleCard({
       )}
     >
       <div className="group/media relative">
-        <ViewTransitionLink
-          to={href}
-          aria-label={label}
-          className="block overflow-hidden rounded-xl"
-        >
-          <MediaCardArtwork
-            src={tmdbImageURL(posterPath)}
-            alt={title}
-            mediaType={mediaType}
-            lazy
-            dim={dim}
-          />
-        </ViewTransitionLink>
+        {href ? (
+          <ViewTransitionLink
+            to={href}
+            aria-label={label}
+            className="block overflow-hidden rounded-xl"
+          >
+            {artwork}
+          </ViewTransitionLink>
+        ) : (
+          <div aria-label={label} className="overflow-hidden rounded-xl">
+            {artwork}
+          </div>
+        )}
         {libraryContentId || badge ? (
           <div className="pointer-events-none absolute inset-x-2 top-2 z-10 flex flex-wrap items-center gap-1.5">
             {libraryContentId ? <LibraryChip contentID={libraryContentId} title={title} /> : null}
@@ -293,14 +310,22 @@ function ExternalTitleCard({
       {showCaption || children ? (
         <div className={MEDIA_CARD_CAPTION_CLASS}>
           {showCaption ? (
-            <ViewTransitionLink to={href} className={MEDIA_CARD_TITLE_CLASS}>
-              {title}
-            </ViewTransitionLink>
+            href ? (
+              <ViewTransitionLink to={href} className={MEDIA_CARD_TITLE_CLASS}>
+                {title}
+              </ViewTransitionLink>
+            ) : (
+              <p className={MEDIA_CARD_TITLE_CLASS}>{title}</p>
+            )
           ) : null}
           {showMetadata ? (
-            <ViewTransitionLink to={href} className={MEDIA_CARD_META_CLASS}>
-              {meta}
-            </ViewTransitionLink>
+            href ? (
+              <ViewTransitionLink to={href} className={MEDIA_CARD_META_CLASS}>
+                {meta}
+              </ViewTransitionLink>
+            ) : (
+              <p className={MEDIA_CARD_META_CLASS}>{meta}</p>
+            )
           ) : null}
           {children}
         </div>

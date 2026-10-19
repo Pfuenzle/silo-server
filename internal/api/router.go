@@ -3036,6 +3036,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 		v2deps.AdminHistoryImports = historyImportHandler.Service()
 	}
 	v2deps.WatchProviders = deps.WatchProviderService
+	v2deps.WatchProviderPublicURL = deps.PublicURL
 	if requestHandler != nil {
 		v2deps.Requests = requestHandler.Service()
 		v2deps.RequestLifecycle = requestHandler.Service()

@@ -226,6 +226,32 @@ func (r *Repository) ListActiveByTMDB(ctx context.Context, mediaType MediaType, 
 	return out, nil
 }
 
+func (r *Repository) ListActiveByProviderItem(ctx context.Context, provider, providerItemID string) (*Request, error) {
+	if strings.TrimSpace(provider) == "" || strings.TrimSpace(providerItemID) == "" {
+		return nil, nil
+	}
+	req, err := scanRequest(r.pool.QueryRow(ctx, requestSelectSQL()+`
+		WHERE provider = $1 AND provider_item_id = $2
+		  AND outcome = 'active' AND status <> 'completed'
+	`, provider, providerItemID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get active request by provider item: %w", err)
+	}
+	return req, nil
+}
+
+func (r *Repository) DeleteFailedByProviderItem(ctx context.Context, provider, providerItemID string) (int, error) {
+	tag, err := r.pool.Exec(ctx, `DELETE FROM media_requests
+		WHERE provider = $1 AND provider_item_id = $2 AND outcome = 'failed'`, provider, providerItemID)
+	if err != nil {
+		return 0, fmt.Errorf("delete failed request by provider item: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 func (r *Repository) ListProfileWatchlistRequests(ctx context.Context, userID int, profileID string) ([]*Request, error) {
 	rows, err := r.pool.Query(ctx, requestSelectSQL()+`
 		WHERE requested_by_user_id = $1
@@ -319,14 +345,16 @@ func (r *Repository) CreateRequest(ctx context.Context, input CreateRequestRecor
 	if input.ReplaceFailed {
 		// Only the requester's own rows: other accounts' failed requests for
 		// the title are their history.
+		provider := strings.TrimSpace(input.Input.Provider)
+		if provider == "" {
+			provider = "tmdb"
+		}
 		if _, err := tx.Exec(ctx, `
 			DELETE FROM media_requests
-			WHERE requested_by_user_id = $1
-			  AND media_type = $2
-			  AND provider = 'tmdb'
-			  AND tmdb_id = $3
+			WHERE requested_by_user_id = $1 AND media_type = $2 AND provider = $3
+			  AND (($3 = 'tmdb' AND tmdb_id = $4) OR ($3 <> 'tmdb' AND provider_item_id = $5))
 			  AND outcome = 'failed'
-		`, input.Requester.UserID, input.Input.MediaType, input.Input.TMDBID); err != nil {
+		`, input.Requester.UserID, input.Input.MediaType, provider, input.Input.TMDBID, strings.TrimSpace(input.Input.ProviderItemID)); err != nil {
 			return nil, fmt.Errorf("replace failed requests: %w", err)
 		}
 	}
@@ -371,25 +399,33 @@ func (r *Repository) insertRequest(
 	if err != nil {
 		return nil, err
 	}
+	provider := strings.TrimSpace(input.Input.Provider)
+	if provider == "" {
+		provider = "tmdb"
+	}
+	var tmdbID any
+	if input.Input.TMDBID > 0 {
+		tmdbID = input.Input.TMDBID
+	}
 	row := exec.QueryRow(ctx, `
 		INSERT INTO media_requests (
-			id, provider, media_type, tmdb_id, tvdb_id, imdb_id, title, year,
+			id, fulfillment_key, provider, provider_item_id, media_type, tmdb_id, tvdb_id, imdb_id, title, year,
 			overview, poster_path, backdrop_path, status, outcome,
 			requested_by_user_id, requested_by_profile_id, is_anime, created_at, updated_at, approved_at,
 			routing_facts, seasons, source
 		)
 		VALUES (
-			$1, 'tmdb', $2, $3, $4, $5, $6, $7,
+			$1, $1, $21, $22, $2, $3, $4, $5, $6, $7,
 			$8, $9, $10, $11, $12,
 			$13, $14, $15, $16, $16, $17,
 			$18, $19, $20
 		)
-		RETURNING `+requestColumns(), input.ID, input.Input.MediaType, input.Input.TMDBID, tvdbID,
+		RETURNING `+requestColumns(), input.ID, input.Input.MediaType, tmdbID, tvdbID,
 		strings.TrimSpace(input.Input.IMDbID), strings.TrimSpace(input.Input.Title), year,
 		strings.TrimSpace(input.Input.Overview), strings.TrimSpace(input.Input.PosterPath),
 		strings.TrimSpace(input.Input.BackdropPath), status, outcome,
 		input.Requester.UserID, input.Requester.ProfileID, input.IsAnime, now, approvedAt,
-		facts, nonNilSeasons(input.Input.Seasons), requestSource(input.Input.Source))
+		facts, nonNilSeasons(input.Input.Seasons), requestSource(input.Input.Source), provider, strings.TrimSpace(input.Input.ProviderItemID))
 	req, err := scanRequest(row)
 	if err != nil {
 		return nil, fmt.Errorf("insert request: %w", err)
@@ -1474,7 +1510,9 @@ func requestColumns() string {
 	        overview, poster_path, backdrop_path, status, outcome,
 	        requested_by_user_id, requested_by_profile_id, is_anime,
 	        last_error, created_at, updated_at, approved_at, completed_at,
-	        submit_attempts, submit_lease_until, next_submit_at, outcome_reason, routing_facts, seasons, source`
+	        submit_attempts, submit_lease_until, next_submit_at, outcome_reason, routing_facts, seasons, source, provider_item_id,
+	        fulfillment_key, submission_state, submission_started_at, external_status, external_library_id,
+	        external_download_id, external_detail, imported_path, scan_run_id, silo_audiobook_id, silo_audiobook_link, retryable`
 }
 
 type requestScanner interface {
@@ -1483,14 +1521,14 @@ type requestScanner interface {
 
 func scanRequest(row requestScanner) (*Request, error) {
 	var req Request
-	var tvdbID, year sql.NullInt64
-	var approvedAt, completedAt, submitLeaseUntil, nextSubmitAt sql.NullTime
+	var tmdbID, tvdbID, year sql.NullInt64
+	var approvedAt, completedAt, submitLeaseUntil, nextSubmitAt, submissionStartedAt sql.NullTime
 	var rawFacts []byte
 	if err := row.Scan(
 		&req.ID,
 		&req.Provider,
 		&req.MediaType,
-		&req.TMDBID,
+		&tmdbID,
 		&tvdbID,
 		&req.IMDbID,
 		&req.Title,
@@ -1515,6 +1553,19 @@ func scanRequest(row requestScanner) (*Request, error) {
 		&rawFacts,
 		&req.Seasons,
 		&req.Source,
+		&req.ProviderItemID,
+		&req.FulfillmentKey,
+		&req.SubmissionState,
+		&submissionStartedAt,
+		&req.ExternalStatus,
+		&req.ExternalLibraryID,
+		&req.ExternalDownloadID,
+		&req.ExternalDetail,
+		&req.ImportedPath,
+		&req.ScanRunID,
+		&req.SiloAudiobookID,
+		&req.SiloAudiobookLink,
+		&req.Retryable,
 	); err != nil {
 		return nil, err
 	}
@@ -1523,6 +1574,10 @@ func scanRequest(row requestScanner) (*Request, error) {
 		return nil, err
 	}
 	req.RoutingFacts = facts
+	// Audiobook requests use provider_item_id and have no TMDB identifier.
+	if tmdbID.Valid {
+		req.TMDBID = int(tmdbID.Int64)
+	}
 	if tvdbID.Valid {
 		v := int(tvdbID.Int64)
 		req.TVDBID = &v
@@ -1542,6 +1597,9 @@ func scanRequest(row requestScanner) (*Request, error) {
 	}
 	if nextSubmitAt.Valid {
 		req.NextSubmitAt = &nextSubmitAt.Time
+	}
+	if submissionStartedAt.Valid {
+		req.SubmissionStartedAt = &submissionStartedAt.Time
 	}
 	return &req, nil
 }

@@ -69,6 +69,38 @@ describe("useSubmitMediaRequest", () => {
     expect(mocks.toastError).toHaveBeenCalledTimes(2);
   });
 
+  it("submits audiobook editions independently using their provider identities", async () => {
+    const resolves: Array<(value: { id: string }) => void> = [];
+    mocks.create.mockImplementation(() => {
+      return new Promise<{ id: string }>((resolve) => resolves.push(resolve));
+    });
+    const first: RequestMediaResult = {
+      ...result(0, "Dune"),
+      media_type: "audiobook",
+      provider: "audiobook-metadata",
+      provider_item_id: "edition-1",
+    };
+    const second = { ...first, provider_item_id: "edition-2" };
+    const { result: hook } = renderHook(() => useSubmitMediaRequest(), { wrapper });
+
+    act(() => hook.current.submit(first));
+    expect(hook.current.isSubmitting(first)).toBe(true);
+    expect(hook.current.isSubmitting(second)).toBe(false);
+    act(() => hook.current.submit(second));
+    await waitFor(() => expect(resolves).toHaveLength(2));
+    expect(mocks.create).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ provider: "audiobook-metadata", provider_item_id: "edition-1" }),
+    );
+    expect(mocks.create.mock.calls[0]![0]).not.toHaveProperty("tmdb_id");
+
+    await act(async () => resolves[0]!({ id: "request-1" }));
+    await waitFor(() => expect(hook.current.isSubmitting(first)).toBe(false));
+    expect(hook.current.isSubmitting(second)).toBe(true);
+    await act(async () => resolves[1]!({ id: "request-2" }));
+    await waitFor(() => expect(hook.current.isSubmitting(second)).toBe(false));
+  });
+
   it("clears a card once its request succeeds", async () => {
     mocks.create.mockResolvedValue({ id: "r1" });
     const heat = result(1, "Heat");

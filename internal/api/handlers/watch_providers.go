@@ -16,6 +16,8 @@ type WatchProviderService interface {
 	ListProviders() []watchsync.ProviderSummary
 	StartDeviceAuth(ctx context.Context, userID int, profileID string, providerKey string) (watchsync.DeviceAuthSession, error)
 	PollDeviceAuth(ctx context.Context, userID int, profileID string, providerKey string, sessionID string) (watchsync.Connection, error)
+	StartAuthorizationCodeAuth(ctx context.Context, userID int, profileID string, providerKey string, redirectURI string) (watchsync.AuthorizationCodeSession, error)
+	CompleteAuthorizationCodeAuth(ctx context.Context, providerKey string, state string, code string) (watchsync.Connection, error)
 	ConnectAPIKeyWithConfig(ctx context.Context, userID int, profileID string, providerKey string, apiKey string, connectionConfig watchsync.ConnectionConfigValues) (watchsync.Connection, error)
 	GetConnectionStatus(ctx context.Context, userID int, profileID string, provider string) (watchsync.ConnectionStatus, error)
 	UpdateConnection(ctx context.Context, userID int, profileID string, provider string, update watchsync.ConnectionUpdate) (watchsync.ConnectionStatus, error)

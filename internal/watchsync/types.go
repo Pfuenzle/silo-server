@@ -47,8 +47,9 @@ const (
 )
 
 const (
-	AuthMethodDeviceCode = "device_code"
-	AuthMethodAPIKey     = "api_key"
+	AuthMethodDeviceCode        = "device_code"
+	AuthMethodAPIKey            = "api_key"
+	AuthMethodAuthorizationCode = "authorization_code"
 )
 
 type Provider interface {
@@ -82,6 +83,13 @@ type authoritativeRefreshProvider interface {
 // working unchanged.
 type APIKeyAuthProvider interface {
 	ConnectWithAPIKey(ctx context.Context, apiKey string) (TokenSet, ProviderAccount, error)
+}
+
+// AuthorizationCodeAuthProvider leaves provider-specific flow data, including
+// any PKCE verifier, opaque to the host until the single-use callback.
+type AuthorizationCodeAuthProvider interface {
+	StartAuthorizationCodeAuth(ctx context.Context, redirectURI string, state string) (AuthorizationCodeSession, error)
+	CompleteAuthorizationCodeAuth(ctx context.Context, code string, session AuthorizationCodeSession) (TokenSet, ProviderAccount, error)
 }
 
 // ConnectionConfigValues contains manifest-declared, per-connection setup
@@ -431,6 +439,22 @@ type DeviceAuthSession struct {
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
 }
 
+// AuthorizationCodeSession exposes only the browser's authorization URL and
+// host-generated state. All callback inputs remain in encrypted server storage.
+type AuthorizationCodeSession struct {
+	ID           string    `json:"id"`
+	Provider     string    `json:"provider"`
+	AuthorizeURL string    `json:"authorization_url"`
+	ExpiresAt    time.Time `json:"expires_at"`
+
+	UserID        int        `json:"-"`
+	ProfileID     string     `json:"-"`
+	RedirectURI   string     `json:"-"`
+	State         string     `json:"-"`
+	ProviderState string     `json:"-"`
+	CompletedAt   *time.Time `json:"-"`
+}
+
 // deviceAuthorizationPendingError carries an authoritative replacement for a
 // device challenge that must be persisted before the next poll. It remains an
 // error so the existing HTTP contract continues to report an incomplete flow.
@@ -541,25 +565,27 @@ type RemotePlay struct {
 }
 
 type LocalPlay struct {
-	HistoryID       string
-	MediaItemID     string
-	ProviderItemKey string
-	Kind            string
-	Title           string
-	Year            int
-	IMDbID          string
-	TMDBID          string
-	TVDBID          string
-	SeriesTitle     string
-	SeriesYear      int
-	SeriesIMDbID    string
-	SeriesTMDBID    string
-	SeriesTVDBID    string
-	SeasonNumber    int
-	EpisodeNumber   int
-	WatchedAt       time.Time
-	DurationSeconds float64
-	Source          userstore.WatchHistorySource
+	HistoryID             string
+	MediaItemID           string
+	ProviderItemKey       string
+	Kind                  string
+	Title                 string
+	Year                  int
+	IMDbID                string
+	TMDBID                string
+	TVDBID                string
+	SeriesTitle           string
+	SeriesYear            int
+	SeriesIMDbID          string
+	SeriesTMDBID          string
+	SeriesTVDBID          string
+	SeasonNumber          int
+	EpisodeNumber         int
+	AbsoluteEpisodeNumber int // Series-wide position; zero when catalog ordering is incomplete.
+	SeriesEpisodeCount    int // Catalog regular-episode total; zero when ordering is incomplete.
+	WatchedAt             time.Time
+	DurationSeconds       float64
+	Source                userstore.WatchHistorySource
 }
 
 type LocalFavorite struct {
@@ -763,29 +789,31 @@ type ExportResult struct {
 }
 
 type ScrobbleEvent struct {
-	PlaybackSessionID string
-	UserID            int
-	ProfileID         string
-	MediaItemID       string
-	ProviderItemKey   string
-	Kind              string
-	Title             string // Title, Year and the series pair are filled at dispatch; see Service.withScrobbleTitles.
-	Year              int
-	IMDbID            string
-	TMDBID            string
-	TVDBID            string
-	SeriesTitle       string
-	SeriesYear        int
-	SeriesIMDbID      string
-	SeriesTMDBID      string
-	SeriesTVDBID      string
-	SeasonNumber      int
-	EpisodeNumber     int
-	HistoryID         string
-	PositionSeconds   float64
-	DurationSeconds   float64
-	Completed         bool
-	OccurredAt        time.Time
+	PlaybackSessionID     string
+	UserID                int
+	ProfileID             string
+	MediaItemID           string
+	ProviderItemKey       string
+	Kind                  string
+	Title                 string // Title, Year and the series pair are filled at dispatch; see Service.withScrobbleTitles.
+	Year                  int
+	IMDbID                string
+	TMDBID                string
+	TVDBID                string
+	SeriesTitle           string
+	SeriesYear            int
+	SeriesIMDbID          string
+	SeriesTMDBID          string
+	SeriesTVDBID          string
+	SeasonNumber          int
+	EpisodeNumber         int
+	AbsoluteEpisodeNumber int
+	SeriesEpisodeCount    int
+	HistoryID             string
+	PositionSeconds       float64
+	DurationSeconds       float64
+	Completed             bool
+	OccurredAt            time.Time
 }
 
 func (w RemoteWatch) HistoryRecord() historyimport.Record {
@@ -942,6 +970,7 @@ func (e UnknownProviderError) Error() string { return fmt.Sprintf("unknown provi
 // classifies on the values.
 var (
 	ErrConnectionNotFound   = errors.New("watch provider connection not found")
+	ErrAuthSessionNotFound  = errors.New("auth session not found")
 	ErrAuthSessionMismatch  = errors.New("auth session does not match active profile")
 	ErrAuthSessionCompleted = errors.New("auth session is already completed")
 	ErrAuthSessionExpired   = errors.New("auth session has expired")

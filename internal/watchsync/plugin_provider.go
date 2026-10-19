@@ -24,6 +24,8 @@ import (
 )
 
 type WatchSyncPluginClient interface {
+	InitAuthorize(context.Context, *pluginv1.WatchSyncInitAuthorizeRequest) (*pluginv1.WatchSyncInitAuthorizeResponse, error)
+	ExchangeCode(context.Context, *pluginv1.WatchSyncExchangeCodeRequest) (*pluginv1.WatchSyncCredentialResponse, error)
 	ExchangeAPIKey(context.Context, *pluginv1.WatchSyncExchangeAPIKeyRequest) (*pluginv1.WatchSyncCredentialResponse, error)
 	StartDeviceAuthorization(context.Context, *pluginv1.WatchSyncDeviceAuthorizationServiceStartRequest) (*pluginv1.WatchSyncDeviceAuthorizationServiceStartResponse, error)
 	PollDeviceAuthorization(context.Context, *pluginv1.WatchSyncDeviceAuthorizationServicePollRequest) (*pluginv1.WatchSyncDeviceAuthorizationServicePollResponse, error)
@@ -305,6 +307,9 @@ func (p *PluginProvider) StartDeviceAuth(ctx context.Context, _ ServerConfig) (D
 }
 
 func (p *PluginProvider) PollDeviceAuth(ctx context.Context, _ ServerConfig, session DeviceAuthSession) (TokenSet, error) {
+	if p.authMethod != AuthMethodDeviceCode {
+		return TokenSet{}, ProviderCapabilityError{Key: p.Key(), What: "does not support device authorization"}
+	}
 	state, err := base64.RawURLEncoding.DecodeString(session.DeviceCode)
 	if err != nil {
 		return TokenSet{}, errors.New("watch sync plugin device authorization state is invalid")
@@ -1199,7 +1204,8 @@ func watchEventFromLocalPlay(play LocalPlay, origin pluginv1.WatchSyncOrigin) *p
 		ProviderItemKey: play.ProviderItemKey,
 		Media: mediaFromIdentity(play.MediaItemID, play.Kind, play.Title, play.Year,
 			play.IMDbID, play.TMDBID, play.TVDBID, play.SeriesTitle, play.SeriesYear,
-			play.SeriesIMDbID, play.SeriesTMDBID, play.SeriesTVDBID, play.SeasonNumber, play.EpisodeNumber),
+			play.SeriesIMDbID, play.SeriesTMDBID, play.SeriesTVDBID, play.SeasonNumber, play.EpisodeNumber,
+			play.AbsoluteEpisodeNumber, play.SeriesEpisodeCount),
 	}
 }
 
@@ -1226,22 +1232,25 @@ func watchEventFromScrobble(event ScrobbleEvent, operation pluginv1.WatchSyncOpe
 		ProviderItemKey:   event.ProviderItemKey,
 		Media: mediaFromIdentity(event.MediaItemID, event.Kind, event.Title, event.Year,
 			event.IMDbID, event.TMDBID, event.TVDBID, event.SeriesTitle, event.SeriesYear,
-			event.SeriesIMDbID, event.SeriesTMDBID, event.SeriesTVDBID, event.SeasonNumber, event.EpisodeNumber),
+			event.SeriesIMDbID, event.SeriesTMDBID, event.SeriesTVDBID, event.SeasonNumber, event.EpisodeNumber,
+			event.AbsoluteEpisodeNumber, event.SeriesEpisodeCount),
 	}
 }
 
-func mediaFromIdentity(mediaItemID, kind, title string, year int, imdbID, tmdbID, tvdbID, seriesTitle string, seriesYear int, seriesIMDbID, seriesTMDBID, seriesTVDBID string, season, episode int) *pluginv1.WatchSyncMedia {
+func mediaFromIdentity(mediaItemID, kind, title string, year int, imdbID, tmdbID, tvdbID, seriesTitle string, seriesYear int, seriesIMDbID, seriesTMDBID, seriesTVDBID string, season, episode, absoluteEpisode, seriesEpisodeCount int) *pluginv1.WatchSyncMedia {
 	return &pluginv1.WatchSyncMedia{
-		MediaItemId:       mediaItemID,
-		MediaType:         watchSyncMediaType(kind),
-		Title:             title,
-		Year:              int32(year),
-		ExternalIds:       watchIDs(imdbID, tmdbID, tvdbID),
-		SeriesTitle:       seriesTitle,
-		SeriesYear:        int32(seriesYear),
-		SeriesExternalIds: watchIDs(seriesIMDbID, seriesTMDBID, seriesTVDBID),
-		SeasonNumber:      int32(season),
-		EpisodeNumber:     int32(episode),
+		MediaItemId:           mediaItemID,
+		MediaType:             watchSyncMediaType(kind),
+		Title:                 title,
+		Year:                  int32(year),
+		ExternalIds:           watchIDs(imdbID, tmdbID, tvdbID),
+		SeriesTitle:           seriesTitle,
+		SeriesYear:            int32(seriesYear),
+		SeriesExternalIds:     watchIDs(seriesIMDbID, seriesTMDBID, seriesTVDBID),
+		SeasonNumber:          int32(season),
+		EpisodeNumber:         int32(episode),
+		AbsoluteEpisodeNumber: int32(absoluteEpisode),
+		SeriesEpisodeCount:    int32(seriesEpisodeCount),
 	}
 }
 
@@ -1269,7 +1278,7 @@ func (p *PluginProvider) RatingExportRequiresWatched(kind string) bool {
 func mediaFromLocalFavorite(item LocalFavorite) *pluginv1.WatchSyncMedia {
 	return mediaFromIdentity(item.MediaItemID, item.Kind, item.Title, item.Year,
 		item.IMDbID, item.TMDBID, item.TVDBID, "", 0,
-		item.SeriesIMDbID, item.SeriesTMDBID, item.SeriesTVDBID, 0, 0)
+		item.SeriesIMDbID, item.SeriesTMDBID, item.SeriesTVDBID, 0, 0, 0, 0)
 }
 
 func watchSyncMediaType(kind string) pluginv1.WatchSyncMediaType {
@@ -1352,13 +1361,17 @@ func resultForEvent(results []*pluginv1.WatchSyncApplyResult, eventID string) *p
 }
 
 func supportedWatchSyncAuthMethod(descriptor *pluginv1.WatchSyncProviderDescriptor) (string, error) {
-	supported := make(map[string]struct{}, 2)
+	supported := make(map[string]struct{}, 3)
 	for _, method := range descriptor.GetAuthMethods() {
 		switch method {
+		case pluginv1.WatchSyncAuthMethod_WATCH_SYNC_AUTH_METHOD_AUTHORIZATION_CODE:
+			supported[AuthMethodAuthorizationCode] = struct{}{}
 		case pluginv1.WatchSyncAuthMethod_WATCH_SYNC_AUTH_METHOD_API_KEY:
 			supported[AuthMethodAPIKey] = struct{}{}
 		case pluginv1.WatchSyncAuthMethod_WATCH_SYNC_AUTH_METHOD_DEVICE_CODE:
 			supported[AuthMethodDeviceCode] = struct{}{}
+		default:
+			return "", errors.New("advertises an authentication method unsupported by the host")
 		}
 	}
 	if len(supported) > 1 {
@@ -1369,6 +1382,9 @@ func supportedWatchSyncAuthMethod(descriptor *pluginv1.WatchSyncProviderDescript
 	}
 	if _, ok := supported[AuthMethodDeviceCode]; ok {
 		return AuthMethodDeviceCode, nil
+	}
+	if _, ok := supported[AuthMethodAuthorizationCode]; ok {
+		return AuthMethodAuthorizationCode, nil
 	}
 	return "", errors.New("does not advertise an authentication method supported by the host")
 }

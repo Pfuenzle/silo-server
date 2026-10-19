@@ -293,10 +293,10 @@ function CatalogResults({
   );
 
   const canRequest = useCanRequest();
-  // Add a short TMDB debounce on top of SearchBar's input debounce so the
-  // TMDB plugin isn't hit at the same cadence as the local library query.
+  // Debounce metadata searches separately so providers aren't hit at the
+  // same cadence as the local library query.
   const tmdbDebouncedQ = useDebounce(state.q ?? "", REQUEST_SEARCH_DEBOUNCE_MS);
-  // TMDB follows the search scope: movies, series, or both; nothing for books.
+  // Request search follows the catalog scope, including audiobook metadata.
   const requestSearchType = requestSearchTypeForScope(mediaScope);
   const tmdbQuery = useRequestSearch(requestSearchType ?? "all", tmdbDebouncedQ, 1, {
     enabled: canRequest.discoveryEnabled && isQuerySource && requestSearchType !== null,
@@ -305,7 +305,7 @@ function CatalogResults({
     gcTime: INTERACTIVE_SEARCH_GC_TIME_MS,
     retry: false,
   });
-  // A disabled query still reads its cache, so a book scope counts nothing.
+  // A disabled query still reads its cache; unsupported scopes count nothing.
   const tmdbMissingCount = requestSearchType
     ? (tmdbQuery.data?.results?.filter((result) => result.availability !== "available").length ?? 0)
     : 0;

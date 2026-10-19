@@ -2051,7 +2051,7 @@ export interface RequestTarget {
   updated_at: string;
 }
 
-/** integration_kind, external_id, external_status and last_error reach admins only. */
+/** integration_kind, external_* and last_error reach admins only. */
 export interface MediaRequest {
   id: string;
   provider: string;
@@ -2084,6 +2084,12 @@ export interface MediaRequest {
   integration_kind?: string;
   external_id?: string;
   external_status?: string;
+  external_library_id?: string;
+  external_download_id?: string;
+  external_detail?: string;
+  silo_audiobook_id?: string;
+  silo_audiobook_link?: string;
+  retryable?: boolean;
   library_content_id?: string;
   last_error?: string;
   /**

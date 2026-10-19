@@ -1,14 +1,10 @@
 import { useCallback, useState } from "react";
 import type { RequestMediaResult } from "@/api/types";
 import { useCreateMediaRequest } from "@/hooks/queries/useRequests";
-import { requestInputFromMediaResult } from "@/lib/mediaRequests";
-
-function resultKey(item: Pick<RequestMediaResult, "media_type" | "tmdb_id">): string {
-  return `${item.media_type}-${item.tmdb_id}`;
-}
+import { requestInputFromMediaResult, requestMediaKey } from "@/lib/mediaRequests";
 
 /**
- * Requests TMDB results from a list of cards and tracks which cards have a
+ * Requests metadata results from a list of cards and tracks which cards have a
  * request in flight. Each card waits on its own call: a second `mutate()`
  * would detach the first call's callbacks, leaving that card on "Sending".
  * The shared mutation still shows the success and failure toasts.
@@ -19,7 +15,7 @@ export function useSubmitMediaRequest() {
 
   const submit = useCallback(
     (item: RequestMediaResult) => {
-      const key = resultKey(item);
+      const key = requestMediaKey(item);
       setPendingKeys((prev) => new Set(prev).add(key));
       mutateAsync(requestInputFromMediaResult(item))
         // The mutation's own onError already reported the failure.
@@ -37,7 +33,7 @@ export function useSubmitMediaRequest() {
   );
 
   const isSubmitting = useCallback(
-    (item: Pick<RequestMediaResult, "media_type" | "tmdb_id">) => pendingKeys.has(resultKey(item)),
+    (item: Parameters<typeof requestMediaKey>[0]) => pendingKeys.has(requestMediaKey(item)),
     [pendingKeys],
   );
 

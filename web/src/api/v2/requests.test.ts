@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import listMyRequestsOk from "../../../../contracts/api/v2/fixtures/list_my_requests_ok.json";
 import { v2 } from "./request";
-import { getRequestMediaDetailV2, listMyMediaRequestsV2 } from "./requests";
+import {
+  createMediaRequestV2,
+  getRequestMediaDetailV2,
+  listMyMediaRequestsV2,
+  searchRequestMediaV2,
+} from "./requests";
 import type { components } from "./schema";
 
 vi.mock("./request", async (importOriginal) => ({
@@ -66,5 +71,72 @@ describe("request v2 adapters keep download progress", () => {
     const mapped = await getRequestMediaDetailV2("movie", 949);
 
     expect(mapped.request.download).toEqual(download);
+  });
+});
+
+describe("audiobook v2 request lifecycle", () => {
+  it("searches and creates with the metadata provider identity and retains library lifecycle fields", async () => {
+    const audiobook = {
+      media_type: "audiobook" as const,
+      provider: "audiobook-metadata",
+      provider_item_id: "edition-123",
+      tmdb_id: 0,
+      title: "Dune",
+      availability: "missing",
+      request: { requestable: true },
+    };
+    vi.mocked(v2).mockResolvedValueOnce({
+      page: 1,
+      total_pages: 1,
+      total_results: 1,
+      results: [audiobook],
+    } as never);
+    const page = await searchRequestMediaV2("audiobook", "dune", 1);
+    expect(v2).toHaveBeenLastCalledWith("GET /api/v2/requests/search", {
+      query: { q: "dune", media_type: "audiobook", page: 1 },
+      signal: undefined,
+    });
+    expect(page.results[0]).toEqual(audiobook);
+
+    const created = {
+      id: "request-book",
+      ...audiobook,
+      status: "completed",
+      outcome: "active",
+      state: "available",
+      targets: [],
+      silo_audiobook_id: "book-123",
+      silo_audiobook_link: "/item/book-123",
+      retryable: false,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-02T00:00:00Z",
+    };
+    vi.mocked(v2).mockResolvedValueOnce(created as never);
+    const input = {
+      media_type: "audiobook" as const,
+      provider: "audiobook-metadata",
+      provider_item_id: "edition-123",
+      title: "Dune",
+    };
+    const request = await createMediaRequestV2(input);
+
+    expect(v2).toHaveBeenLastCalledWith("POST /api/v2/requests", { body: input });
+    expect(request).toMatchObject({
+      provider: "audiobook-metadata",
+      provider_item_id: "edition-123",
+      media_type: "audiobook",
+      silo_audiobook_id: "book-123",
+      silo_audiobook_link: "/item/book-123",
+      retryable: false,
+    });
+
+    vi.mocked(v2).mockResolvedValueOnce({ items: [created] } as never);
+    const mine = await listMyMediaRequestsV2();
+    expect(mine[0]).toMatchObject({
+      provider_item_id: "edition-123",
+      silo_audiobook_id: "book-123",
+      silo_audiobook_link: "/item/book-123",
+      retryable: false,
+    });
   });
 });

@@ -59,6 +59,36 @@ describe("RequestPosterCard (discover variant)", () => {
     expect(screen.getByText("Movie · 2024")).toBeInTheDocument();
   });
 
+  it("requests an audiobook with its cover and no TMDB or watchlist navigation", () => {
+    const onRequest = vi.fn();
+    render(
+      <MemoryRouter>
+        <RequestPosterCard
+          variant="discover"
+          item={{
+            ...requestable,
+            media_type: "audiobook",
+            tmdb_id: 0,
+            title: "Dune Audiobook",
+            provider: "audiobook-metadata",
+            provider_item_id: "edition-1",
+            poster_path: "https://covers.example/dune.jpg",
+          }}
+          onRequest={onRequest}
+          onToggleWatchlist={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("img", { name: "Dune Audiobook" })).toHaveAttribute(
+      "src",
+      "https://covers.example/dune.jpg",
+    );
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.queryByRole("button", { name: /watchlist/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Request Dune Audiobook (Audiobook)" }));
+    expect(onRequest).toHaveBeenCalledOnce();
+  });
   it("puts the Request action in the card's Play slot and sends the request", () => {
     const onRequest = vi.fn();
     render(
@@ -275,6 +305,36 @@ describe("RequestPosterCard (mine variant)", () => {
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
   };
+
+  it("opens an existing audiobook only through its supplied library link", () => {
+    const { rerender } = render(
+      <MemoryRouter>
+        <RequestPosterCard
+          variant="mine"
+          request={{ ...request, media_type: "audiobook", tmdb_id: 0 }}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByRole("link")).toBeNull();
+
+    rerender(
+      <MemoryRouter>
+        <RequestPosterCard
+          variant="mine"
+          request={{
+            ...request,
+            media_type: "audiobook",
+            tmdb_id: 0,
+            silo_audiobook_id: "book-603",
+            silo_audiobook_link: "/item/book-603",
+          }}
+        />
+      </MemoryRouter>,
+    );
+    for (const link of screen.getAllByRole("link")) {
+      expect(link).toHaveAttribute("href", "/item/book-603");
+    }
+  });
 
   it.each<[Partial<MediaRequest>, string]>([
     [{ status: "pending" }, "Pending"],

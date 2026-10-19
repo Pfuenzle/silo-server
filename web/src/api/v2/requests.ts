@@ -112,7 +112,7 @@ export function searchRequestMediaV2(
   signal?: AbortSignal,
 ): Promise<RequestMediaPage> {
   return v2("GET /api/v2/requests/search", {
-    query: { q, media_type: mediaType as "movie" | "series" | "all", page },
+    query: { q, media_type: mediaType, page },
     signal,
   }).then((p) => ({ ...p, results: p.results.map(mediaResultFromV2) }));
 }
