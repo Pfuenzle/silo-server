@@ -22,6 +22,8 @@ type PersonalCollectionUpdateCommand struct {
 	CollectionID string
 	Request      PersonalCollectionUpdateRequest
 	PosterFile   func() ([]byte, error)
+	// V1Rules: see PersonalCollectionPreviewRequest.
+	V1Rules bool
 }
 
 func (h *CollectionHandler) UpdatePersonalCollection(ctx context.Context, cmd PersonalCollectionUpdateCommand) (PersonalCollectionView, error) {
@@ -35,10 +37,6 @@ func (h *CollectionHandler) UpdatePersonalCollection(ctx context.Context, cmd Pe
 	store, existing, err := h.personalCollectionStore(ctx, userID, profileID, collectionID, true)
 	if err != nil {
 		return none, err
-	}
-	if strings.EqualFold(strings.TrimSpace(existing.CollectionType), "trakt") &&
-		(req.SourceURL != nil || req.MaxItems != nil || req.LibraryIDs != nil) {
-		return none, apiError(http.StatusConflict, "legacy_source_immutable", "Legacy Trakt collection sources cannot be changed")
 	}
 
 	if cmd.PosterFile != nil || req.PosterSourceURL != nil {
@@ -77,7 +75,7 @@ func (h *CollectionHandler) UpdatePersonalCollection(ctx context.Context, cmd Pe
 		input.DisplayQueryDefinition = &displayQueryDefinition
 	}
 	if len(req.QueryDefinition) > 0 {
-		normalized, err := normalizeSmartCollectionQueryDefinitionJSON(req.QueryDefinition, true, true)
+		normalized, err := normalizeSmartCollectionQueryDefinitionJSON(req.QueryDefinition, true, true, cmd.V1Rules)
 		if err != nil {
 			return none, fieldError("query_definition", "Invalid query_definition")
 		}
@@ -202,7 +200,7 @@ func (h *CollectionHandler) PreviewPersonalCollection(ctx context.Context, req P
 
 	var def catalog.QueryDefinition
 	if len(req.QueryDefinition) > 0 {
-		normalized, err := normalizeQueryDefinitionJSON(req.QueryDefinition, true, true)
+		normalized, err := normalizeQueryDefinitionJSON(req.QueryDefinition, true, true, req.V1Rules)
 		if err != nil {
 			return none, fieldError("query_definition", "Invalid query_definition")
 		}
@@ -509,7 +507,7 @@ func (h *CollectionHandler) UploadPersonalCollectionPoster(ctx context.Context, 
 		return PersonalCollectionView{}, fieldError("body", "Poster image is required")
 	}
 	if _, err := h.processCollectionPoster(ctx, store, collectionID, profileID, func() ([]byte, error) { return data, nil }, ""); err != nil {
-		return PersonalCollectionView{}, apiError(http.StatusInternalServerError, "internal_error", err.Error())
+		return PersonalCollectionView{}, collectionArtworkError(err, "Failed to store collection artwork")
 	}
 	return h.GetPersonalCollection(ctx, userID, profileID, collectionID)
 }
@@ -527,7 +525,7 @@ func (h *CollectionHandler) SetPersonalCollectionPosterSource(ctx context.Contex
 		return PersonalCollectionView{}, fieldError("source_url", "An image URL is required")
 	}
 	if _, err := h.processCollectionPoster(ctx, store, id, profileID, nil, source); err != nil {
-		return PersonalCollectionView{}, apiError(500, "internal_error", "Failed to store collection artwork")
+		return PersonalCollectionView{}, collectionArtworkError(err, "Failed to store collection artwork")
 	}
 	return h.GetPersonalCollection(ctx, userID, profileID, id)
 }

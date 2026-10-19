@@ -29,8 +29,8 @@ the profile does not own.
 ## Sharing
 
 `is_shared` is the one sharing switch, on `createCollection`, `updateCollection` and the import
-operations (`importMDBListCollection`, `importTMDBCollection`, `importTMDBListCollection`,
-`importTraktCollection`). Clients label it **Show to other profiles**.
+operations (`importMDBListCollection`, `importTMDBCollection`, `importTMDBListCollection`).
+Clients label it **Show to other profiles**.
 
 `include_in_server_collections` is independent: it places the collection in the library
 Collections tab (`listLibraryUserCollections`, `getLibraryCollections`) of every profile that can
@@ -64,6 +64,11 @@ The server fetches a linked poster only from a public internet address. A URL on
 own network (loopback, a private or link-local range, or a name that resolves to one), including
 one reached through a redirect, fails the poster with one fixed error. See
 [Outbound address guard](architecture/outbound-address-guard.md#collection-artwork).
+
+`uploadCollectionPoster` answers `422 validation_failed` for a poster it cannot use and keeps the
+stored one: an image libvips cannot read, whether uploaded or linked; a JPEG or PNG of up to 4
+megapixels whose pixel data does not decode; and a `source_url` with no http(s) host, an answer
+other than `200`, or more than 10 MiB. Other processing failures stay `500`.
 
 - `listCollections`, `getLibraryCollections` and `listLibraryUserCollections` return the
   collage in `poster_url` and mark it with `poster_is_collage: true`.

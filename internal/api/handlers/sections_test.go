@@ -11,6 +11,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/Silo-Server/silo-server/internal/access"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
 	"github.com/Silo-Server/silo-server/internal/auth"
 	"github.com/Silo-Server/silo-server/internal/catalog"
@@ -56,16 +57,16 @@ func TestSectionBackdropPathUsesExpectedVariants(t *testing.T) {
 			want:        "/tmdb/shows/1399/backdrop/w1920.jpg",
 		},
 		{
-			name:        "continue watching episode still clamps to w500",
+			name:        "continue watching episode still gets its w1280 rung",
 			sectionType: sections.SectionContinueWatching,
 			path:        "tvdb/series/73141/seasons/22/episodes/9/still/original.webp",
-			want:        "tvdb/series/73141/seasons/22/episodes/9/still/w500.webp",
+			want:        "tvdb/series/73141/seasons/22/episodes/9/still/w1280.webp",
 		},
 		{
-			name:        "featured section episode still clamps to w500",
+			name:        "featured section episode still clamps to its widest rung",
 			sectionType: sections.SectionRecentlyAdded,
 			path:        "tvdb/series/73141/seasons/22/episodes/9/still/original.webp",
-			want:        "tvdb/series/73141/seasons/22/episodes/9/still/w500.webp",
+			want:        "tvdb/series/73141/seasons/22/episodes/9/still/w1280.webp",
 		},
 		{
 			name:        "http paths pass through",
@@ -494,7 +495,7 @@ func TestValidateSectionConfigAcceptsContinueTypes(t *testing.T) {
 
 	for _, config := range tests {
 		t.Run(config, func(t *testing.T) {
-			if msg, ok := validateSectionConfig(sections.SectionContinueWatching, []byte(config)); !ok {
+			if msg, ok := validateSectionConfig(sections.SectionContinueWatching, []byte(config), false); !ok {
 				t.Fatalf("validateSectionConfig(%s) rejected config: %s", config, msg)
 			}
 		})
@@ -502,7 +503,7 @@ func TestValidateSectionConfigAcceptsContinueTypes(t *testing.T) {
 }
 
 func TestValidateSectionConfigRejectsUnknownContinueType(t *testing.T) {
-	msg, ok := validateSectionConfig(sections.SectionContinueWatching, []byte(`{"continue_type":"scrolling"}`))
+	msg, ok := validateSectionConfig(sections.SectionContinueWatching, []byte(`{"continue_type":"scrolling"}`), false)
 	if ok {
 		t.Fatal("validateSectionConfig accepted unknown continue_type")
 	}
@@ -620,17 +621,20 @@ func TestDropEmptySeasonalSectionsRemovesOnlyEmptySeasonal(t *testing.T) {
 func TestLibraryDefaultSectionsUsesFolderType(t *testing.T) {
 	got := libraryDefaultSections(&models.MediaFolder{Type: "series"}, 12)
 
-	if len(got) != 6 {
-		t.Fatalf("expected 6 series default sections, got %d", len(got))
+	if len(got) != 7 {
+		t.Fatalf("expected 7 series default sections, got %d", len(got))
 	}
 	if got[1].Title != "Recently Added TV" {
 		t.Fatalf("section 1 title = %q, want %q", got[1].Title, "Recently Added TV")
 	}
-	if got[2].Title != "Recently Released Episodes" {
-		t.Fatalf("section 2 title = %q, want %q", got[2].Title, "Recently Released Episodes")
+	if got[2].SectionType != sections.SectionReturningShows {
+		t.Fatalf("section 2 type = %q, want %q", got[2].SectionType, sections.SectionReturningShows)
 	}
-	if got[4].SectionType != sections.SectionRecommendedForYou {
-		t.Fatalf("section 4 type = %q, want %q", got[4].SectionType, sections.SectionRecommendedForYou)
+	if got[3].Title != "Recently Released Episodes" {
+		t.Fatalf("section 3 title = %q, want %q", got[3].Title, "Recently Released Episodes")
+	}
+	if got[5].SectionType != sections.SectionRecommendedForYou {
+		t.Fatalf("section 5 type = %q, want %q", got[5].SectionType, sections.SectionRecommendedForYou)
 	}
 }
 
@@ -760,6 +764,28 @@ func TestSaveProfileOverridesRejectsNewAdminOnlyRecipe(t *testing.T) {
 	}
 }
 
+// TestSaveProfileOverridesAdminOnlyRecipeFollowsActingAdmin: a child profile
+// on an admin's account is not the admin an admin-only recipe asks for.
+func TestSaveProfileOverridesAdminOnlyRecipeFollowsActingAdmin(t *testing.T) {
+	h := &SectionHandler{}
+	body := []byte(`{"scope":"home","library_id":"","overrides":[{"is_user_added":true,"user_section_type":"admin_curated_list","user_config":{"item_ids":["a"]}}]}`)
+	req := httptest.NewRequest(http.MethodPut, "/profile/sections", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := apimw.SetClaims(req.Context(), &auth.Claims{Role: "admin", UserID: 1})
+	ctx = apimw.SetProfileID(ctx, "kid")
+	ctx = access.SetScope(ctx, access.Scope{UserID: 1, ProfileID: "kid", ProfileVerified: true})
+	ctx = apimw.SetActingAdminDecider(ctx, func(_ context.Context, in apimw.ActingAdminRequest) (bool, error) {
+		return in.ProfileID == "parent", nil
+	})
+	rec := httptest.NewRecorder()
+
+	h.HandleSaveProfileOverrides(rec, req.WithContext(ctx))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestSaveProfileOverridesUnknownRecipeReturnsBadRequest verifies that an
 // unregistered user_section_type is rejected before reaching the store.
 func TestSaveProfileOverridesUnknownRecipeReturnsBadRequest(t *testing.T) {
@@ -867,5 +893,20 @@ func TestToSectionOverridesPropagatesUserAddedFields(t *testing.T) {
 	// Admin-section customization should leave the user-added fields zero.
 	if got[1].IsUserAdded || got[1].UserSectionType != "" || len(got[1].UserConfig) != 0 || got[1].UserTitle != "" {
 		t.Errorf("legacy customization leaked user-added fields: %+v", got[1])
+	}
+}
+
+func TestSectionLocalizationAccessScopesLibraryRows(t *testing.T) {
+	viewer := catalog.AccessFilter{ProfilePreferredLanguage: ""}
+	libraryID := 7
+	scoped := sectionLocalizationAccess(viewer, &libraryID)
+	if scoped.PresentationLibraryID == nil || *scoped.PresentationLibraryID != 7 {
+		t.Fatalf("library rows: PresentationLibraryID = %v, want 7", scoped.PresentationLibraryID)
+	}
+	if viewer.PresentationLibraryID != nil {
+		t.Fatal("the viewer's filter was modified")
+	}
+	if home := sectionLocalizationAccess(viewer, nil); home.PresentationLibraryID != nil {
+		t.Fatalf("home rows: PresentationLibraryID = %v, want nil", *home.PresentationLibraryID)
 	}
 }

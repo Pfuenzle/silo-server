@@ -203,6 +203,31 @@ func TestAdminSectionUpdateValidatesRecipeConfigDB(t *testing.T) {
 	}
 }
 
+// A v1 update can rename or disable a row whose rules use the v2 vocabulary,
+// echoing its config unchanged, but cannot save a changed config with one.
+func TestAdminSectionV1UpdateKeepsV2RulesDB(t *testing.T) {
+	f := newPagingIntegrationFixture(t)
+	h := NewSectionHandler(sections.NewRepository(f.pool), nil)
+	t.Cleanup(func() {
+		_, _ = f.pool.Exec(context.Background(), `DELETE FROM page_sections WHERE library_id=$1`, f.library)
+	})
+	titleRule := json.RawMessage(`{"match":"all","groups":[{"match":"all","rules":[{"field":"title","op":"begins_with","value":"the "}]}]}`)
+	row, err := h.CreateAdminSection(t.Context(), AdminSectionCreate{Scope: "library", LibraryID: &f.library, Title: "The films", SectionType: string(sections.SectionCustomFilter), Enabled: true, Config: titleRule})
+	if err != nil {
+		t.Fatalf("v2 create with a title rule: %v", err)
+	}
+	if _, err := h.UpdateAdminSection(t.Context(), row.ID, AdminSectionUpdate{Title: "Renamed", V1Rules: true}); err != nil {
+		t.Fatalf("v1 rename: %v", err)
+	}
+	if _, err := h.UpdateAdminSection(t.Context(), row.ID, AdminSectionUpdate{Enabled: new(false), Config: titleRule, V1Rules: true}); err != nil {
+		t.Fatalf("v1 disable echoing the unchanged config: %v", err)
+	}
+	changed := json.RawMessage(`{"match":"all","groups":[{"match":"all","rules":[{"field":"title","op":"ends_with","value":"s"}]}]}`)
+	if _, err := h.UpdateAdminSection(t.Context(), row.ID, AdminSectionUpdate{Config: changed, V1Rules: true}); err == nil {
+		t.Fatal("v1 saved a changed config with a title rule")
+	}
+}
+
 // The frozen /api/v1 routes don't request the recipe check, so they keep
 // storing what they stored before it existed.
 func TestAdminSectionV1WritesSkipRecipeConfigDB(t *testing.T) {
@@ -217,5 +242,39 @@ func TestAdminSectionV1WritesSkipRecipeConfigDB(t *testing.T) {
 	}
 	if _, err := h.UpdateAdminSection(t.Context(), empty.ID, AdminSectionUpdate{Config: json.RawMessage(`{"item_ids":[]}`), Title: "Still empty"}); err != nil {
 		t.Fatalf("v1 update of an empty Editor's Picks row: %v", err)
+	}
+}
+
+func TestAdminSectionCreateRefusesNextUp(t *testing.T) {
+	_, err := (&SectionHandler{}).CreateAdminSection(t.Context(), AdminSectionCreate{
+		Title: "On Deck", SectionType: string(sections.SectionNextUp), ValidateRecipe: true,
+	})
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok || apiErr.Status != http.StatusBadRequest || !strings.Contains(apiErr.Message, "next_up") {
+		t.Fatalf("error = %#v, want a 400 naming next_up", err)
+	}
+}
+
+func TestAdminSectionUpdateRefusesChangeToNextUpDB(t *testing.T) {
+	f := newPagingIntegrationFixture(t)
+	repo := sections.NewRepository(f.pool)
+	h := NewSectionHandler(repo, nil)
+	t.Cleanup(func() {
+		_, _ = f.pool.Exec(context.Background(), `DELETE FROM page_sections WHERE library_id=$1`, f.library)
+	})
+	row, err := h.CreateAdminSection(t.Context(), AdminSectionCreate{Scope: "library", LibraryID: &f.library, Title: "New", SectionType: string(sections.SectionRecentlyAdded), Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = h.UpdateAdminSection(t.Context(), row.ID, AdminSectionUpdate{SectionType: string(sections.SectionNextUp)})
+	if apiErr, ok := errors.AsType[*APIError](err); !ok || apiErr.Status != http.StatusBadRequest {
+		t.Fatalf("changing a row to next_up: error = %#v, want 400", err)
+	}
+	stored, err := repo.GetByID(t.Context(), row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.SectionType != sections.SectionRecentlyAdded {
+		t.Fatalf("refused update changed the row to %q", stored.SectionType)
 	}
 }

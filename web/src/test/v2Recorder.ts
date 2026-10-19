@@ -32,6 +32,7 @@ import createCollectionOk from "../../../contracts/api/v2/fixtures/create_collec
 import getAdminCollectionOk from "../../../contracts/api/v2/fixtures/get_admin_collection_ok.json";
 import getAdminTemplateJobCompleted from "../../../contracts/api/v2/fixtures/get_admin_collection_template_job_completed.json";
 import getCatalogFiltersOk from "../../../contracts/api/v2/fixtures/get_catalog_filters_ok.json";
+import getCatalogSearchCapabilitiesOk from "../../../contracts/api/v2/fixtures/get_catalog_search_capabilities_ok.json";
 import getCollectionItemsOk from "../../../contracts/api/v2/fixtures/get_collection_items_ok.json";
 import getCollectionOk from "../../../contracts/api/v2/fixtures/get_collection_ok.json";
 import getLibraryCollectionsOk from "../../../contracts/api/v2/fixtures/get_library_collections_ok.json";
@@ -107,7 +108,6 @@ const FIXTURE_ANSWERS: Record<string, unknown> = {
   "POST /api/v2/admin/collections/import/mdblist": adminImport,
   "POST /api/v2/admin/collections/import/tmdb": adminImport,
   "POST /api/v2/admin/collections/import/tmdb-list": adminImport,
-  "POST /api/v2/admin/collections/import/trakt": adminImport,
   "POST /api/v2/admin/collections/template-bundles/{bundle_id}/apply-job": adminTemplateJobAccepted,
   "GET /api/v2/admin/collection-jobs/{job_id}": getAdminTemplateJobCompleted,
   "GET /api/v2/collections": listCollectionsOk,
@@ -125,6 +125,7 @@ const FIXTURE_ANSWERS: Record<string, unknown> = {
   "GET /api/v2/library/{id}/collections": getLibraryCollectionsOk,
   "POST /api/v2/catalog/query": queryCatalogItemsOk,
   "GET /api/v2/catalog/filters": getCatalogFiltersOk,
+  "GET /api/v2/catalog/search/capabilities": getCatalogSearchCapabilitiesOk,
   "GET /api/v2/settings/overlay-config": getOverlayConfigOk,
   "GET /api/v2/capabilities/ratings": getRatingsCapabilityOk,
   "GET /api/v2/settings/contract/capabilities": getSettingsContractCapabilitiesOk,

@@ -16,6 +16,23 @@ saw it. Availability is a one-way fact: file churn (quality upgrades,
 re-downloads) does not re-notify, and libraries emit no events until their
 initial availability seeding completes.
 
+Availability is recorded when a file links to an episode or item, which can
+happen long after the file arrived: a file can sit in the library unmatched
+until a parser fix or metadata correction. Content added more than 14 days
+before it became available is therefore recorded without a release event. The added time is the catalog's: `episode_libraries.first_seen_at`
+(taken from the earliest linked file) for episodes, and the earliest present
+file in the library for flat items. The window leaves room for new episodes
+whose metadata lands a few days after the file.
+
+The detector also stores that decision on the availability row: an episode's
+`episode_availability.released_at` is set when it was recorded as a release
+(seeded library, inside the window), even while release events are turned off,
+and stays empty for back catalog and late matches. A profile that turns on
+`ui.next_up_new_releases_first` (off by default) gets Next Up ranked by the
+later of when it finished a series' previous episode and the `released_at` of
+the next episode (earliest availability row in the libraries the viewer can
+reach), so a caught-up series moves to the front when a new episode or season
+arrives. Changing what counts as a release changes that order too.
 Event kinds:
 
 - `episode` — carries series/episode identity and fans out to interested
@@ -45,17 +62,100 @@ release event's episode key:
 - `next_up` notifies only when the episode is at or beyond the profile's
   `next_expected_episode_key`.
 - Suppress when `last_notified_episode_key >= episode_key`.
+- `continue_watching` and `next_up` follow Home. The interest recompute
+  clears them for a series the profile removed from that surface:
+  - An active series drop clears both until the profile watches the series
+    again.
+  - A per-card Continue Watching dismissal clears `continue_watching` while
+    the dismissed episode's progress is unchanged. As on Home, an in-progress
+    episode no longer counts once a later episode of the series was completed
+    more recently.
+  - A per-card Next Up dismissal clears `next_up` while the dismissed episode
+    is still the card Home would show: the first episode after the most
+    recently completed one that has a present file and that the profile has
+    not started (by Home's Postgres progress test, or by the profile's own
+    store).
+
+  Favorites and watchlist are unaffected. The progression cursor is kept, so
+  `next_up` resumes from the right episode once a removal lapses. Every
+  removal or restore queues a recompute, and a second one ten minutes later.
+  Resuming playback can lift a removal without changing any progress state,
+  so a progress write queues one too when it is the row's first write since
+  the profile's last Home change on this node, or when it lands more than
+  ten minutes after the row's stamp, by its own stamp or by the clock (a new
+  watch session, or a late import).
+
+  The Home-change marker and the second recompute live in the memory of the
+  node that handled the removal. A resume handled by another node within ten
+  minutes waits for that second recompute, and if the node restarts first,
+  for the daily interest rebuild. A release fanned out in that window is
+  judged on the stale interest. Evaluating Home removals at fanout time would
+  close the gap.
+- A series the profile muted is a hard gate too. `ListActiveBySeries`, the
+  query that loads a release's candidate recipients, anti-joins
+  `profile_series_notification_mutes`, so a muting profile is never a
+  candidate: no delivery row is created and no channel sees the event. The
+  check costs one index probe per candidate inside that query, and it runs
+  again when fanout re-reads the candidates under the inbox locks. A mute
+  committed after that second read is like a preference change made just
+  after the delivery. Muting writes no interest row: the mute lives in its own
+  table keyed by account, profile, and series, because interest rows are
+  recomputed per library and pruned once their reasons go, and a mute lasts
+  until the profile unmutes. The account is part of the key because profile
+  IDs, such as the legacy `default`, repeat across accounts. A muted
+  profile's notification cursor does not move. The mute is read when fanout
+  evaluates a release, not when the episode arrives: unmuting does not
+  announce episodes fanout already evaluated during the mute, since their
+  release events are processed, but an event still inside the settle delay at
+  unmute is fanned out to the profile. No suppression state is kept per
+  release; the window is the settle delay plus one claim pass, and it applies
+  symmetrically to a mute made just after a release. A mute follows its series through a
+  catalog merge or split like other per-profile series state, and profile
+  deletion removes it.
 - Profile-level notification preferences are a hard gate: a reason disabled
   in preferences can never match, so no delivery row is created and no
   channel — including webhooks — ever sees the event. Per-webhook reason
   filters can only narrow further, never re-enable.
 
 Multiple matching reasons produce one delivery with merged reason flags.
-Deliveries are deduplicated per `(profile, release event)` and, for
-`episode.available`, per `(profile, episode)` across libraries, so
+Deliveries are deduplicated per `(account, profile, release event)` and, for
+`episode.available`, per `(account, profile, episode)` across libraries, so
 dual-quality library setups notify at most once. Reprocessing an event is
 idempotent.
 
+A profile ID is unique only within its account: every account from before
+profiles has a profile named `default`. Interest rows, preferences, mutes,
+the delivery dedupe keys, and every inbox read, count, and mark-read are
+therefore keyed by account and profile, and profile deletion removes those
+for the deleted profile's account only. The email channel reads a profile's
+deliveries on the account that owns its email settings. Still keyed by
+profile ID alone: the inbox clock (`notification_inbox_clocks`), which only
+orders inserts, so two accounts' same-ID profiles share it and serialize
+their inserts without changing either inbox's order; and the email settings,
+push devices, web push subscriptions, and webhooks.
+
+The notified-series list (`GET /api/v2/notifications/series`) shows a profile
+the same index fanout evaluates, plus the series it muted. `ActiveReasons` is
+the event-independent half of these rules, shared by fanout and the list, so
+the two cannot disagree about which reasons a preference silences; a muted
+series keeps its active reasons on the list but does not notify. The list filters series through the
+catalog's card access check rather than fanout's per-library one, and it leaves
+out the per-episode checks (Next Up's expected episode and the
+already-notified cursor), which depend on the episode that arrives.
+
+## Release-event retention
+
+Release events and inbox deliveries have independent lifetimes. Pruning an old
+release event clears `notification_deliveries.release_event_id` through its
+`ON DELETE SET NULL` foreign key and retains the delivery. An `episode.available`
+delivery still requires its `library_id`, `series_id` and `episode_id` snapshot;
+its event reference is optional. Event pruning must not delete inbox rows or
+relax those snapshot requirements.
+
+The constraint repair preserves existing deliveries. Its rollback restores the
+previous constraint only if every episode delivery still has an event reference;
+otherwise PostgreSQL rejects the rollback atomically. It never deletes detached
+inbox rows to make rollback possible.
 ## Request notifications
 
 Request lifecycle deliveries (`request.fulfilled`, `request.approved`,

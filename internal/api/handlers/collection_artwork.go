@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/artworkkey"
+	"github.com/Silo-Server/silo-server/internal/artworkurl"
 	"github.com/Silo-Server/silo-server/internal/blobstore"
 	"github.com/Silo-Server/silo-server/internal/catalog"
 	"github.com/Silo-Server/silo-server/internal/collage"
@@ -113,6 +114,21 @@ func readCollectionImageMultipart(r *http.Request, fieldName string) ([]byte, er
 	return data, nil
 }
 
+// invalidCollectionImage reports artwork the caller supplied that Silo cannot
+// use. The v2 routes render the 400 as a validation problem instead of a 500.
+func invalidCollectionImage(message string, cause error) *APIError {
+	return &APIError{Status: http.StatusBadRequest, Code: policyErrorBadRequest, Message: message, cause: cause}
+}
+
+// collectionArtworkError keeps a client-facing artwork error and hides any
+// other failure behind a 500 with the given message.
+func collectionArtworkError(err error, message string) error {
+	if apiErr, ok := errors.AsType[*APIError](err); ok && apiErr.Status < http.StatusInternalServerError {
+		return apiErr
+	}
+	return apiError(http.StatusInternalServerError, "internal_error", message)
+}
+
 // downloadCollectionImageURL fetches an image from an http(s) URL with size
 // limits. The address policy lives in client's netguard transport
 // (newCollectionImageClient), and ctx decides whether the local network is
@@ -124,10 +140,13 @@ func downloadCollectionImageURL(ctx context.Context, client *http.Client, rawURL
 	}
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
-		return nil, fmt.Errorf("invalid URL: %w", err)
+		return nil, invalidCollectionImage("The image source URL is not valid.", err)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, fmt.Errorf("image source URL must use http or https")
+		return nil, invalidCollectionImage("The image source URL must use http or https.", nil)
+	}
+	if parsed.Hostname() == "" {
+		return nil, invalidCollectionImage("The image source URL is not valid.", nil)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
@@ -143,17 +162,22 @@ func downloadCollectionImageURL(ctx context.Context, client *http.Client, rawURL
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("image source returned status %d", resp.StatusCode)
+		// The client message omits the upstream status so the route does not
+		// report how an arbitrary URL answered; keep it for operators. The
+		// host is the one that answered, after any redirects.
+		slog.InfoContext(ctx, "collection artwork source did not return an image", "component", "api",
+			"host", resp.Request.URL.Host, "status", resp.StatusCode)
+		return nil, invalidCollectionImage("The image source did not return an image.", nil)
 	}
 	if resp.ContentLength > collectionImageMaxBytes {
-		return nil, fmt.Errorf("image exceeds 10 MB limit")
+		return nil, invalidCollectionImage("The image exceeds the 10 MB limit.", nil)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, collectionImageMaxBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading image response: %w", err)
 	}
 	if len(data) > collectionImageMaxBytes {
-		return nil, fmt.Errorf("image exceeds 10 MB limit")
+		return nil, invalidCollectionImage("The image exceeds the 10 MB limit.", nil)
 	}
 	return data, nil
 }
@@ -206,7 +230,13 @@ func putCollectionImageVariants(
 	if store == nil {
 		return "", "", fmt.Errorf("image upload requires configured S3 storage")
 	}
+	// Bytes libvips cannot read, and JPEG or PNG pixel data that does not
+	// decode, are the caller's artwork problem; any other failure stays a
+	// server error.
 	result, err := imageutil.GenerateVariants(fileData, widths)
+	if err != nil && (errors.Is(err, imageutil.ErrInvalidImage) || imageutil.PixelDataUndecodable(fileData)) {
+		return "", "", invalidCollectionImage("The file is not a supported image.", err)
+	}
 	if err != nil {
 		return "", "", fmt.Errorf("generating image variants: %w", err)
 	}
@@ -443,15 +473,15 @@ func (c collectionCollageComposer) CollectionCollagePath(collectionID, key strin
 }
 
 // fetchImage downloads an image from a resolved URL. The URL is a catalog
-// title's poster as the server resolved it, usually from its own artwork
-// storage, which may be on the local network; no request supplies it. The
-// fetch is therefore trusted with the local network, and netguard still
-// refuses blocked addresses.
+// title's poster as the server resolved it: a direct URL to the artwork
+// store, which may be on the local network, or a metadata provider's URL that
+// was not cached, which is untrusted. artworkurl.FetchContext tells them
+// apart, and netguard refuses blocked addresses either way.
 func (c collectionCollageComposer) fetchImage(ctx context.Context, imageURL string) ([]byte, error) {
 	if c.httpClient == nil {
 		return nil, errors.New("collage downloads have no HTTP client")
 	}
-	req, err := http.NewRequestWithContext(netguard.WithPrivateAccess(ctx), http.MethodGet, imageURL, nil)
+	req, err := http.NewRequestWithContext(artworkurl.FetchContext(ctx, c.store, imageURL), http.MethodGet, imageURL, nil)
 	if err != nil {
 		return nil, err
 	}

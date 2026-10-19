@@ -7,6 +7,7 @@ import golden from "@/lib/homeRows/payloads.golden.json";
 import { expectPhoneLayout, stubPhone } from "@/components/homeRows/phoneLayout.test-support";
 import { recipeCatalogFixture } from "@/lib/homeRows/recipeCatalogFixture.test-support";
 import { V2ProblemError } from "@/api/v2/request";
+import seasonalThemes from "../../../contracts/api/v2/fixtures/list_seasonal_themes_ok.json";
 import AdminHomeRows from "./AdminHomeRows";
 
 const mocks = vi.hoisted(() => ({
@@ -34,6 +35,10 @@ vi.mock("@/hooks/queries/useAllUserCollections", () => ({
 vi.mock("@/lib/recipes", async () => ({
   ...(await vi.importActual<typeof import("@/lib/recipes")>("@/lib/recipes")),
   fetchRecipeCatalog: async () => recipeCatalogFixture,
+}));
+vi.mock("@/hooks/queries/personSearch", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/queries/personSearch")>()),
+  useExtendedQueryRules: () => true,
 }));
 vi.mock("@/hooks/queries/ratingsCapability", () => ({
   useShownRatingSources: () => new Set(["imdb", "tmdb"]),
@@ -136,6 +141,7 @@ beforeEach(() => {
     args.onResponse?.(new Response(null, { headers: { ETag: '"rev-1"' } }));
     const scope = args.query?.scope ?? "home";
     const here = rows.filter((row) => row.scope === scope);
+    if (operation === "GET /api/v2/sections/seasonal-themes") return seasonalThemes;
     if (operation === "GET /api/v2/admin/sections/capabilities")
       return { available: true, reset_profiles: false, preview };
     if (operation === "GET /api/v2/admin/sections/order")
@@ -441,30 +447,18 @@ describe("Edit row", () => {
     });
   });
 
-  it("shows Continue Reading rows without a variant, and legacy Trakt rows without Change", async () => {
+  it("shows Continue Reading rows without a variant", async () => {
     rows[1] = {
       ...rows[1]!,
       title: "Keep reading",
       section_type: "continue_watching",
       config: { continue_type: "reading" },
     };
-    rows.push(
-      stored("t", {
-        position: 5,
-        title: "Trakt trending",
-        section_type: "trending_discover",
-        config: { source: "trakt", window: "week" },
-      }),
-    );
     await setup();
-    let dialog = await editRow("Keep reading");
+    const dialog = await editRow("Keep reading");
     expect(within(dialog).getByText("Continue Reading")).toBeInTheDocument();
     expect(within(dialog).queryByRole("radiogroup")).toBeNull();
     expect(within(dialog).getByRole("button", { name: /^Change/ })).toBeInTheDocument();
-    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    dialog = await editRow("Trakt trending");
-    expect(within(dialog).queryByRole("radiogroup")).toBeNull();
-    expect(within(dialog).queryByRole("button", { name: /^Change/ })).toBeNull();
   });
 
   it("changes what a row shows through the picker and saves the new kind's settings", async () => {
@@ -478,7 +472,10 @@ describe("Edit row", () => {
     const picker = await screen.findByRole("dialog", { name: "Change what this row shows" });
     await userEvent.click(within(picker).getByRole("button", { name: "Mood picks, Mind-bending" }));
     const form = await screen.findByRole("dialog", { name: "Edit row" });
-    expect(within(form).getByRole("radio", { name: "Mind-bending" })).toBeChecked();
+    const mindBending = within(form).getByRole("radio", { name: /^Mind-bending/ });
+    expect(mindBending).toBeChecked();
+    // The mood's card states its rule, from the server's preset description.
+    expect(mindBending).toHaveTextContent("Science Fiction or Mystery, rated 7.0+ on TMDB");
     await userEvent.click(within(form).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(writes).toHaveLength(1));
     expect(writes[0]!.args.body).toMatchObject({
